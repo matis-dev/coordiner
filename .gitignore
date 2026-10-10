@@ -1,0 +1,14 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Extension packaging and test host
+*.vsix
+.vscode-test/
+
+# Logs
+npm-debug.log*
+*.log
+
+# Personal Claude Code settings (shared settings and PROJECT-PROFILE.md stay tracked)
+.claude/settings.local.json

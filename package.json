@@ -1,0 +1,106 @@
+{
+  "name": "coordiner",
+  "displayName": "Coordiner",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "local",
+  "description": "Drives the m-skills story flow through headless Claude Code sessions, up to the commit brief.",
+  "type": "module",
+  "main": "./dist/extension.js",
+  "engines": {
+    "node": ">=24",
+    "vscode": "^1.135.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Coordiner runs Claude sessions and git commands in the open folder."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "coordiner.checkEnvironment",
+        "title": "Coordiner: Check Environment"
+      },
+      {
+        "command": "coordiner.runStory",
+        "title": "Coordiner: Run Story…"
+      },
+      {
+        "command": "coordiner.stopRun",
+        "title": "Coordiner: Stop Run"
+      }
+    ],
+    "configuration": {
+      "title": "Coordiner",
+      "properties": {
+        "coordiner.models.strong": {
+          "type": "string",
+          "default": "claude-opus-5-5",
+          "scope": "application",
+          "description": "Full model ID for the strong tier (planner Heavy)."
+        },
+        "coordiner.models.medium": {
+          "type": "string",
+          "default": "claude-sonnet-5-5",
+          "scope": "application",
+          "description": "Full model ID for the medium tier (planner Standard)."
+        },
+        "coordiner.models.weak": {
+          "type": "string",
+          "default": "claude-haiku-5-5",
+          "scope": "application",
+          "description": "Full model ID for the weak tier (planner Light)."
+        },
+        "coordiner.extraPath": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Folder to add to PATH for Claude sessions, e.g. the folder that contains node when the editor was started without it."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "coordiner",
+          "title": "Coordiner",
+          "icon": "media/coordiner.svg"
+        }
+      ]
+    },
+    "views": {
+      "coordiner": [
+        {
+          "id": "coordiner.run",
+          "name": "Run"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "coordiner.run",
+        "contents": "No run yet.\n[Run Story…](command:coordiner.runStory)"
+      }
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.ts --test-coverage-exclude=src/**/*.test.ts \"src/**/*.test.ts\"",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.292"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "21.2.3",
+    "@commitlint/config-conventional": "21.2.3",
+    "@types/node": "24.19.1",
+    "@types/vscode": "1.134.0",
+    "husky": "9.1.7",
+    "typescript": "7.0.2"
+  }
+}
