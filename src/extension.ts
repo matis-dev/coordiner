@@ -1,17 +1,19 @@
 import { execFile } from "node:child_process";
-import { access, readdir, readFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { parseStories, slugify, type Story } from "./backlog.ts";
 import { checkEnvironment, sessionEnv, type Models } from "./environment.ts";
+import { createJournal, journalFileName } from "./journal.ts";
 import { UNATTENDED_NOTE } from "./protocol.ts";
-import { runStorySession, type Outcome, type RunEvent } from "./run.ts";
+import { remainingCommands, runStory, type Outcome, type RunEvent } from "./run.ts";
 import { runTurn } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
 import { plain } from "./text.ts";
 import { unattendedCanUseTool } from "./unattended.ts";
 import { stepItem, type StepView } from "./view.ts";
-import { addWorktree, inspectRepo, type Exec } from "./worktree.ts";
+import { addWorktree, inspectRepo, prepareReview, type Exec } from "./worktree.ts";
 
 const run = promisify(execFile);
 const exec: Exec = (file, args, options) => run(file, args, options);
@@ -102,14 +104,26 @@ async function pickStory(): Promise<Story | undefined> {
   return picked?.story;
 }
 
-async function announce(outcome: Outcome, heading: string, worktree: string, output: vscode.OutputChannel): Promise<void> {
+// The commit brief is model text: it is shown, never offered as a command to copy or run.
+async function announce(outcome: Outcome, heading: string, worktree: string, labels: string[], output: vscode.OutputChannel): Promise<void> {
   const name = plain(heading);
+  if ((outcome.status === "halted" || outcome.status === "failed") && outcome.sessionId) {
+    output.appendLine(`To take over this session, run in ${worktree}: claude --resume ${outcome.sessionId}`);
+  }
+  const remaining = remainingCommands(outcome, labels);
+  if (remaining.length > 0) output.appendLine(`To finish by hand, run these in a Claude Code session in ${worktree}: ${remaining.join(" → ")}`);
   switch (outcome.status) {
     case "done":
-      await vscode.window.showInformationMessage(`Coordiner: ${name} is finished. Review the worktree at ${worktree}.`);
+      output.appendLine("Commit brief:");
+      output.appendLine(plain(outcome.text) || "(the session returned no commit brief)");
+      output.show(true);
+      await vscode.window.showInformationMessage(`Coordiner: ${name} is finished. The commit brief is in the Coordiner output; review the worktree at ${worktree}.`);
+      return;
+    case "no-changes":
+      await vscode.window.showInformationMessage(`Coordiner: ${name} finished without changing any file, so there is nothing to review.`);
       return;
     case "halted":
-      await vscode.window.showWarningMessage(`Coordiner: ${name} halted: ${plain(outcome.reason)}`);
+      await vscode.window.showWarningMessage(`Coordiner: ${name} halted: ${plain(outcome.reason)} See the Coordiner output.`);
       return;
     case "stopped":
       await vscode.window.showInformationMessage(`Coordiner: ${name} was stopped.`);
@@ -118,12 +132,11 @@ async function announce(outcome: Outcome, heading: string, worktree: string, out
       await vscode.window.showErrorMessage(`Coordiner: ${plain(outcome.reason)}`);
       return;
     case "failed":
-      if (outcome.sessionId) output.appendLine(`To take over this session: claude --resume ${outcome.sessionId}`);
       await vscode.window.showErrorMessage(`Coordiner: ${name} failed: ${plain(outcome.error)} See the Coordiner output.`);
   }
 }
 
-async function runStoryCommand(state: { abort?: AbortController }, provider: StepsProvider, reveal: (step: StepView) => void, output: vscode.OutputChannel): Promise<void> {
+async function runStoryCommand(state: { abort?: AbortController }, provider: StepsProvider, reveal: (step: StepView) => void, output: vscode.OutputChannel, storage: vscode.Uri): Promise<void> {
   if (state.abort) {
     await vscode.window.showWarningMessage("Coordiner: a run is already in progress. Stop it first.");
     return;
@@ -154,6 +167,7 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
   const setup = proposeSetup(await readdir(repo.root));
   const detail = [
     "Questions are answered with the Recommended option and logged. Anything auto mode will not approve is denied.",
+    "After the work, a fresh session reviews it, fixes the findings and writes the commit brief.",
     "Keep this computer awake: the run stops if VS Code closes.",
     repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
     setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
@@ -170,10 +184,24 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
     return;
   }
   output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
+  const models = readModels(config);
+  const journalDir = join(storage.fsPath, "journal");
+  const journalFile = join(journalDir, journalFileName(slug, new Date()));
+  const journal = createJournal(
+    async (line) => {
+      await mkdir(journalDir, { recursive: true });
+      await appendFile(journalFile, line, "utf8");
+    },
+    () => new Date(),
+    (error) => output.appendLine(`Journal not written to ${journalFile}: ${error instanceof Error ? error.message : String(error)}`),
+  );
+  void journal({ type: "run-started", story: story.heading, repo: repo.root, worktree: added.path, branch: added.branch, models });
+  output.appendLine(`Journal: ${journalFile}`);
   if (setup) {
     const result = await runSetup(setup, added.path, env, exec);
     if (!result.ok) {
       output.appendLine(result.detail);
+      void journal({ type: "outcome", outcome: { status: "failed", error: result.message } });
       await vscode.window.showErrorMessage(`Coordiner: ${result.message}`);
       return;
     }
@@ -182,8 +210,12 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
   const abort = new AbortController();
   state.abort = abort;
   provider.update([]);
-  const log = (line: string) => output.appendLine(line);
+  const log = (line: string) => {
+    output.appendLine(line);
+    void journal({ type: "log", line });
+  };
   const emit = (event: RunEvent) => {
+    void journal(event);
     if (event.type === "step-started") {
       provider.update([...provider.steps, { label: event.label, tier: event.tier, model: event.model, status: "running" }]);
       reveal(provider.steps[event.index]!);
@@ -193,16 +225,18 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
   };
   let outcome: Outcome;
   try {
-    outcome = await runStorySession(story, {
+    outcome = await runStory(story, {
       runTurn: (request) => runTurn({ ...request, cwd: added.path, env, canUseTool: unattendedCanUseTool(log), systemPromptAppend: UNATTENDED_NOTE, signal: abort.signal }),
-      models: readModels(config),
+      models,
       emit,
       signal: abort.signal,
+      prepareReview: () => prepareReview(added.path, exec),
     });
   } finally {
     state.abort = undefined;
   }
-  await announce(outcome, story.heading, added.path, output);
+  void journal({ type: "outcome", outcome });
+  await announce(outcome, story.heading, added.path, provider.steps.map((step) => step.label), output);
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -217,7 +251,7 @@ export function activate(context: vscode.ExtensionContext): void {
     output,
     view,
     vscode.commands.registerCommand("coordiner.checkEnvironment", () => checkEnvironmentCommand(output)),
-    vscode.commands.registerCommand("coordiner.runStory", () => runStoryCommand(state, provider, reveal, output)),
+    vscode.commands.registerCommand("coordiner.runStory", () => runStoryCommand(state, provider, reveal, output, context.globalStorageUri)),
     vscode.commands.registerCommand("coordiner.stopRun", async () => {
       if (state.abort) state.abort.abort();
       else await vscode.window.showInformationMessage("Coordiner: no run is active.");

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseStatus, tierOf, UNATTENDED_NOTE } from "./protocol.ts";
+import { parseStatus, tierOf, UNATTENDED_NOTE, withoutStatus } from "./protocol.ts";
 
 describe("parseStatus", () => {
   it("reads NEXT, DONE and HALT from the last line", () => {
@@ -36,5 +36,23 @@ describe("tiers", () => {
 describe("UNATTENDED_NOTE", () => {
   it("names every marker the parser accepts", () => {
     for (const marker of ["COORDINER: NEXT", "COORDINER: DONE", "COORDINER: HALT", "(Recommended)"]) assert.match(UNATTENDED_NOTE, new RegExp(marker.replace(/[()]/g, "\\$&")));
+  });
+
+  it("tells the review, fix and history phases how to end", () => {
+    for (const phase of ["Reviewing:", "Fixing findings:", "Rolling history:"]) assert.ok(UNATTENDED_NOTE.includes(phase), phase);
+  });
+});
+
+describe("withoutStatus", () => {
+  it("drops the status line and keeps the text above it", () => {
+    assert.equal(withoutStatus("feat: add login\n\n- form\nCOORDINER: DONE"), "feat: add login\n\n- form");
+  });
+
+  it("ignores trailing blank lines after the status line", () => {
+    assert.equal(withoutStatus("brief\nCOORDINER: DONE\n\n"), "brief");
+  });
+
+  it("returns empty text when there is only a status line", () => {
+    assert.equal(withoutStatus("COORDINER: DONE"), "");
   });
 });

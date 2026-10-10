@@ -24,8 +24,8 @@ export async function addWorktree(root: string, slug: string, deps: { exec: Exec
   const path = join(dirname(root), `${basename(root)}.coordiner`, slug);
 
   const branchExists = await deps.exec("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: root }).then(() => true, () => false);
-  if (branchExists) return { ok: false, reason: `The branch ${branch} already exists. Remove it, or continue the earlier run.` };
-  if (await deps.exists(path)) return { ok: false, reason: `${path} already exists. Remove it, or continue the earlier run.` };
+  if (branchExists) return { ok: false, reason: `The branch ${branch} already exists. Remove it first.` };
+  if (await deps.exists(path)) return { ok: false, reason: `${path} already exists. Remove it first.` };
 
   try {
     await deps.exec("git", ["worktree", "add", "-b", branch, "--", path, "HEAD"], { cwd: root });
@@ -33,4 +33,23 @@ export async function addWorktree(root: string, slug: string, deps: { exec: Exec
     return { ok: false, reason: "Git could not create the worktree.", detail: error instanceof Error ? error.message : String(error) };
   }
   return { ok: true, path, branch };
+}
+
+// More new files than this usually means a dependency folder is missing from .gitignore; raise it if a real story trips it.
+export const MAX_NEW_FILES = 200;
+
+export type ReviewPrep = { kind: "no-changes" } | { kind: "ready"; marked: number } | { kind: "too-many"; count: number } | { kind: "failed"; detail: string };
+
+// The uncommitted review reads `git diff HEAD`, which skips untracked files; intent-to-add makes them part of the diff without staging their content.
+// File names are model-chosen: `--` stops option parsing, `--literal-pathspecs` stops `:!name` or globs from excluding another file.
+export async function prepareReview(path: string, exec: Exec): Promise<ReviewPrep> {
+  try {
+    if ((await exec("git", ["status", "--porcelain"], { cwd: path })).stdout.trim() === "") return { kind: "no-changes" };
+    const files = (await exec("git", ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: path })).stdout.split("\0").filter((f) => f !== "");
+    if (files.length > MAX_NEW_FILES) return { kind: "too-many", count: files.length };
+    if (files.length > 0) await exec("git", ["--literal-pathspecs", "add", "--intent-to-add", "--", ...files], { cwd: path });
+    return { kind: "ready", marked: files.length };
+  } catch (error) {
+    return { kind: "failed", detail: error instanceof Error ? error.message : String(error) };
+  }
 }
