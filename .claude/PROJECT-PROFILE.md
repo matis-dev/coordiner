@@ -9,7 +9,7 @@
 
 - **Project:** coordiner — a VS Code extension that drives the user's m-skills story flow through unattended Claude Code sessions, each story in its own git worktree, from a prepared backlog story up to the commit brief.
 - **Stack:** TypeScript on Node ≥24, compiled to ESM JavaScript in `dist/` by tsc (no bundler), running in the VS Code extension host (VSCodium 1.135, a flatpak on the user's machine). Built on the Claude Agent SDK, exact-pinned. Only dependency added beyond it: the vscode type definitions (dev).
-- **Package manager:** npm
+- **Package manager:** pnpm 10 (`packageManager` in package.json; lockfile `pnpm-lock.yaml`)
 - **Repo shape:** single package; this folder is not a git repository yet.
 - **Install shape:** run from source through the `Run Coordiner extension` launch config (F5). Packaging as a `.vsix` is a later slice.
 - **Node on PATH:** the flatpak editor has no `node`; gates need `PATH=$HOME/.nvm/versions/node/v24.21.0/bin:$PATH`, and sessions get it through the `coordiner.extraPath` setting.
@@ -20,18 +20,18 @@
 |---|---|---|
 | `<lint>` | n-a | decided: strict `tsc` stands in for a small personal tool — revisit if contributors join |
 | `<format>` | n-a | none chosen |
-| `<typecheck>` | `npm run typecheck` | `tsc --noEmit`, strict; includes the vscode types |
-| `<test>` | `npm test` | `node --test`, picks up `src/**/*.test.ts` |
-| `<build>` | `npm run build` | `tsc -p tsconfig.build.json`, emits `dist/` |
+| `<typecheck>` | `pnpm typecheck` | `tsc --noEmit`, strict; includes the vscode types |
+| `<test>` | `pnpm test` | `node --test`, picks up `src/**/*.test.ts` |
+| `<build>` | `pnpm build` | `tsc -p tsconfig.build.json`, emits `dist/` |
 | `<e2e>` | n-a | no automated extension-host tests yet — the F5 smoke is manual |
 | `<visual>` | n-a | built-in VS Code UI only, nothing custom rendered |
 | `<a11y>` | n-a | built-in tree view, quick picks and notifications; revisit with the first webview |
-| `<audit>` | `npm audit` | |
-| `<run>` | F5, launch config `Run Coordiner extension` | needs `npm run build` first |
+| `<audit>` | `pnpm audit` | |
+| `<run>` | F5, launch config `Run Coordiner extension` | needs `pnpm build` first |
 
-Coverage: `npm run coverage` (`node --test --experimental-test-coverage`, src only).
+Coverage: `pnpm coverage` (`node --test --experimental-test-coverage`, src only).
 
-**Gate order:** `npm run typecheck` → `npm test` → `npm run coverage` → `npm run build` → `npm audit`
+**Gate order:** `pnpm typecheck` → `pnpm test` → `pnpm coverage` → `pnpm build` → `pnpm audit`
 
 ## Conventions
 
@@ -54,7 +54,7 @@ Coverage: `npm run coverage` (`node --test --experimental-test-coverage`, src on
 - **Unattended session permissions:** `permissionMode: "auto"`; anything auto mode will not approve is denied and logged (no one is there to answer). Questions get the Recommended option and are logged.
 - **Fail-closed rule:** refuse to run a turn if the m-skills commands are absent from the init message (no plugin = no git-guard hook) or if the session runs a different model than requested.
 - **Standard tracked:** OWASP Top 10:2025
-- **Audit gate:** `npm audit`
+- **Audit gate:** `pnpm audit`
 
 ## Distribution
 
@@ -65,7 +65,7 @@ Coverage: `npm run coverage` (`node --test --experimental-test-coverage`, src on
 | Doc | Path | Notes |
 |---|---|---|
 | Changelog | `CHANGELOG.md` | the one changelog; a **Current state** baseline at the top, then dated entries newest first |
-| README | n-a | none yet |
+| README | `README.md` | prerequisites, run from source (F5), the develop commands |
 | Architecture / deployment / API / tests docs | n-a | none; the profile carries those facts |
 
 ## Commit Convention

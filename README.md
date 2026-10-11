@@ -7,7 +7,7 @@ Coordiner is a personal tool. It runs from source in an Extension Development Ho
 ## Prerequisites
 
 - **VS Code or VSCodium 1.135 or newer** (`engines.vscode` in [package.json](package.json)).
-- **Node.js 24 or newer** and npm.
+- **Node.js 24 or newer** and **pnpm 10** (pinned in `packageManager` in [package.json](package.json)); `corepack enable` provides it.
 - **git**.
 - **Claude Code, signed in on this machine.** Sessions use your existing Claude Code login.
 - **The m-skills plugin, enabled in your user Claude Code settings.** Coordiner refuses to start a session unless these commands are available: `m-skills:planning-architect`, `m-skills:implementing-architect`, `m-skills:code-review-architect-uncommitted`, `m-skills:rolling-history`.
@@ -17,11 +17,11 @@ Coordiner is a personal tool. It runs from source in an Extension Development Ho
 1. Install the dependencies and build:
 
    ```sh
-   npm ci
-   npm run build
+   pnpm install --frozen-lockfile
+   pnpm build
    ```
 
-   The build writes the extension to `dist/`. Run `npm run build` again after every source change; the launch config does not build for you.
+   The build writes the extension to `dist/`. Run `pnpm build` again after every source change; the launch config does not build for you.
 
 2. Open this folder in VS Code and press **F5** (launch config **Run Coordiner extension**). A second window opens, titled **Extension Development Host**, with Coordiner loaded.
 
@@ -73,9 +73,9 @@ For what each step does, the unattended rules, and where the run journal is kept
 
 | Task | Command |
 |---|---|
-| Type-check | `npm run typecheck` |
-| Test | `npm test` |
-| Test with coverage | `npm run coverage` |
-| Build | `npm run build` |
+| Type-check | `pnpm typecheck` |
+| Test | `pnpm test` |
+| Test with coverage | `pnpm coverage` |
+| Build | `pnpm build` |
 
-Commit messages are checked by commitlint ([commitlint.config.js](commitlint.config.js)) through a husky hook, which `npm ci` installs.
+Commit messages are checked by commitlint ([commitlint.config.js](commitlint.config.js)) through a husky hook, which `pnpm install` installs.

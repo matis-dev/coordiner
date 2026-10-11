@@ -7,7 +7,7 @@ dist/
 .vscode-test/
 
 # Logs
-npm-debug.log*
+pnpm-debug.log*
 *.log
 
 # Personal Claude Code settings (shared settings and PROJECT-PROFILE.md stay tracked)
