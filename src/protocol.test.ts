@@ -38,8 +38,8 @@ describe("UNATTENDED_NOTE", () => {
     for (const marker of ["COORDINER: NEXT", "COORDINER: DONE", "COORDINER: HALT", "(Recommended)"]) assert.match(UNATTENDED_NOTE, new RegExp(marker.replace(/[()]/g, "\\$&")));
   });
 
-  it("tells the review, fix and history phases how to end", () => {
-    for (const phase of ["Reviewing:", "Fixing findings:", "Rolling history:"]) assert.ok(UNATTENDED_NOTE.includes(phase), phase);
+  it("tells the review, fix and history phases, and any other skill, how to end", () => {
+    for (const phase of ["Reviewing:", "Fixing findings:", "Rolling history:", "Any other skill:"]) assert.ok(UNATTENDED_NOTE.includes(phase), phase);
   });
 });
 

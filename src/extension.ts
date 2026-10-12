@@ -1,15 +1,21 @@
 import { execFile } from "node:child_process";
-import { access, appendFile, mkdir, readdir, readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { parseStories, slugify, type Story } from "./backlog.ts";
+import { MSKILLS_URL, parseChains, requiredSkills, runnable, serializeChains, TEMPLATES, usesStory, type Chain } from "./chains.ts";
+import { editorHtml } from "./editor-html.ts";
+import { runReason } from "./editor-logic.ts";
+import { parseEditorMessage, type EditorState } from "./editor-protocol.ts";
 import { checkEnvironment, sessionEnv, type Models } from "./environment.ts";
 import { createJournal, journalFileName } from "./journal.ts";
 import { UNATTENDED_NOTE } from "./protocol.ts";
-import { remainingCommands, runStory, type Outcome, type RunEvent } from "./run.ts";
-import { runTurn } from "./session.ts";
+import { fillStory, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
+import { listCommands, runTurn } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
+import { mskillsPresent, palette, type PaletteEntry } from "./skills.ts";
 import { plain } from "./text.ts";
 import { unattendedCanUseTool } from "./unattended.ts";
 import { stepItem, type StepView } from "./view.ts";
@@ -56,6 +62,7 @@ function readModels(config: vscode.WorkspaceConfiguration): Models {
 
 const sessionEnvFor = (config: vscode.WorkspaceConfiguration) => sessionEnv(process.env, config.get<string>("extraPath", ""));
 const openFolder = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+const noTools = async () => ({ behavior: "deny" as const, message: "This check uses no tools." });
 
 async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<void> {
   const cwd = openFolder();
@@ -75,7 +82,7 @@ async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<vo
         models: readModels(config),
         cwd,
         env: sessionEnvFor(config),
-        canUseTool: async () => ({ behavior: "deny", message: "Check Environment uses no tools." }),
+        canUseTool: noTools,
       }),
   );
   output.appendLine("extension activation: ok");
@@ -104,14 +111,31 @@ async function pickStory(): Promise<Story | undefined> {
   return picked?.story;
 }
 
+// A chain that never uses {{story}} needs only a name, which becomes its worktree and branch.
+async function nameRun(): Promise<Story | undefined> {
+  const name = await vscode.window.showInputBox({
+    title: "Name this run",
+    prompt: "The name becomes the worktree folder and the coordiner/<name> branch.",
+    validateInput: (value) => {
+      try {
+        slugify(value);
+        return undefined;
+      } catch {
+        return "Use at least one letter or digit.";
+      }
+    },
+  });
+  return name === undefined ? undefined : { heading: name.trim(), body: "" };
+}
+
 // The commit brief is model text: it is shown, never offered as a command to copy or run.
-async function announce(outcome: Outcome, heading: string, worktree: string, labels: string[], output: vscode.OutputChannel): Promise<void> {
+async function announce(outcome: Outcome, heading: string, worktree: string, chain: Chain, output: vscode.OutputChannel): Promise<void> {
   const name = plain(heading);
   if ((outcome.status === "halted" || outcome.status === "failed") && outcome.sessionId) {
     output.appendLine(`To take over this session, run in ${worktree}: claude --resume ${outcome.sessionId}`);
   }
-  const remaining = remainingCommands(outcome, labels);
-  if (remaining.length > 0) output.appendLine(`To finish by hand, run these in a Claude Code session in ${worktree}: ${remaining.join(" → ")}`);
+  const remaining = remainingCommands(chain, outcome);
+  if (remaining.length > 0) output.appendLine(`To finish by hand, run these in a Claude Code session in ${worktree}: ${remaining.map(plain).join(" → ")}`);
   switch (outcome.status) {
     case "done":
       output.appendLine("Commit brief:");
@@ -136,9 +160,24 @@ async function announce(outcome: Outcome, heading: string, worktree: string, lab
   }
 }
 
-async function runStoryCommand(state: { abort?: AbortController }, provider: StepsProvider, reveal: (step: StepView) => void, output: vscode.OutputChannel, storage: vscode.Uri): Promise<void> {
+type RunContext = {
+  state: { abort?: AbortController };
+  provider: StepsProvider;
+  reveal: (step: StepView) => void;
+  output: vscode.OutputChannel;
+  storage: vscode.Uri;
+  onRunChange: () => void;
+};
+
+async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
+  const { state, provider, reveal, output, storage } = ctx;
   if (state.abort) {
     await vscode.window.showWarningMessage("Coordiner: a run is already in progress. Stop it first.");
+    return;
+  }
+  const check = runnable(chain);
+  if (!check.ok) {
+    await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${check.reason}`);
     return;
   }
   const folder = openFolder();
@@ -153,8 +192,13 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
     await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
     return;
   }
-  const story = await pickStory();
+  const story = usesStory(chain) ? await pickStory() : await nameRun();
   if (!story) return;
+  const filled = fillStory(chain, story);
+  if (!filled.ok) {
+    await vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
+    return;
+  }
   let slug;
   try {
     slug = slugify(story.heading);
@@ -165,14 +209,15 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
 
   // The setup command comes from the lockfile, never from the repo's own files; it is shown on every run.
   const setup = proposeSetup(await readdir(repo.root));
+  const sessions = chain.sessions.map((s, i) => `${i + 1}. ${s.cards.map((c) => plain(c.label)).join(" → ")}`).join("\n");
   const detail = [
-    "Questions are answered with the Recommended option and logged. Anything auto mode will not approve is denied.",
-    "After the work, a fresh session reviews it, fixes the findings and writes the commit brief.",
+    "Questions are answered with the Recommended option and logged. Anything auto mode will not approve is denied, and so is any git write or GitHub publish.",
+    `Each session starts a fresh conversation:\n${sessions}`,
     "Keep this computer awake: the run stops if VS Code closes.",
     repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
     setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
   ].filter(Boolean).join("\n\n");
-  const choice = await vscode.window.showWarningMessage(`Run "${plain(story.heading)}" unattended?`, { modal: true, detail }, "Run");
+  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(story.heading)}" unattended?`, { modal: true, detail }, "Run");
   if (choice !== "Run") return;
 
   const config = vscode.workspace.getConfiguration("coordiner");
@@ -195,7 +240,7 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
     () => new Date(),
     (error) => output.appendLine(`Journal not written to ${journalFile}: ${error instanceof Error ? error.message : String(error)}`),
   );
-  void journal({ type: "run-started", story: story.heading, repo: repo.root, worktree: added.path, branch: added.branch, models });
+  void journal({ type: "run-started", chain: chain.name, story: story.heading, repo: repo.root, worktree: added.path, branch: added.branch, models });
   output.appendLine(`Journal: ${journalFile}`);
   if (setup) {
     const result = await runSetup(setup, added.path, env, exec);
@@ -209,6 +254,7 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
 
   const abort = new AbortController();
   state.abort = abort;
+  ctx.onRunChange();
   provider.update([]);
   const log = (line: string) => {
     output.appendLine(line);
@@ -223,10 +269,12 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
     }
     provider.update(provider.steps.map((step, i) => (i === event.index ? { ...step, status: event.status, detail: event.detail } : step)));
   };
+  const required = requiredSkills(chain);
   let outcome: Outcome;
   try {
-    outcome = await runStory(story, {
-      runTurn: (request) => runTurn({ ...request, cwd: added.path, env, canUseTool: unattendedCanUseTool(log), systemPromptAppend: UNATTENDED_NOTE, signal: abort.signal }),
+    outcome = await runChain(filled.chain, {
+      runTurn: (request) =>
+        runTurn({ ...request, cwd: added.path, env, requiredCommands: required, canUseTool: unattendedCanUseTool(log), systemPromptAppend: UNATTENDED_NOTE, signal: abort.signal, onGuard: log }),
       models,
       emit,
       signal: abort.signal,
@@ -234,9 +282,189 @@ async function runStoryCommand(state: { abort?: AbortController }, provider: Ste
     });
   } finally {
     state.abort = undefined;
+    ctx.onRunChange();
   }
   void journal({ type: "outcome", outcome });
-  await announce(outcome, story.heading, added.path, provider.steps.map((step) => step.label), output);
+  await announce(outcome, story.heading, added.path, filled.chain, output);
+}
+
+// ── Chains editor ─────────────────────────────────────────────────────────────
+
+class ChainsEditor {
+  private panel?: vscode.WebviewPanel;
+  private chains: Chain[] = [];
+  private storageError?: string;
+  // Set when the stored file could neither be read nor moved aside; saving then would overwrite it.
+  private blocked = false;
+  private palette?: PaletteEntry[];
+  private paletteError?: string;
+  private mskills?: boolean;
+  private loaded = false;
+  private saving: Promise<void> = Promise.resolve();
+  private pendingSaves = 0;
+  private readonly extension: vscode.Uri;
+  private readonly file: string;
+  private readonly ctx: RunContext;
+
+  constructor(extension: vscode.Uri, file: string, ctx: RunContext) {
+    this.extension = extension;
+    this.file = file;
+    this.ctx = ctx;
+  }
+
+  async open(): Promise<void> {
+    if (this.panel) {
+      this.panel.reveal();
+      return;
+    }
+    const media = vscode.Uri.joinPath(this.extension, "media");
+    const dist = vscode.Uri.joinPath(this.extension, "dist");
+    const panel = vscode.window.createWebviewPanel("coordiner.chains", "Coordiner Chains", vscode.ViewColumn.Active, { enableScripts: true, localResourceRoots: [media, dist] });
+    this.panel = panel;
+    const uri = (base: vscode.Uri, name: string) => panel.webview.asWebviewUri(vscode.Uri.joinPath(base, name)).toString();
+    panel.webview.html = editorHtml({
+      cspSource: panel.webview.cspSource,
+      nonce: randomBytes(16).toString("hex"),
+      scriptUri: uri(media, "editor.js"),
+      styleUri: uri(media, "editor.css"),
+      chainEditUri: uri(dist, "chain-edit.js"),
+    });
+    panel.onDidDispose(() => (this.panel = undefined));
+    panel.webview.onDidReceiveMessage((raw: unknown) => void this.receive(raw));
+  }
+
+  post(): void {
+    // A state sent while saves are queued would roll the editor back past them; the last save posts instead.
+    if (this.pendingSaves > 0) return;
+    const state: EditorState = {
+      type: "state",
+      templates: TEMPLATES,
+      chains: this.chains,
+      running: this.ctx.state.abort !== undefined,
+      ...(this.palette ? { palette: this.palette } : {}),
+      ...(this.paletteError ? { paletteError: this.paletteError } : {}),
+      ...(this.mskills !== undefined ? { mskills: this.mskills } : {}),
+      ...(this.storageError ? { storageError: this.storageError } : {}),
+    };
+    void this.panel?.webview.postMessage(state);
+  }
+
+  private async receive(raw: unknown): Promise<void> {
+    const message = parseEditorMessage(raw);
+    if (!message) {
+      this.ctx.output.appendLine("Coordiner: ignored an unexpected message from the chains editor.");
+      return;
+    }
+    switch (message.type) {
+      case "ready":
+        if (!this.loaded) await this.load();
+        this.post();
+        if (!this.palette) await this.discover();
+        return;
+      case "save":
+        await this.store((chains) => (chains.some((c) => c.id === message.chain.id) ? chains.map((c) => (c.id === message.chain.id ? message.chain : c)) : [...chains, message.chain]));
+        return;
+      case "delete": {
+        const chain = this.chains.find((c) => c.id === message.id);
+        if (!chain) return;
+        const choice = await vscode.window.showWarningMessage(`Delete the chain ${plain(chain.name)}?`, { modal: true }, "Delete");
+        if (choice === "Delete") await this.store((chains) => chains.filter((c) => c.id !== message.id));
+        else this.post();
+        return;
+      }
+      case "run": {
+        const chain = [...TEMPLATES, ...this.chains].find((c) => c.id === message.id);
+        if (!chain) return;
+        // The webview disables Run on its own, but its state is not trusted.
+        const reason = runReason(chain, { running: this.ctx.state.abort !== undefined, ...(this.mskills !== undefined ? { mskills: this.mskills } : {}), ...(this.palette ? { palette: this.palette } : {}) });
+        if (reason) {
+          await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${reason}`);
+          return;
+        }
+        await runChainCommand(structuredClone(chain), this.ctx);
+        return;
+      }
+      case "refreshPalette":
+        await this.discover();
+        return;
+      case "openMskills":
+        await vscode.env.openExternal(vscode.Uri.parse(MSKILLS_URL));
+        return;
+      case "checkEnvironment":
+        await vscode.commands.executeCommand("coordiner.checkEnvironment");
+    }
+  }
+
+  private async load(): Promise<void> {
+    this.loaded = true;
+    let text: string;
+    try {
+      text = await readFile(this.file, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      await this.setAside(`it could not be read (${(error as Error).message})`);
+      return;
+    }
+    const parsed = parseChains(text);
+    if (parsed.error) await this.setAside(parsed.error);
+    else this.chains = parsed.chains;
+  }
+
+  // A bad file is moved aside, never overwritten; if it cannot be moved, saving stays off.
+  private async setAside(problem: string): Promise<void> {
+    const backup = `${this.file}.bak-${new Date().toISOString().replace(/[-:.]/g, "")}`;
+    try {
+      await rename(this.file, backup);
+      this.storageError = `The saved chains were set aside because ${problem}. The file is kept at ${backup}.`;
+    } catch (error) {
+      this.blocked = true;
+      this.storageError = `The saved chains could not be used because ${problem}, and the file could not be set aside (${(error as Error).message}). Changes are not saved until it is fixed: ${this.file}`;
+    }
+  }
+
+  // Saves run one at a time, each edit applied to what the save before it left, and the file lands by rename, so neither a burst
+  // of edits nor a crash mid-write leaves it torn.
+  private store(edit: (chains: readonly Chain[]) => Chain[]): Promise<void> {
+    this.pendingSaves++;
+    this.saving = this.saving.then(async () => {
+      if (!this.blocked) {
+        const chains = edit(this.chains);
+        const temp = `${this.file}.tmp`;
+        try {
+          await mkdir(join(this.file, ".."), { recursive: true });
+          await writeFile(temp, serializeChains(chains), "utf8");
+          await rename(temp, this.file);
+          this.chains = chains;
+        } catch (error) {
+          this.storageError = `Changes could not be saved: ${(error as Error).message}`;
+        }
+      }
+      this.pendingSaves--;
+      this.post();
+    });
+    return this.saving;
+  }
+
+  // Asks a session for its skills without running a model turn; once per window, or again on "Try again".
+  private async discover(): Promise<void> {
+    const cwd = openFolder();
+    this.palette = undefined;
+    this.paletteError = undefined;
+    if (cwd === undefined) {
+      this.paletteError = "open a folder first; skills are listed for the open folder.";
+      this.post();
+      return;
+    }
+    this.post();
+    const result = await listCommands({ cwd, env: sessionEnvFor(vscode.workspace.getConfiguration("coordiner")) });
+    if (result.ok) {
+      this.palette = palette(result.commands);
+      this.mskills = mskillsPresent(result.commands);
+    } else {
+      this.paletteError = plain(result.error);
+    }
+    this.post();
+  }
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -246,12 +474,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const state: { abort?: AbortController } = {};
   // Reveal without stealing focus; a hidden view just rejects, which is fine.
   const reveal = (step: StepView) => void view.reveal(step, { focus: false, select: false }).then(undefined, () => undefined);
+  let editor: ChainsEditor | undefined;
+  const ctx: RunContext = { state, provider, reveal, output, storage: context.globalStorageUri, onRunChange: () => editor?.post() };
+  editor = new ChainsEditor(context.extensionUri, join(context.globalStorageUri.fsPath, "chains.json"), ctx);
+  const story = TEMPLATES.find((t) => t.id === "story")!;
 
   context.subscriptions.push(
     output,
     view,
     vscode.commands.registerCommand("coordiner.checkEnvironment", () => checkEnvironmentCommand(output)),
-    vscode.commands.registerCommand("coordiner.runStory", () => runStoryCommand(state, provider, reveal, output, context.globalStorageUri)),
+    vscode.commands.registerCommand("coordiner.runStory", () => runChainCommand(story, ctx)),
+    vscode.commands.registerCommand("coordiner.openChains", () => editor.open()),
     vscode.commands.registerCommand("coordiner.stopRun", async () => {
       if (state.abort) state.abort.abort();
       else await vscode.window.showInformationMessage("Coordiner: no run is active.");

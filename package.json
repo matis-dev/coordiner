@@ -28,10 +28,24 @@
         "title": "Coordiner: Run Story…"
       },
       {
+        "command": "coordiner.openChains",
+        "title": "Coordiner: Open Chains",
+        "icon": "$(list-ordered)"
+      },
+      {
         "command": "coordiner.stopRun",
         "title": "Coordiner: Stop Run"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "coordiner.openChains",
+          "when": "view == coordiner.run",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Coordiner",
       "properties": {
@@ -81,7 +95,7 @@
     "viewsWelcome": [
       {
         "view": "coordiner.run",
-        "contents": "No run yet.\n[Run Story…](command:coordiner.runStory)"
+        "contents": "No run yet.\n[Open Chains](command:coordiner.openChains)\n[Run Story…](command:coordiner.runStory)"
       }
     ]
   },
@@ -89,7 +103,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "test": "node --test \"src/**/*.test.ts\"",
-    "coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.ts --test-coverage-exclude=src/**/*.test.ts \"src/**/*.test.ts\"",
+    "coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.ts --test-coverage-include=media/**/*.js --test-coverage-exclude=src/**/*.test.ts \"src/**/*.test.ts\"",
     "prepare": "husky"
   },
   "dependencies": {
@@ -98,9 +112,11 @@
   "devDependencies": {
     "@commitlint/cli": "21.2.3",
     "@commitlint/config-conventional": "21.2.3",
+    "@types/jsdom": "30.0.0",
     "@types/node": "24.19.1",
     "@types/vscode": "1.134.0",
     "husky": "9.1.7",
+    "jsdom": "30.1.1",
     "typescript": "7.0.2"
   },
   "packageManager": "pnpm@12.11.2"

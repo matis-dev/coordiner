@@ -1,18 +1,18 @@
 # Project Profile
 
-<!-- m-skills-fingerprint: 4136376765 -->
+<!-- m-skills-fingerprint: 3603985778 -->
 
 > Seeded at kickoff (2026-10-06), rewritten 2026-10-10 when coordiner became a VS Code extension.
 > Rows not settled yet carry `pending: <when>`. Each section is filled by its owning skill on first use.
 
 ## Identity
 
-- **Project:** coordiner — a VS Code extension that drives the user's m-skills story flow through unattended Claude Code sessions, each story in its own git worktree, from a prepared backlog story up to the commit brief.
-- **Stack:** TypeScript on Node ≥24, compiled to ESM JavaScript in `dist/` by tsc (no bundler), running in the VS Code extension host (VSCodium 1.135, a flatpak on the user's machine). Built on the Claude Agent SDK, exact-pinned. Only dependency added beyond it: the vscode type definitions (dev).
-- **Package manager:** pnpm 10 (`packageManager` in package.json; lockfile `pnpm-lock.yaml`)
-- **Repo shape:** single package; this folder is not a git repository yet.
+- **Project:** coordiner — a VS Code extension that runs chains of Claude Code skills through unattended sessions, each run in its own git worktree, up to the commit brief. The default chain is the user's m-skills story flow; m-skills is recommended, not required.
+- **Stack:** TypeScript on Node ≥24, compiled to ESM JavaScript in `dist/` by tsc (no bundler), running in the VS Code extension host (VSCodium 1.135, a flatpak on the user's machine). Built on the Claude Agent SDK, exact-pinned; it is the only runtime dependency. Dev tooling: TypeScript, the node and vscode type definitions, commitlint (CLI and the conventional preset), husky, and jsdom with its type definitions (for the webview tests), all exact-pinned.
+- **Package manager:** pnpm 12 (`packageManager` pins pnpm@12.11.2 in package.json; lockfile `pnpm-lock.yaml`)
+- **Repo shape:** single package, a git repository.
 - **Install shape:** run from source through the `Run Coordiner extension` launch config (F5). Packaging as a `.vsix` is a later slice.
-- **Node on PATH:** the flatpak editor has no `node`; gates need `PATH=$HOME/.nvm/versions/node/v24.21.0/bin:$PATH`, and sessions get it through the `coordiner.extraPath` setting.
+- **Node on PATH:** the flatpak editor has no `node`; gates need the nvm Node folder (~/.nvm/versions/node/v24.21.0/bin) and the pnpm folder (~/.local/share/pnpm) put in front of PATH, and sessions get it through the `coordiner.extraPath` setting.
 
 ## Commands (role → the command this project actually uses)
 
@@ -24,8 +24,8 @@
 | `<test>` | `pnpm test` | `node --test`, picks up `src/**/*.test.ts` |
 | `<build>` | `pnpm build` | `tsc -p tsconfig.build.json`, emits `dist/` |
 | `<e2e>` | n-a | no automated extension-host tests yet — the F5 smoke is manual |
-| `<visual>` | n-a | built-in VS Code UI only, nothing custom rendered |
-| `<a11y>` | n-a | built-in tree view, quick picks and notifications; revisit with the first webview |
+| `<visual>` | n-a | the chains webview is checked by eye in light, dark and high-contrast themes during the F5 smoke |
+| `<a11y>` | n-a | no automated scan; the chains webview gets a manual keyboard-only walk and a screen-reader pass during the F5 smoke |
 | `<audit>` | `pnpm audit` | |
 | `<run>` | F5, launch config `Run Coordiner extension` | needs `pnpm build` first |
 
@@ -35,24 +35,40 @@ Coverage: `pnpm coverage` (`node --test --experimental-test-coverage`, src only)
 
 ## Conventions
 
-- **Design system / UI vocabulary:** VS Code's own — tree view, quick pick, modal message, output channel, theme icons. Nothing custom until the first webview.
+- **Design system / UI vocabulary:** VS Code's own — tree view, quick pick, modal message, output channel, theme icons. The chains webview (`media/editor.css`, `media/editor.js`) uses native elements and `--vscode-*` theme variables only: no component library, no web fonts.
 - **Localized?** no
-- **Test layers in use:** unit only — `node:test` and strict assert; everything that touches the outside (SDK query, git and install commands, the filesystem) is injected as a parameter and faked in tests.
-- **Test file placement:** next to the source as `src/<name>.test.ts`.
-- **Coverage bar:** 100% branch on new functions; `src/extension.ts` (the only file that imports vscode) is the justified exception, covered by the manual F5 smoke.
-- **Seam rule:** only `src/extension.ts` imports vscode; every other module is plain TypeScript.
+- **Test layers in use:** unit — `node:test` and strict assert; everything that touches the outside (SDK query, git and install commands, the filesystem) is injected as a parameter and faked in tests. Webview DOM — `src/editor-dom.test.ts` runs the real `media/editor.js` in jsdom against the page `editorHtml` builds, importing the TypeScript sources in `src/` as its sibling modules; it asserts rendering, focus after each edit, status announcements and the messages posted. `media/editor.js` exports `start()` so each test page restarts it in one module instance.
+- **Test file placement:** next to the source as `src/<name>.test.ts`; the webview script's tests are `src/editor-dom.test.ts`.
+- **Coverage bar:** 100% branch on new functions, `media/editor.js` included (`pnpm coverage` includes `media/**/*.js`); `src/extension.ts` (the only file that imports vscode) is the justified exception, covered by the manual F5 smoke.
+- **Seam rule:** only `src/extension.ts` imports vscode; every other module is plain TypeScript. `src/chains.ts`, `src/chain-edit.ts` and `src/editor-logic.ts` also load in the webview from `dist/`, so they take no runtime imports beyond each other. Decisions the webview makes (run reason, missing skill, focus after an edit, Alt+arrow) belong in `src/editor-logic.ts`, where they are tested; `media/editor.js` only builds the DOM.
 
 ## Design
 
-- **Does this project have a UI?** yes, built-in VS Code views only (visitor mode: Operate). The direction brief is deferred to the first webview slice.
+- **Does this project have a UI?** yes: built-in VS Code views plus the chains editor webview (visitor mode: Operate).
+- **Direction brief** (established 2026-10-11 with the chains editor; stamp at the top of `media/editor.css`):
+
+```
+/* direction
+surface:   Coordiner chains editor (webview panel) · mode: Operate
+visitor:   the user, at the start of a work session, deciding what runs next · task: pick or tweak a chain and press Run
+world:     relay baton, shift handover, fresh notebook, assembly line, worktree
+structure: master-detail · weight: the selected chain's lanes · divides: space within a session, a labelled "fresh context" rule between sessions
+palette:   anchor --vscode-focusBorder · paper --vscode-editor-background (follows the theme) · accent owns the Run button only
+type:      --vscode-font-family / --vscode-editor-font-family for skill names (code) · tone: technical (faces supplied by the host)
+signature: the "fresh context" divider between sessions — the handover the flow is designed around, the one strong rule on the page
+refuses:   a node canvas with wires · nested cards · colour as the only status signal
+source:    profile §Design (VS Code's own vocabulary) — webview direction established 2026-10-11
+*/
+```
 
 ## Security
 
 - **Auth model:** n-a — local tool; Claude credentials come from the user's existing Claude Code login.
-- **Untrusted input enters at:** model output (final text including the commit brief, AskUserQuestion input, names of files a session creates), headings and bodies of backlog files from a cloned repo, and the repo's lockfiles. Backlog story bodies are passed to the model verbatim by design (size-capped).
-- **Controls:** status markers are read from the last line only; story names become branch and directory names only through a strict slug (re-checked before git is called); git and install commands run as argument arrays, never through a shell; the install command is derived from the lockfile and shown in a confirm dialog on every run; model text shown in the UI has control characters stripped; settings are application-scoped so a repo cannot set them; the extension declares untrusted workspaces unsupported; new files are marked for review with intent-to-add, passed after `--` with `--literal-pathspecs` (so a name like `:!other` cannot exclude another file) from NUL-separated `ls-files` output and capped at 200 (`src/worktree.ts` `prepareReview`); the commit brief is shown through `plain()` and never offered as a command to copy or run.
+- **Untrusted input enters at:** model output (final text including the commit brief, AskUserQuestion input, names of files a session creates), headings and bodies of backlog files from a cloned repo, and the repo's lockfiles. Backlog story bodies are passed to the model verbatim by design (size-capped). Since the chains editor: skill names the session lists (`init.slash_commands`, which include a cloned repo's own .claude/skills folder), messages from the chains webview, and the stored chains.json.
+- **Controls:** status markers are read from the last line only; story names become branch and directory names only through a strict slug (re-checked before git is called); git and install commands run as argument arrays, never through a shell; the install command is derived from the lockfile and shown in a confirm dialog on every run; model text shown in the UI has control characters stripped; settings are application-scoped so a repo cannot set them; the extension declares untrusted workspaces unsupported; new files are marked for review with intent-to-add, passed after `--` with `--literal-pathspecs` (so a name like `:!other` cannot exclude another file) from NUL-separated `ls-files` output and capped at 200 (`src/worktree.ts` `prepareReview`); the commit brief is shown through `plain()` and never offered as a command to copy or run. Chains: a card's skill must match `^[A-Za-z0-9:_.-]{1,100}$` and be listed in the session's init before a turn runs; stored chains are rebuilt field by field (`src/chains.ts` `parseChains`), and a bad file is set aside, never overwritten; webview messages have an exact key set per type (`src/editor-protocol.ts`) and the m-skills link is a constant, never taken from a message; the webview CSP allows scripts only by nonce or from the extension's own files, and all text is set with `textContent`.
 - **Unattended session permissions:** `permissionMode: "auto"`; anything auto mode will not approve is denied and logged (no one is there to answer). Questions get the Recommended option and are logged.
-- **Fail-closed rule:** refuse to run a turn if the m-skills commands are absent from the init message (no plugin = no git-guard hook) or if the session runs a different model than requested.
+- **Git guard:** every session coordiner starts carries its own PreToolUse hook on Bash (`src/guard.ts`, the rules of the m-skills scripts guard-mutations.sh and guard-outward.sh, which live in the m-skills repo): git writes, `--no-verify` / `--no-gpg-sign` and publishing `gh` commands are denied, so the no-commit promise holds whichever skills a chain uses. It fails closed: an unreadable command or an error inside the hook is a denial. Denials are logged without the command text.
+- **Fail-closed rule:** refuse to run a turn if a skill the chain uses is absent from the init message (and, for a chain using m-skills, if m-skills reports a load error), or if the session runs a different model than requested.
 - **Standard tracked:** OWASP Top 10:2025
 - **Audit gate:** `pnpm audit`
 
@@ -65,12 +81,12 @@ Coverage: `pnpm coverage` (`node --test --experimental-test-coverage`, src only)
 | Doc | Path | Notes |
 |---|---|---|
 | Changelog | `CHANGELOG.md` | the one changelog; a **Current state** baseline at the top, then dated entries newest first |
-| README | `README.md` | prerequisites, run from source (F5), the develop commands |
+| README | `README.md` | prerequisites, run from source (F5), running a story, building and running a chain, the develop commands |
 | Architecture / deployment / API / tests docs | n-a | none; the profile carries those facts |
 
 ## Commit Convention
 
-- **Enforced by:** `commitlint.config.js` (`@commitlint/config-conventional`) through the husky `commit-msg` hook.
+- **Enforced by:** `commitlint.config.js` (extends the @commitlint/config-conventional preset) through the husky `commit-msg` hook.
 - **Header:** `<type>: <subject>`, at most 100 characters, scope optional (not used so far).
 - **Types:** `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
 - **Subject case:** lower-case start — sentence-case, start-case, PascalCase and UPPER CASE are rejected; no trailing full stop.
@@ -83,11 +99,12 @@ n-a beyond the install shape above — no hosting, environments, or rollback.
 ## Guardrails Specific to This Project
 
 - **Do not touch:** pending
-- **Known blind spots:** the extension host wiring (`src/extension.ts`) and the real SDK, git and install commands are not covered by automated tests; slice 1 is verified by the F5 smoke only. The exact arguments for creating a worktree are inferred from git's usage, not run. Intent-to-add marking of new files, and the uncommitted review seeing them, is verified only by the F5 smoke.
-- **Coordinator state lives outside target repos.** The per-story journal is JSONL under the extension's `globalStorageUri/journal/` (`<slug>-<UTC stamp>.jsonl`), never in a worktree, because `code-review-architect-uncommitted` would review it as a change.
+- **Known blind spots:** the extension host wiring (`src/extension.ts`) and the real SDK, git and install commands are not covered by automated tests; slice 1 is verified by the F5 smoke only. The exact arguments for creating a worktree are inferred from git's usage, not run. Intent-to-add marking of new files, and the uncommitted review seeing them, is verified only by the F5 smoke. The chains webview's DOM is tested in jsdom, which is not a real webview: VS Code's CSP and the dynamic imports from `dist/` through `asWebviewUri`, layout and theme colours, and what a real screen reader speaks are verified only by the F5 smoke. The git guard scans the whole command string: a quoted mention such as `echo "git commit"` is denied (harmless), and a command assembled at run time (`g=git; $g commit`) is not caught.
+- **Coordinator state lives outside target repos.** The per-story journal is JSONL in the journal folder of the extension's global storage (`<slug>-<UTC stamp>.jsonl`), and saved chains are chains.json in the same storage. Neither is ever in a worktree, because `code-review-architect-uncommitted` would review it as a change.
 
 ## Recurring Propagation Sites
 
 - Planner tiers (Light, Standard, Heavy) map to the user's strong, medium and weak models in `src/protocol.ts`; the `COORDINER:` status-line grammar lives in `src/protocol.ts` (parser and the unattended note) and must change together.
-- The m-skills commands a session needs are listed in `src/session.ts` (`REQUIRED_COMMANDS`); the session scripts that send them (`sessionOne`, `SESSION_TWO`) and `remainingCommands` live in `src/run.ts` and change with `UNATTENDED_NOTE`.
+- The m-skills command strings live in `src/chains.ts` (`SKILL_DEFAULTS`: kind, tier, label and continuation per skill, and `doneSkipsLoops` on the review; `TEMPLATES`) and `src/session.ts` (`REQUIRED_COMMANDS`, which defines "m-skills installed"). They change together with `UNATTENDED_NOTE` in `src/protocol.ts`, which tells each skill how to end its turn, and with the card semantics in `src/run.ts` (`runSessionAt`, `remainingCommands`).
+- `Chain` / `Card` in `src/chains.ts` are stored (chains.json in global storage, `parseChains` / `serializeChains`), sent to the webview (`src/editor-protocol.ts` `EditorState`, `media/editor.js`) and edited there (`src/chain-edit.ts`): a field change touches all four.
 - `JournalRecord` in `src/journal.ts` embeds `RunEvent` and `Outcome` from `src/run.ts`: a shape change there changes the journal format.

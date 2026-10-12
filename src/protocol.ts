@@ -21,13 +21,14 @@ export function parseStatus(text: string): Status {
 export const withoutStatus = (text: string): string => text.trimEnd().split("\n").slice(0, -1).join("\n").trimEnd();
 
 export const UNATTENDED_NOTE = [
-  "This session is driven by coordiner, an unattended pipeline running the m-skills flow. Nobody is at the keyboard.",
+  "This session is driven by coordiner, an unattended pipeline running a chain of skills. Nobody is at the keyboard.",
   "Finish the skill's work, then end your turn. Do not offer a next-step picker or start another skill.",
   "Planning: instead of the approval picker, end with the line `COORDINER: NEXT <tier>`, where <tier> (Light, Standard or Heavy) is the tier of the plan's first step.",
   "Implementing: at every tier stop in the plan, end with `COORDINER: NEXT <tier>` naming the next step's tier. When the whole plan is done, end with `COORDINER: DONE`.",
   "Reviewing: end with `COORDINER: NEXT <tier>` naming the tier the fixes need, or `COORDINER: DONE` when there is nothing to fix.",
   "Fixing findings: stop at tier changes as when implementing, and end with `COORDINER: DONE` once every finding is handled.",
   "Rolling history: end with `COORDINER: DONE` after the commit brief.",
+  "Any other skill: when its work is done, end with `COORDINER: DONE`.",
   "If you hit a decision the plan reserves for the user (a one-way door), do not ask: end with `COORDINER: HALT <one-line reason>`.",
   "The status line must be the last line of your final message.",
   "Questions you genuinely need answered go through AskUserQuestion, and every question must carry an option labelled (Recommended) that is safe to take without the user; for multi-select, label a recommended set. Coordiner takes the Recommended option and logs it.",

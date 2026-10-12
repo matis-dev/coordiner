@@ -2,7 +2,7 @@ import type { Models } from "./environment.ts";
 import type { Outcome, RunEvent } from "./run.ts";
 
 export type JournalRecord =
-  | { type: "run-started"; story: string; repo: string; worktree: string; branch: string; models: Models }
+  | { type: "run-started"; chain: string; story: string; repo: string; worktree: string; branch: string; models: Models }
   | RunEvent
   | { type: "log"; line: string }
   | { type: "outcome"; outcome: Outcome };

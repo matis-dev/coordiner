@@ -1,16 +1,16 @@
 # Coordiner
 
-A VS Code extension that runs one backlog story through the m-skills story flow without you at the keyboard. It creates a git worktree for the story, runs a planning and implementing session, then a fresh review session that fixes its findings and writes a commit brief. Nothing is committed: you review the worktree and commit by hand.
+A VS Code extension that runs a chain of Claude Code skills on one backlog story without you at the keyboard. It creates a git worktree for the story and runs each session of the chain in it. The default chain, **Story**, is the m-skills story flow: a planning and implementing session, then a fresh review session that fixes its findings and writes a commit brief. Nothing is committed: you review the worktree and commit by hand.
 
 Coordiner is a personal tool. It runs from source in an Extension Development Host; there is no packaged `.vsix` yet.
 
 ## Prerequisites
 
 - **VS Code or VSCodium 1.135 or newer** (`engines.vscode` in [package.json](package.json)).
-- **Node.js 24 or newer** and **pnpm 10** (pinned in `packageManager` in [package.json](package.json)); `corepack enable` provides it.
+- **Node.js 24 or newer** and **pnpm 12** (pinned in `packageManager` in [package.json](package.json)); `corepack enable` provides it.
 - **git**.
 - **Claude Code, signed in on this machine.** Sessions use your existing Claude Code login.
-- **The m-skills plugin, enabled in your user Claude Code settings.** Coordiner refuses to start a session unless these commands are available: `m-skills:planning-architect`, `m-skills:implementing-architect`, `m-skills:code-review-architect-uncommitted`, `m-skills:rolling-history`.
+- **Recommended: the [m-skills](https://github.com/matis-dev/m-skills) plugin**, enabled in your Claude Code settings. Coordiner is built around it, and every shipped template uses its skills. Chains made only of your own skills run without it. A chain refuses to start when a skill it uses is not available in the session.
 
 ## Run the extension from source
 
@@ -31,7 +31,7 @@ A **Coordiner** icon appears in the activity bar.
 
 ## Check your setup
 
-Run **Coordiner: Check Environment** from the Command Palette. It makes three short model calls (one per tier), resumes the first session on another model, and checks that `node` is on the PATH sessions get. Results are in the **Coordiner** output channel, one line per check; a passing run ends with the message "every environment check passed".
+Run **Coordiner: Check Environment** from the Command Palette. It makes three short model calls (one per tier), resumes the first session on another model, reports whether m-skills is installed (information only, never a failure), and checks that `node` is on the PATH sessions get. Results are in the **Coordiner** output channel, one line per check; a passing run ends with the message "every environment check passed".
 
 If a check fails, the line names the setting that fixes it:
 
@@ -68,6 +68,29 @@ git branch -D coordiner/<story-slug>
 `git worktree remove` refuses while the worktree has uncommitted changes; add `--force` only if you mean to throw them away.
 
 For what each step does, the unattended rules, and where the run journal is kept, see **Current state** in [CHANGELOG.md](CHANGELOG.md).
+
+## Build and run a chain
+
+Run **Coordiner: Open Chains** (or the list button in the **Run** view's title bar). Templates and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
+
+| Template | Session 1 | Session 2 |
+|---|---|---|
+| **Story** (what **Run Story…** runs) | planning → implementing | review → fix → rolling-history |
+| **Brainstorm story** | brainstorming → planning → implementing | same |
+| **Debug story** | debugging → planning → implementing | same |
+| **Kickoff** | kickoff → planning → implementing | same |
+
+The first card of Brainstorm story, Debug story and Kickoff pauses for you, so those templates cannot run until the chat panel exists.
+
+1. Select a template and choose **Duplicate to edit**. Templates are read-only.
+2. Edit the copy: **Add** a skill from the list (every skill your Claude Code session offers, m-skills first), move cards with the arrow buttons or **Alt+←** / **Alt+→**, edit a card's arguments, add or remove sessions. Every change is saved at once. `{{story}}` in an argument is replaced by the story's heading and body.
+3. Choose **Run**. A chain that uses `{{story}}` asks for a backlog story, as in [Run a story](#run-a-story); any other chain asks for a run name, which becomes the worktree folder and the `coordiner/<name>` branch. A disabled **Run** says why underneath.
+
+The skill list comes from asking a Claude Code session in the open folder which skills it offers. No prompt is sent, so it costs no model turn. It runs once per window; **Refresh skills** re-lists after you install or change skills.
+
+Chains are saved in the extension's global storage (`chains.json`), never in your repository. A file that cannot be read is set aside as `chains.json.bak-<time>` and the editor says so.
+
+Every session Coordiner starts denies `git` writes (commit, push, branch creation, reset and the rest), `--no-verify`, and `gh` commands that publish, whichever skills the chain uses. Read-only git and `gh` stay open. A denial is logged in the **Coordiner** output and the run journal.
 
 ## Develop
 

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { CanUseTool, Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { REQUIRED_COMMANDS, runTurn, type QueryFn } from "./session.ts";
+import type { CanUseTool, HookInput, Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { listCommands, REQUIRED_COMMANDS, runTurn, type ListQueryFn, type QueryFn } from "./session.ts";
 
 // Fixtures carry only the fields runTurn reads; the full SDK message types are far larger.
 const msg = (m: object) => m as unknown as SDKMessage;
@@ -11,7 +11,9 @@ const init = (overrides: object = {}) =>
 const success = (text = "done") => msg({ type: "result", subtype: "success", is_error: false, session_id: "sess-1", result: text });
 
 const canUseTool: CanUseTool = async (_name, input) => ({ behavior: "allow", updatedInput: input });
-const base = { prompt: "go", cwd: "/repo", model: "model-a", env: { PATH: "/bin" }, canUseTool };
+const base = { prompt: "go", cwd: "/repo", model: "model-a", env: { PATH: "/bin" }, canUseTool, requiredCommands: REQUIRED_COMMANDS };
+const pushCall = { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: ["git", "push"].join(" ") } } as unknown as HookInput;
+const decision = (out: object) => (out as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision;
 
 const fakeQuery = (body: (options: Options) => AsyncGenerator<SDKMessage>) => {
   const seen: { prompt?: string; options?: Options } = {};
@@ -30,7 +32,7 @@ describe("runTurn", () => {
       yield success("plan ready");
     });
     const result = await runTurn({ ...base, query });
-    assert.deepEqual(result, { ok: true, sessionId: "sess-1", model: "model-a", resultText: "plan ready" });
+    assert.deepEqual(result, { ok: true, sessionId: "sess-1", model: "model-a", resultText: "plan ready", commands: [...REQUIRED_COMMANDS] });
     assert.equal(seen.prompt, "go");
   });
 
@@ -63,7 +65,7 @@ describe("runTurn", () => {
     assert.deepEqual(seen.options!.systemPrompt, { type: "preset", preset: "claude_code", append: "be quiet" });
   });
 
-  it("refuses to work and aborts when an m-skills command is missing", async () => {
+  it("refuses to work and aborts when a skill the chain needs is missing", async () => {
     let aborted = false;
     const { query } = fakeQuery(async function* (options) {
       options.abortController!.signal.addEventListener("abort", () => (aborted = true));
@@ -94,6 +96,38 @@ describe("runTurn", () => {
       yield success();
     });
     assert.equal((await runTurn({ ...base, query })).ok, true);
+  });
+
+  it("works without m-skills when the chain needs none, and reports what the session offers", async () => {
+    const { query } = fakeQuery(async function* () {
+      yield init({ slash_commands: ["acme:lint"], plugin_errors: [{ plugin: "m-skills@m-skills", type: "x", message: "not relevant here" }] });
+      yield success();
+    });
+    const result = await runTurn({ ...base, requiredCommands: ["acme:lint"], query });
+    assert.deepEqual(result.ok && result.commands, ["acme:lint"]);
+  });
+
+  it("attaches coordiner's guard to Bash and reports its denials", async () => {
+    const lines: string[] = [];
+    const { query, seen } = fakeQuery(async function* () {
+      yield init();
+      yield success();
+    });
+    await runTurn({ ...base, onGuard: (l) => lines.push(l), query });
+    const matchers = seen.options!.hooks!.PreToolUse!;
+    assert.equal(matchers.length, 1);
+    assert.equal(matchers[0]!.matcher, "Bash");
+    assert.equal(decision(await matchers[0]!.hooks[0]!(pushCall, "t", { signal: new AbortController().signal })), "deny");
+    assert.equal(lines.length, 1);
+  });
+
+  it("still denies through the guard when nobody listens for its reports", async () => {
+    const { query, seen } = fakeQuery(async function* () {
+      yield init();
+      yield success();
+    });
+    await runTurn({ ...base, query });
+    assert.equal(decision(await seen.options!.hooks!.PreToolUse![0]!.hooks[0]!(pushCall, "t", { signal: new AbortController().signal })), "deny");
   });
 
   it("refuses when the session runs a different model than requested", async () => {
@@ -137,7 +171,7 @@ describe("runTurn", () => {
     const { query } = fakeQuery(async function* () {
       yield success("late");
     });
-    assert.deepEqual(await runTurn({ ...base, query }), { ok: true, sessionId: "sess-1", model: "model-a", resultText: "late" });
+    assert.deepEqual(await runTurn({ ...base, query }), { ok: true, sessionId: "sess-1", model: "model-a", resultText: "late", commands: [] });
   });
 
   it("catches an SDK throw and keeps the session id seen so far", async () => {
@@ -166,5 +200,55 @@ describe("runTurn", () => {
     });
     await runTurn({ ...base, signal: stop.signal, query });
     assert.equal(aborted, true);
+  });
+});
+
+describe("listCommands", () => {
+  const fakeList = (answer: () => Promise<Array<{ name: string; description: string }>>) => {
+    const seen: { options?: Options; prompt?: AsyncIterable<unknown> } = {};
+    const query: ListQueryFn = ({ prompt, options }) => {
+      seen.options = options;
+      seen.prompt = prompt;
+      return { supportedCommands: async () => (await answer()) as Awaited<ReturnType<ReturnType<ListQueryFn>["supportedCommands"]>> };
+    };
+    return { query, seen };
+  };
+
+  it("returns the command names and aborts the session afterwards", async () => {
+    const { query, seen } = fakeList(async () => [{ name: "m-skills:planning-architect", description: "" }, { name: "acme:lint", description: "" }]);
+    assert.deepEqual(await listCommands({ cwd: "/repo", env: { PATH: "/bin" }, query }), { ok: true, commands: ["m-skills:planning-architect", "acme:lint"] });
+    assert.equal(seen.options!.abortController!.signal.aborted, true);
+    assert.equal(seen.options!.cwd, "/repo");
+    assert.deepEqual(seen.options!.settingSources, ["user", "project"]);
+    assert.equal(seen.options!.model, undefined);
+  });
+
+  it("never sends a prompt, so no model turn runs", async () => {
+    const { query, seen } = fakeList(async () => []);
+    await listCommands({ cwd: "/repo", env: {}, query });
+    const sent: unknown[] = [];
+    for await (const message of seen.prompt!) sent.push(message);
+    assert.deepEqual(sent, []);
+  });
+
+  it("reports an SDK error", async () => {
+    const { query, seen } = fakeList(async () => {
+      throw new Error("not signed in");
+    });
+    assert.deepEqual(await listCommands({ cwd: "/repo", env: {}, query }), { ok: false, error: "the skills could not be listed: not signed in" });
+    assert.equal(seen.options!.abortController!.signal.aborted, true);
+  });
+
+  it("reports a non-Error throw", async () => {
+    const { query } = fakeList(async () => {
+      throw "plain";
+    });
+    assert.deepEqual(await listCommands({ cwd: "/repo", env: {}, query }), { ok: false, error: "the skills could not be listed: plain" });
+  });
+
+  it("gives up when the session never answers", async () => {
+    const { query, seen } = fakeList(() => new Promise(() => undefined));
+    assert.deepEqual(await listCommands({ cwd: "/repo", env: {}, timeoutMs: 10, query }), { ok: false, error: "the skills could not be listed: no answer within 0.01 seconds" });
+    assert.equal(seen.options!.abortController!.signal.aborted, true);
   });
 });
