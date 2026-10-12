@@ -178,6 +178,18 @@ textarea {
   overflow: auto;
 }
 
+/* A placeholder, shown as what Run will put there. */
+.chip {
+  padding: 0 4px;
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: var(--radius);
+  font-style: italic;
+}
+
+.starts {
+  margin: 0 0 var(--gap);
+}
+
 .flag {
   font-size: 0.9em;
   color: var(--vscode-editorWarning-foreground);

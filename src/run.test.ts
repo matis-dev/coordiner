@@ -1,13 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { storyText } from "./backlog.ts";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
-import { fillStory, MAX_STORY_CHARS, MAX_TURNS, remainingCommands, runChain, runSession, type ChainDeps, type Outcome, type RunDeps, type RunEvent } from "./run.ts";
+import { fillInput, MAX_INPUT_CHARS, MAX_TURNS, remainingCommands, runChain, runSession, type ChainDeps, type Outcome, type RunDeps, type RunEvent } from "./run.ts";
 import type { TurnResult } from "./session.ts";
 import type { ReviewPrep } from "./worktree.ts";
 
 const models = { strong: "m-strong", medium: "m-medium", weak: "m-weak" };
 const story = { heading: "Story 1: Login", body: "Add a login form." };
-const filled = fillStory(TEMPLATES[0]!, story);
+const filled = fillInput(TEMPLATES[0]!, storyText(story));
 const chain = (filled as { ok: true; chain: Chain }).chain;
 const AUTHOR_SESSION = chain.sessions[0]!;
 const REVIEW_SESSION = chain.sessions[1]!;
@@ -244,16 +245,28 @@ describe("runChain: the Story template", () => {
   });
 });
 
-describe("fillStory", () => {
+describe("fillInput", () => {
   it("puts the story heading and body where the template says {{story}}", () => {
     assert.equal(AUTHOR_SESSION.cards[0]!.args, "Story 1: Login\n\nAdd a login form.");
     assert.equal(AUTHOR_SESSION.cards[1]!.args, "Implement the approved plan above.");
   });
 
-  it("refuses a story over the size cap", () => {
-    assert.deepEqual(fillStory(TEMPLATES[0]!, { heading: "Story 1", body: "x".repeat(MAX_STORY_CHARS + 1) }), {
+  it("puts a typed idea or bug where the chain's own placeholder is", () => {
+    const idea = fillInput(TEMPLATES.find((t) => t.id === "idea")!, "a dark mode");
+    assert.equal(idea.ok && idea.chain.sessions[0]!.cards[0]!.args, "a dark mode");
+    const bug = fillInput(TEMPLATES.find((t) => t.id === "bug")!, "save loses the last line");
+    assert.equal(bug.ok && bug.chain.sessions[0]!.cards[0]!.args, "save loses the last line");
+  });
+
+  it("leaves a chain without a placeholder as it is", () => {
+    const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("acme:lint")] }] };
+    assert.deepEqual(fillInput(own, ""), { ok: true, chain: own });
+  });
+
+  it("refuses text over the size cap", () => {
+    assert.deepEqual(fillInput(TEMPLATES[0]!, "x".repeat(MAX_INPUT_CHARS + 1)), {
       ok: false,
-      reason: `This story is longer than ${MAX_STORY_CHARS} characters; split it.`,
+      reason: `This text is longer than ${MAX_INPUT_CHARS} characters; split it.`,
     });
   });
 });

@@ -1,13 +1,12 @@
-import { cardPrompt, REVIEW, skillDefault, STORY, type Chain, type ChainSession } from "./chains.ts";
+import { cardPrompt, inputOf, INPUTS, REVIEW, skillDefault, type Chain, type ChainSession } from "./chains.ts";
 import type { Models, Tier } from "./environment.ts";
 import { parseStatus, tierOf, withoutStatus } from "./protocol.ts";
-import type { Story } from "./backlog.ts";
 import type { TurnRequest, TurnResult } from "./session.ts";
 import { clip } from "./text.ts";
 import { MAX_NEW_FILES, type ReviewPrep } from "./worktree.ts";
 
 export const MAX_TURNS = 20;
-export const MAX_STORY_CHARS = 20_000;
+export const MAX_INPUT_CHARS = 20_000;
 
 export type StepStatus = "done" | "failed" | "halted" | "stopped";
 export type RunEvent =
@@ -116,13 +115,15 @@ export const runSession = async (session: ChainSession, deps: RunDeps): Promise<
 
 export type FilledChain = { ok: true; chain: Chain } | { ok: false; reason: string };
 
-// The story fills each {{story}} placeholder; it also names the worktree, so every chain runs for one story.
-export function fillStory(chain: Chain, story: Story): FilledChain {
-  if (story.body.length > MAX_STORY_CHARS) return { ok: false, reason: `This story is longer than ${MAX_STORY_CHARS} characters; split it.` };
-  const text = `${story.heading}\n\n${story.body}`;
+// The input (a story, an idea or a bug) fills the chain's placeholder; a chain without one runs as it is.
+export function fillInput(chain: Chain, text: string): FilledChain {
+  if (text.length > MAX_INPUT_CHARS) return { ok: false, reason: `This text is longer than ${MAX_INPUT_CHARS} characters; split it.` };
+  const kind = inputOf(chain);
+  if (kind === undefined) return { ok: true, chain };
+  const { placeholder } = INPUTS[kind];
   return {
     ok: true,
-    chain: { ...chain, sessions: chain.sessions.map((s) => ({ cards: s.cards.map((c) => ({ ...c, args: c.args.split(STORY).join(text) })) })) },
+    chain: { ...chain, sessions: chain.sessions.map((s) => ({ cards: s.cards.map((c) => ({ ...c, args: c.args.split(placeholder).join(text) })) })) },
   };
 }
 

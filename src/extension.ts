@@ -4,15 +4,15 @@ import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from 
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
-import { parseStories, slugify, type Story } from "./backlog.ts";
-import { MSKILLS_URL, parseChains, requiredSkills, runnable, serializeChains, TEMPLATES, usesStory, type Chain } from "./chains.ts";
+import { parseStories, slugify, storyText, type Story } from "./backlog.ts";
+import { inputOf, INPUTS, MSKILLS_URL, parseChains, requiredSkills, runnable, serializeChains, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type EditorState } from "./editor-protocol.ts";
 import { checkEnvironment, sessionEnv, type Models } from "./environment.ts";
 import { createJournal, journalFileName } from "./journal.ts";
 import { UNATTENDED_NOTE } from "./protocol.ts";
-import { fillStory, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
+import { fillInput, MAX_INPUT_CHARS, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
 import { listCommands, runTurn } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
 import { mskillsPresent, palette, type PaletteEntry } from "./skills.ts";
@@ -92,40 +92,75 @@ async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<vo
   else await vscode.window.showErrorMessage(`Coordiner: ${failed.length} environment check(s) failed. See the Coordiner output.`);
 }
 
-async function pickStory(): Promise<Story | undefined> {
+// "type" means the user chose to type a story instead of picking one from a file.
+async function pickStory(): Promise<Story | "type" | undefined> {
   const files = await vscode.workspace.findFiles("**/*.md", "**/node_modules/**", 200);
-  const file = await vscode.window.showQuickPick(
-    files.map((uri) => ({ label: vscode.workspace.asRelativePath(uri), uri })),
-    { placeHolder: "Backlog file" },
+  const picked = await vscode.window.showQuickPick(
+    [
+      { label: "$(edit) Type a story…", description: "no backlog file needed", uri: undefined },
+      ...files.map((uri) => ({ label: vscode.workspace.asRelativePath(uri), description: undefined, uri })),
+    ],
+    { title: "Pick a story", placeHolder: "The Markdown file that holds your stories, or type one" },
   );
-  if (!file) return undefined;
-  const stories = parseStories(await readFile(file.uri.fsPath, "utf8"));
+  if (!picked) return undefined;
+  if (!picked.uri) return "type";
+  const stories = parseStories(await readFile(picked.uri.fsPath, "utf8"));
   if (stories.length === 0) {
-    await vscode.window.showInformationMessage(`Coordiner: no stories found in ${file.label}. Headings look like "## Story 1: …" or "### Slice 2: …".`);
+    await vscode.window.showInformationMessage(`Coordiner: no stories found in ${picked.label}. Headings look like "## Story 1: …" or "### Slice 2: …"; or choose "Type a story…".`);
     return undefined;
   }
-  const picked = await vscode.window.showQuickPick(
+  const chosen = await vscode.window.showQuickPick(
     stories.map((story) => ({ label: plain(story.heading), story })),
-    { placeHolder: "Story to run" },
+    { title: "Pick a story", placeHolder: "Story to run" },
   );
-  return picked?.story;
+  return chosen?.story;
 }
 
-// A chain that never uses {{story}} needs only a name, which becomes its worktree and branch.
-async function nameRun(): Promise<Story | undefined> {
+// The name becomes the worktree folder and the branch, so it must slugify.
+const nameProblem = (value: string): string | undefined => {
+  try {
+    slugify(value);
+    return undefined;
+  } catch {
+    return "Use at least one letter or digit.";
+  }
+};
+
+async function nameRun(value = ""): Promise<string | undefined> {
   const name = await vscode.window.showInputBox({
     title: "Name this run",
     prompt: "The name becomes the worktree folder and the coordiner/<name> branch.",
-    validateInput: (value) => {
-      try {
-        slugify(value);
-        return undefined;
-      } catch {
-        return "Use at least one letter or digit.";
-      }
-    },
+    value,
+    validateInput: nameProblem,
   });
-  return name === undefined ? undefined : { heading: name.trim(), body: "" };
+  return name?.trim();
+}
+
+type RunInput = { name: string; text: string };
+
+// Run asks for what the chain starts from; a typed input also suggests the run's name.
+async function askInput(kind: InputKind | undefined): Promise<RunInput | undefined> {
+  if (kind === undefined) {
+    const name = await nameRun();
+    return name === undefined ? undefined : { name, text: "" };
+  }
+  if (kind === "story") {
+    const story = await pickStory();
+    if (story !== "type") return story && { name: story.heading, text: storyText(story) };
+  }
+  const { title, ask } = INPUTS[kind];
+  const text = (
+    await vscode.window.showInputBox({
+      title,
+      prompt: ask,
+      validateInput: (value) =>
+        value.length > MAX_INPUT_CHARS ? `Keep it under ${MAX_INPUT_CHARS} characters.` : value.trim() === "" ? "Write at least a few words." : undefined,
+    })
+  )?.trim();
+  if (!text) return undefined;
+  // Text in any script is fine; only the suggested name needs a letter or digit from [a-z0-9].
+  const name = await nameRun(nameProblem(text) ? "" : slugify(text));
+  return name === undefined ? undefined : { name, text };
 }
 
 // The commit brief is model text: it is shown, never offered as a command to copy or run.
@@ -192,16 +227,16 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
     await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
     return;
   }
-  const story = usesStory(chain) ? await pickStory() : await nameRun();
-  if (!story) return;
-  const filled = fillStory(chain, story);
+  const input = await askInput(inputOf(chain));
+  if (!input) return;
+  const filled = fillInput(chain, input.text);
   if (!filled.ok) {
     await vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
     return;
   }
   let slug;
   try {
-    slug = slugify(story.heading);
+    slug = slugify(input.name);
   } catch (error) {
     await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
     return;
@@ -217,7 +252,7 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
     repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
     setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
   ].filter(Boolean).join("\n\n");
-  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(story.heading)}" unattended?`, { modal: true, detail }, "Run");
+  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(input.name)}" unattended?`, { modal: true, detail }, "Run");
   if (choice !== "Run") return;
 
   const config = vscode.workspace.getConfiguration("coordiner");
@@ -240,7 +275,7 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
     () => new Date(),
     (error) => output.appendLine(`Journal not written to ${journalFile}: ${error instanceof Error ? error.message : String(error)}`),
   );
-  void journal({ type: "run-started", chain: chain.name, story: story.heading, repo: repo.root, worktree: added.path, branch: added.branch, models });
+  void journal({ type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models });
   output.appendLine(`Journal: ${journalFile}`);
   if (setup) {
     const result = await runSetup(setup, added.path, env, exec);
@@ -285,7 +320,7 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
     ctx.onRunChange();
   }
   void journal({ type: "outcome", outcome });
-  await announce(outcome, story.heading, added.path, filled.chain, output);
+  await announce(outcome, input.name, added.path, filled.chain, output);
 }
 
 // ── Chains editor ─────────────────────────────────────────────────────────────

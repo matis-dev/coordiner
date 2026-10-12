@@ -128,7 +128,7 @@ export async function start() {
         el("textarea", { id, rows: 2, "data-focus": id, onchange: (e) => save(edit.setArgs(chain, s, i, e.target.value), `Saved ${label}`, id) }, c.args),
       );
     } else if (c.args) {
-      children.push(el("p", { class: "args" }, c.args));
+      children.push(el("p", { class: "args" }, logic.argParts(c.args).map((part) => ("chip" in part ? el("span", { class: "chip" }, part.chip) : part.text))));
     }
     if (c.pause) children.push(el("span", { class: "flag" }, "Pauses for you (comes with the chat panel)"));
     if (missing) children.push(el("span", { class: "flag" }, "Not available in this workspace"));
@@ -228,6 +228,10 @@ export async function start() {
     );
     parts.push(el("div", { class: "toolbar" }, toolbar));
     if (reason) parts.push(el("p", { id: "run-reason", class: "reason" }, reason));
+    parts.push(el("p", { class: "starts" }, logic.startsFrom(chain)));
+    if (editable) {
+      parts.push(el("p", { class: "note" }, logic.PLACEHOLDER_NOTE));
+    }
 
     chain.sessions.forEach((session, s) => {
       if (s > 0) parts.push(el("div", { class: "handover", role: "separator", "aria-label": `Fresh context: session ${s + 1} starts a new conversation` }, "fresh context"));

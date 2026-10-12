@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cardPrompt, defaultCard, parseChain, parseChains, requiredSkills, runnable, serializeChains, skillDefault, TEMPLATES, usesMskills, usesStory, type Chain } from "./chains.ts";
+import { cardPrompt, defaultCard, parseChain, parseChains, inputKinds, inputOf, requiredSkills, runnable, serializeChains, skillDefault, TEMPLATES, usesMskills, type Chain } from "./chains.ts";
 
 const story = TEMPLATES.find((t) => t.id === "story")!;
 const mine = (sessions: Chain["sessions"], id = "mine"): Chain => ({ id, name: "Mine", sessions });
@@ -18,9 +18,21 @@ describe("templates", () => {
     assert.deepEqual(story.sessions[1]!.cards.map((c) => c.next), [undefined, "Continue with the next fix.", undefined]);
   });
 
-  it("ships four built-in templates that all use m-skills", () => {
-    assert.deepEqual(TEMPLATES.map((t) => t.id), ["story", "brainstorm-story", "debug-story", "kickoff"]);
+  it("ships four built-in templates, named after what you bring, that all use m-skills", () => {
+    assert.deepEqual(TEMPLATES.map((t) => [t.id, t.name]), [["story", "Story"], ["idea", "Idea"], ["bug", "Bug"], ["new-project", "New project"]]);
     assert.ok(TEMPLATES.every((t) => t.builtIn && usesMskills(t)));
+  });
+
+  it("starts each interactive template from the input its first skill expects", () => {
+    assert.deepEqual(
+      TEMPLATES.slice(1).map((t) => t.sessions[0]!.cards.map(cardPrompt)),
+      [
+        ["/m-skills:brainstorming-planner {{idea}}", "/m-skills:planning-architect Plan the Deep-Dive Execution Prompt above.", "/m-skills:implementing-architect Implement the approved plan above."],
+        // debugging-architect writes the fix itself, so its session ends there.
+        ["/m-skills:debugging-architect {{bug}}"],
+        ["/m-skills:kickoff {{idea}}", "/m-skills:planning-architect Plan the first slice decided above.", "/m-skills:implementing-architect Implement the approved plan above."],
+      ],
+    );
   });
 
   it("marks the interactive first card of the other templates as pausing", () => {
@@ -58,10 +70,14 @@ describe("requiredSkills and usesMskills", () => {
   });
 });
 
-describe("usesStory", () => {
-  it("is true for every template, which all put the story in the first prompt", () => assert.ok(TEMPLATES.every(usesStory)));
-  it("is false for a chain that never mentions {{story}}", () => assert.equal(usesStory(mine([{ cards: [defaultCard("acme:x")] }])), false));
-  it("finds {{story}} in any session", () => assert.equal(usesStory(mine([{ cards: [defaultCard("a")] }, { cards: [{ ...defaultCard("b"), args: "fix {{story}} now" }] }])), true));
+describe("inputOf", () => {
+  it("asks Story for a story, Idea and New project for an idea, and Bug for a bug", () => assert.deepEqual(TEMPLATES.map(inputOf), ["story", "idea", "bug", "idea"]));
+  it("is undefined for a chain without a placeholder, which needs only a name", () => assert.equal(inputOf(mine([{ cards: [defaultCard("acme:x")] }])), undefined));
+  it("finds a placeholder in any session", () => assert.equal(inputOf(mine([{ cards: [defaultCard("a")] }, { cards: [{ ...defaultCard("b"), args: "fix {{bug}} now" }] }])), "bug"));
+  it("lists every kind a chain uses", () => {
+    const both = mine([{ cards: [{ ...defaultCard("a"), args: "{{story}}" }, { ...defaultCard("b"), args: "{{idea}}" }] }]);
+    assert.deepEqual(inputKinds(both), ["story", "idea"]);
+  });
 });
 
 describe("runnable", () => {
@@ -70,6 +86,11 @@ describe("runnable", () => {
   it("accepts a chain when the skills are not known yet", () => assert.deepEqual(runnable(story), { ok: true }));
   it("refuses a chain with no sessions", () => assert.deepEqual(runnable(mine([])), { ok: false, reason: "This chain has no sessions." }));
   it("refuses a chain with an empty session", () => assert.deepEqual(runnable(mine([{ cards: [defaultCard("x")] }, { cards: [] }])), { ok: false, reason: "Session 2 has no skills." }));
+
+  it("refuses a chain that uses more than one kind of input", () => {
+    const both = mine([{ cards: [{ ...defaultCard("a"), args: "{{story}}" }, { ...defaultCard("b"), args: "{{bug}}" }] }]);
+    assert.deepEqual(runnable(both), { ok: false, reason: "Use only one of {{story}}, {{idea}}, {{bug}} in a chain; Run asks for one input." });
+  });
 
   it("refuses a chain with a pausing card", () => {
     const outcome = runnable(TEMPLATES[1]!, requiredSkills(TEMPLATES[1]!));

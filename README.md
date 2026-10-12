@@ -44,13 +44,24 @@ The settings are application-scoped: set them in your user settings, not in a wo
 
 ## Run a story
 
-1. Write the story in a Markdown file in the open repository. Coordiner finds stories by their heading, which must start with `Story <number>` or `Slice <number>`:
+A story says what should change and for whom. The **Story** template plans it, implements it, then reviews the result in a fresh session. No story yet, only an idea? Start from the **Idea** template instead (see [Build and run a chain](#build-and-run-a-chain)); its brainstorm turns the idea into one.
+
+1. Write the story in a Markdown file in the open repository, your backlog. Coordiner finds stories by their heading, which must start with `Story <number>` or `Slice <number>`. Everything under the heading, up to the next heading of the same level, is the story:
 
    ```markdown
+   # Backlog
+
    ## Story 1: Add a settings page
 
-   What the story should do, in as much detail as the planner needs.
+   As a user I can change the theme and the language from one page.
+   The page opens from the gear icon. Changes apply at once, without a reload.
+
+   ## Story 2: Export a report as CSV
+
+   …
    ```
+
+   For a one-off you can skip the file: choose **Type a story…** in the next step and write the story in one line.
 
 2. Run **Coordiner: Run Story…**, pick the file, then the story.
 3. Read the confirm dialog and choose **Run**. It shows the install command Coordiner will run in the new worktree (taken from the lockfile) and warns if your checkout has uncommitted changes, which the worktree will not contain.
@@ -73,18 +84,30 @@ For what each step does, the unattended rules, and where the run journal is kept
 
 Run **Coordiner: Open Chains** (or the list button in the **Run** view's title bar). Templates and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
 
-| Template | Session 1 | Session 2 |
-|---|---|---|
-| **Story** (what **Run Story…** runs) | planning → implementing | review → fix → rolling-history |
-| **Brainstorm story** | brainstorming → planning → implementing | same |
-| **Debug story** | debugging → planning → implementing | same |
-| **Kickoff** | kickoff → planning → implementing | same |
+Each template is named after what you bring to it, and **Run** asks for exactly that:
 
-The first card of Brainstorm story, Debug story and Kickoff pauses for you, so those templates cannot run until the chat panel exists.
+| Template | You bring | Run asks | Session 1 | Session 2 |
+|---|---|---|---|---|
+| **Story** (what **Run Story…** runs) | a written story | pick one from a backlog file, or type it | planning → implementing | review → fix → rolling-history |
+| **Idea** | a rough idea; one line is enough | "What do you want to build?" | brainstorming ⏸ → planning → implementing | same |
+| **Bug** | a symptom | "What happened, what did you expect, and how do you trigger it?" | debugging ⏸ (writes the fix itself) | same |
+| **New project** | what you want to build | "What do you want to build?" | kickoff ⏸ → planning → implementing | same |
+
+For a typed answer, Run then suggests a run name made from it, which you can change. The name becomes the worktree folder and the `coordiner/<name>` branch.
+
+⏸ marks a card that pauses for you: the brainstorm, the debugging and the kickoff are conversations, and your answer at Run only opens them. Those templates cannot run until the chat panel exists.
 
 1. Select a template and choose **Duplicate to edit**. Templates are read-only.
-2. Edit the copy: **Add** a skill from the list (every skill your Claude Code session offers, m-skills first), move cards with the arrow buttons or **Alt+←** / **Alt+→**, edit a card's arguments, add or remove sessions. Every change is saved at once. `{{story}}` in an argument is replaced by the story's heading and body.
-3. Choose **Run**. A chain that uses `{{story}}` asks for a backlog story, as in [Run a story](#run-a-story); any other chain asks for a run name, which becomes the worktree folder and the `coordiner/<name>` branch. A disabled **Run** says why underneath.
+2. Edit the copy: **Add** a skill from the list (every skill your Claude Code session offers, m-skills first), move cards with the arrow buttons or **Alt+←** / **Alt+→**, edit a card's arguments, add or remove sessions. Every change is saved at once. To have Run ask for an input, put one placeholder in a card's arguments:
+
+   | Placeholder | Run asks for | What replaces it |
+   |---|---|---|
+   | `{{story}}` | a story from a backlog file, or a typed one | the story's heading and body |
+   | `{{idea}}` | an idea, typed | your answer |
+   | `{{bug}}` | a bug, typed | your answer |
+
+   A chain uses one kind of placeholder at most. A chain with none asks only for a run name.
+3. Choose **Run**. A disabled **Run** says why underneath.
 
 The skill list comes from asking a Claude Code session in the open folder which skills it offers. No prompt is sent, so it costs no model turn. It runs once per window; **Refresh skills** re-lists after you install or change skills.
 

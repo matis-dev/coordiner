@@ -1,4 +1,4 @@
-import { runnable, usesMskills, type Card, type Chain } from "./chains.ts";
+import { INPUT_KINDS, inputOf, INPUTS, runnable, usesMskills, type Card, type Chain } from "./chains.ts";
 
 // The decisions behind the chains webview, kept out of the DOM script so they can be tested. The webview loads this module from dist/.
 
@@ -13,6 +13,25 @@ export function runReason(chain: Chain, view: EditorView): string | undefined {
 
 // Unknown until discovery has run; a skill the workspace does not offer is flagged on its card.
 export const isMissing = (card: Card, view: EditorView): boolean => view.palette !== undefined && !view.palette.some((p) => p.skill === card.skill);
+
+export function startsFrom(chain: Chain): string {
+  const kind = inputOf(chain);
+  return `Starts from ${kind ? INPUTS[kind].startsFrom : "a name only. Run asks for one; it names the worktree and the branch."}`;
+}
+
+const PLACEHOLDERS = INPUT_KINDS.map((k) => INPUTS[k].placeholder);
+export const PLACEHOLDER_NOTE = `Put ${PLACEHOLDERS.slice(0, -1).join(", ")} or ${PLACEHOLDERS.at(-1)} in a card's arguments, and Run asks for that input and puts it there.`;
+
+// Splits a card's arguments so each placeholder can be shown as what Run will put there.
+const PLACEHOLDER = new RegExp(`(${PLACEHOLDERS.map((p) => p.replace(/[{}]/g, "\\$&")).join("|")})`);
+export const argParts = (args: string): ({ text: string } | { chip: string })[] =>
+  args
+    .split(PLACEHOLDER)
+    .filter((part) => part !== "")
+    .map((part) => {
+      const kind = INPUT_KINDS.find((k) => INPUTS[k].placeholder === part);
+      return kind ? { chip: INPUTS[kind].chip } : { text: part };
+    });
 
 export const copyName = (name: string): string => `${name} copy`.slice(0, 100);
 export const newChainId = (now: number): string => `chain-${now.toString(36)}`;

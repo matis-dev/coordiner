@@ -108,6 +108,24 @@ describe("chains webview: loading", () => {
   });
 });
 
+describe("chains webview: what a chain starts from", () => {
+  it("says what Run asks for, and shows a placeholder as what Run will put there", async () => {
+    const page = await open();
+    page.send();
+    assert.match(page.doc.querySelector(".starts")!.textContent!, /^Starts from a written story/);
+    assert.deepEqual(page.all(".args .chip").map((n) => n.textContent), ["the story you choose at Run"]);
+    assert.equal(page.all(".args")[1]!.textContent, "Implement the approved plan above.");
+    assert.doesNotMatch(page.doc.getElementById("detail")!.textContent!, /\{\{/);
+  });
+
+  it("explains the placeholders on a chain you can edit", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send();
+    assert.match(page.doc.querySelector(".starts")!.textContent!, /a name only/);
+    assert.match(page.doc.getElementById("detail")!.textContent!, /Put \{\{story\}\}, \{\{idea\}\} or \{\{bug\}\} in a card's arguments/);
+  });
+});
+
 describe("chains webview: text is never markup", () => {
   it("shows a chain name and card arguments literally", async () => {
     const page = await open({ selectedId: "x" });
@@ -336,8 +354,8 @@ describe("chains webview: running", () => {
   it("disables Run with the reason linked to it, and announces the reason instead of running", async () => {
     const page = await open();
     page.send();
-    page.select("Kickoff, m-skills");
-    const run = page.named("Run Kickoff");
+    page.select("New project, m-skills");
+    const run = page.named("Run New project");
     assert.equal(run.getAttribute("aria-disabled"), "true");
     const reason = page.doc.getElementById(run.getAttribute("aria-describedby")!)!;
     assert.match(reason.textContent!, /chat panel/);

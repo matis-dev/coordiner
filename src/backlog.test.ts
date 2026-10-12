@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseStories, slugify } from "./backlog.ts";
+import { parseStories, slugify, storyText } from "./backlog.ts";
 
 describe("parseStories", () => {
   it("finds Story N and Slice N headings at any level, case-insensitively", () => {
@@ -41,4 +41,8 @@ describe("slugify", () => {
   it("turns path and shell syntax into plain dashes", () => {
     assert.equal(slugify("Story 3: ../../etc; rm -rf ~"), "story-3-etc-rm-rf");
   });
+});
+
+describe("storyText", () => {
+  it("is the heading, a blank line, then the body", () => assert.equal(storyText({ heading: "Story 1: Login", body: "Add a login form." }), "Story 1: Login\n\nAdd a login form."));
 });

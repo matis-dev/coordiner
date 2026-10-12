@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
-import { addKey, afterMove, afterRemove, copyName, isMissing, moveDelta, moveKey, newChainId, removeKey, runReason } from "./editor-logic.ts";
+import { addKey, afterMove, afterRemove, argParts, copyName, isMissing, moveDelta, moveKey, newChainId, PLACEHOLDER_NOTE, removeKey, runReason, startsFrom } from "./editor-logic.ts";
 import { REQUIRED_COMMANDS } from "./session.ts";
 
 const story = TEMPLATES[0]!;
@@ -61,4 +61,26 @@ describe("focus after an edit", () => {
     assert.equal(afterRemove(0, 2, 3), removeKey(0, 1));
     assert.equal(afterRemove(1, 0, 1), addKey(1));
   });
+});
+
+describe("startsFrom", () => {
+  it("says what each template asks for at Run", () => {
+    assert.match(startsFrom(story), /^Starts from a written story\. Run lets you pick one from a Markdown backlog file/);
+    assert.match(startsFrom(TEMPLATES[1]!), /^Starts from a rough idea/);
+    assert.match(startsFrom(TEMPLATES[2]!), /^Starts from a bug/);
+  });
+  it("says a chain without a placeholder needs only a name", () => assert.equal(startsFrom(own), "Starts from a name only. Run asks for one; it names the worktree and the branch."));
+});
+
+describe("argParts", () => {
+  it("shows each placeholder as what Run will put there, keeping the text around it", () => {
+    assert.deepEqual(argParts("fix {{bug}} now"), [{ text: "fix " }, { chip: "the bug you describe at Run" }, { text: " now" }]);
+    assert.deepEqual(argParts("{{story}}"), [{ chip: "the story you choose at Run" }]);
+  });
+  it("leaves text without a placeholder, and unknown braces, as text", () => assert.deepEqual(argParts("use {{other}}"), [{ text: "use {{other}}" }]));
+});
+
+describe("PLACEHOLDER_NOTE", () => {
+  it("lists every placeholder Run knows", () =>
+    assert.equal(PLACEHOLDER_NOTE, "Put {{story}}, {{idea}} or {{bug}} in a card's arguments, and Run asks for that input and puts it there."));
 });

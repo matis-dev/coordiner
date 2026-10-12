@@ -17,6 +17,8 @@ export function parseStories(markdown: string): Story[] {
   return stories;
 }
 
+export const storyText = (story: Story): string => `${story.heading}\n\n${story.body}`;
+
 // The slug becomes a branch and a directory name, so it is restricted to [a-z0-9-].
 export function slugify(heading: string): string {
   const slug = heading.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/, "");

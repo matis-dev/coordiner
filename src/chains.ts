@@ -36,7 +36,33 @@ export function defaultCard(skill: string): Card {
   return { skill, args: "", label: d.label, pause: d.pause ?? false, ...(d.next ? { next: d.next } : {}) };
 }
 
-export const STORY = "{{story}}";
+// What a chain starts from: a placeholder in a card's arguments makes Run ask for that input and put it there.
+// `ask` is the question Run asks when the input is typed; a story can also be picked from a backlog file.
+export const INPUTS = {
+  story: {
+    placeholder: "{{story}}",
+    chip: "the story you choose at Run",
+    startsFrom: 'a written story. Run lets you pick one from a Markdown backlog file (headings like "## Story 1: …") or type it.',
+    title: "Type a story",
+    ask: "The story in one line: what should change, and for whom. Planning works out the rest.",
+  },
+  idea: {
+    placeholder: "{{idea}}",
+    chip: "the idea you describe at Run",
+    startsFrom: "a rough idea; one line is enough. Run asks you to describe it, and the conversation asks the rest.",
+    title: "Describe the idea",
+    ask: "What do you want to build? One line is enough; the conversation asks the rest.",
+  },
+  bug: {
+    placeholder: "{{bug}}",
+    chip: "the bug you describe at Run",
+    startsFrom: "a bug. Run asks what happened, what you expected, and how to trigger it.",
+    title: "Describe the bug",
+    ask: "What happened, what did you expect, and how do you trigger it?",
+  },
+} as const;
+export type InputKind = keyof typeof INPUTS;
+export const INPUT_KINDS = Object.keys(INPUTS) as InputKind[];
 const card = (skill: string, args = "", extra: Partial<Card> = {}): Card => ({ ...defaultCard(skill), args, ...extra });
 const reviewSession: ChainSession = {
   cards: [card(REVIEW), card(IMPLEMENT, "fix the findings", { label: "Fix", next: "Continue with the next fix." }), card(HISTORY)],
@@ -45,33 +71,37 @@ const authorSession = (first: Card[]): ChainSession => ({
   cards: [...first, card(IMPLEMENT, "Implement the approved plan above.")],
 });
 
+// Each template is named after what you bring to it.
 export const TEMPLATES: readonly Chain[] = [
-  { id: "story", name: "Story", builtIn: true, sessions: [authorSession([card(PLAN, STORY)]), reviewSession] },
+  { id: "story", name: "Story", builtIn: true, sessions: [authorSession([card(PLAN, INPUTS.story.placeholder)]), reviewSession] },
   {
-    id: "brainstorm-story",
-    name: "Brainstorm story",
+    id: "idea",
+    name: "Idea",
     builtIn: true,
-    sessions: [authorSession([card(`${MSKILLS}brainstorming-planner`, STORY), card(PLAN, "Plan the Deep-Dive Execution Prompt above.")]), reviewSession],
+    sessions: [authorSession([card(`${MSKILLS}brainstorming-planner`, INPUTS.idea.placeholder), card(PLAN, "Plan the Deep-Dive Execution Prompt above.")]), reviewSession],
   },
   {
-    id: "debug-story",
-    name: "Debug story",
+    id: "bug",
+    name: "Bug",
     builtIn: true,
-    sessions: [authorSession([card(`${MSKILLS}debugging-architect`, STORY), card(PLAN, "Plan the fix found above.")]), reviewSession],
+    // debugging-architect writes the regression test and the fix itself, so no plan or implement cards follow it.
+    sessions: [{ cards: [card(`${MSKILLS}debugging-architect`, INPUTS.bug.placeholder)] }, reviewSession],
   },
   {
-    id: "kickoff",
-    name: "Kickoff",
+    id: "new-project",
+    name: "New project",
     builtIn: true,
-    sessions: [authorSession([card(`${MSKILLS}kickoff`, STORY), card(PLAN, "Plan the first slice decided above.")]), reviewSession],
+    sessions: [authorSession([card(`${MSKILLS}kickoff`, INPUTS.idea.placeholder), card(PLAN, "Plan the first slice decided above.")]), reviewSession],
   },
 ];
 
 export const cardPrompt = (c: Card): string => (c.args === "" ? `/${c.skill}` : `/${c.skill} ${c.args}`);
 export const requiredSkills = (chain: Chain): string[] => [...new Set(chain.sessions.flatMap((s) => s.cards.map((c) => c.skill)))];
 export const usesMskills = (chain: Chain): boolean => requiredSkills(chain).some((s) => s.startsWith(MSKILLS));
-// Only a chain that puts the story in a prompt needs a backlog story; any other chain just needs a name for its worktree.
-export const usesStory = (chain: Chain): boolean => chain.sessions.some((s) => s.cards.some((c) => c.args.includes(STORY)));
+export const inputKinds = (chain: Chain): InputKind[] =>
+  INPUT_KINDS.filter((kind) => chain.sessions.some((s) => s.cards.some((c) => c.args.includes(INPUTS[kind].placeholder))));
+// A chain with no placeholder just needs a name for its worktree.
+export const inputOf = (chain: Chain): InputKind | undefined => inputKinds(chain)[0];
 
 export type Runnable = { ok: true } | { ok: false; reason: string };
 
@@ -81,6 +111,7 @@ export function runnable(chain: Chain, commands?: readonly string[]): Runnable {
   const empty = chain.sessions.findIndex((s) => s.cards.length === 0);
   if (empty !== -1) return { ok: false, reason: `Session ${empty + 1} has no skills.` };
   if (chain.sessions.some((s) => s.cards.some((c) => c.pause))) return { ok: false, reason: "A card here pauses for you, and that needs the chat panel, which comes in the next slice." };
+  if (inputKinds(chain).length > 1) return { ok: false, reason: `Use only one of ${INPUT_KINDS.map((k) => INPUTS[k].placeholder).join(", ")} in a chain; Run asks for one input.` };
   const missing = commands ? requiredSkills(chain).filter((s) => !commands.includes(s)) : [];
   if (missing.length > 0) return { ok: false, reason: `Missing skills: ${missing.join(", ")}.` };
   return { ok: true };
