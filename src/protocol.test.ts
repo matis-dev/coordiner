@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseStatus, tierOf, UNATTENDED_NOTE, withoutStatus } from "./protocol.ts";
+import { INTERACTIVE_NOTE, parseStatus, tierOf, UNATTENDED_NOTE, withoutStatus } from "./protocol.ts";
 
 describe("parseStatus", () => {
   it("reads NEXT, DONE and HALT from the last line", () => {
@@ -40,6 +40,16 @@ describe("UNATTENDED_NOTE", () => {
 
   it("tells the review, fix and history phases, and any other skill, how to end", () => {
     for (const phase of ["Reviewing:", "Fixing findings:", "Rolling history:", "Any other skill:"]) assert.ok(UNATTENDED_NOTE.includes(phase), phase);
+  });
+});
+
+describe("INTERACTIVE_NOTE", () => {
+  it("names every marker the parser accepts, and the Continue button that moves the chain on", () => {
+    for (const marker of ["COORDINER: NEXT", "COORDINER: DONE", "COORDINER: HALT", "AskUserQuestion", "Continue"]) assert.ok(INTERACTIVE_NOTE.includes(marker), marker);
+  });
+
+  it("does not claim that nobody is at the keyboard", () => {
+    assert.doesNotMatch(INTERACTIVE_NOTE, /Nobody is at the keyboard/);
   });
 });
 

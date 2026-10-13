@@ -95,7 +95,7 @@ Each template is named after what you bring to it, and **Run** asks for exactly 
 
 For a typed answer, Run then suggests a run name made from it, which you can change. The name becomes the worktree folder and the `coordiner/<name>` branch.
 
-⏸ marks a card that pauses for you: the brainstorm, the debugging and the kickoff are conversations, and your answer at Run only opens them. Those templates cannot run until the chat panel exists.
+⏸ marks a card that pauses for you: the brainstorm, the debugging and the kickoff are conversations, and your answer at Run only opens them. The conversation happens in the run's chat, described below.
 
 1. Select a template and choose **Duplicate to edit**. Templates are read-only.
 2. Edit the copy: **Add** a skill from the list (every skill your Claude Code session offers, m-skills first), move cards with the arrow buttons or **Alt+←** / **Alt+→**, edit a card's arguments, add or remove sessions. Every change is saved at once. To have Run ask for an input, put one placeholder in a card's arguments:
@@ -108,6 +108,18 @@ For a typed answer, Run then suggests a run name made from it, which you can cha
 
    A chain uses one kind of placeholder at most. A chain with none asks only for a run name.
 3. Choose **Run**. A disabled **Run** says why underneath.
+
+### Talk to a run in the chat
+
+The run's chat sits under the chains in the chains editor. It shows what the running card says and which tools it uses, with a **fresh context** divider where a new session starts; the card the run is on is marked **Running** in its lane. If a card starts waiting for you while the editor is closed, the editor opens without taking focus and a notification says so. Drag the bar above the chat to change its height, or focus the bar and use **↑** / **↓** (**Home** and **End** for the smallest and largest); the editor remembers the height. **Hide chat** folds it down to its heading.
+
+- **A card that pauses (⏸)** waits after each of its turns. Write in the message box and choose **Send** (or press **Ctrl+Enter**); your message is its next turn, in the same conversation. When the skill asks you something, its question shows as a form: pick an option, or pick **Other** and write your own answer, then choose **Send answers**.
+- **Continue to …** moves the chain on. It is highlighted once the card has given its status line, and you can keep talking before you choose it. A pausing card that never gave a status line simply moves on to the next card.
+- **Any other card** keeps running unattended. A message you send while it works is queued and goes in front of its next turn; the queue says where it goes, including the next session (in a fresh context) when the card may finish first, and **Withdraw** takes a message back. **Pause after this turn** makes the card wait for you once its current turn ends, as a pausing card does.
+- **Stop run** stops the run. A message still queued when the run ends goes back into the message box.
+- A question waits for your answer for as long as it takes; nothing runs and nothing is spent while it waits.
+
+Only unattended turns count toward the 20-turn cap. Your messages and answers are written to the run journal.
 
 The skill list comes from asking a Claude Code session in the open folder which skills it offers. No prompt is sent, so it costs no model turn. It runs once per window; **Refresh skills** re-lists after you install or change skills.
 

@@ -5,19 +5,18 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { parseStories, slugify, storyText, type Story } from "./backlog.ts";
-import { inputOf, INPUTS, MSKILLS_URL, parseChains, requiredSkills, runnable, serializeChains, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
+import { inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, parseChains, requiredSkills, runnable, serializeChains, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import { runReason } from "./editor-logic.ts";
-import { parseEditorMessage, type EditorState } from "./editor-protocol.ts";
+import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
 import { checkEnvironment, sessionEnv, type Models } from "./environment.ts";
 import { createJournal, journalFileName } from "./journal.ts";
-import { UNATTENDED_NOTE } from "./protocol.ts";
-import { fillInput, MAX_INPUT_CHARS, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
+import { fillInput, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
+import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type RunChat } from "./run-chat.ts";
 import { listCommands, runTurn } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
 import { mskillsPresent, palette, type PaletteEntry } from "./skills.ts";
 import { plain } from "./text.ts";
-import { unattendedCanUseTool } from "./unattended.ts";
 import { stepItem, type StepView } from "./view.ts";
 import { addWorktree, inspectRepo, prepareReview, type Exec } from "./worktree.ts";
 
@@ -195,13 +194,20 @@ async function announce(outcome: Outcome, heading: string, worktree: string, cha
   }
 }
 
+// The run's chat outlives the run, so the editor still shows the last transcript after it ends, until the next run starts.
+type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat };
+
 type RunContext = {
-  state: { abort?: AbortController };
+  state: RunState;
   provider: StepsProvider;
   reveal: (step: StepView) => void;
   output: vscode.OutputChannel;
   storage: vscode.Uri;
   onRunChange: () => void;
+  // Sends the run's chat to the chains editor, if it is open.
+  postChat: (message: ChatMessage) => void;
+  // A card waits for the user, or asked them something: bring the editor up without taking focus.
+  needsYou: (card: string) => void;
 };
 
 async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
@@ -246,13 +252,16 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
   const setup = proposeSetup(await readdir(repo.root));
   const sessions = chain.sessions.map((s, i) => `${i + 1}. ${s.cards.map((c) => plain(c.label)).join(" → ")}`).join("\n");
   const detail = [
-    "Questions are answered with the Recommended option and logged. Anything auto mode will not approve is denied, and so is any git write or GitHub publish.",
+    chain.sessions.some((s) => s.cards.some((c) => c.pause))
+      ? "Cards that pause wait for you in the chat under the chains editor. Every other card runs unattended: its questions are answered with the Recommended option and logged."
+      : "The chain runs unattended: questions are answered with the Recommended option and logged.",
+    "In the chat you can message any card (it gets your message with its next turn) or pause it after its turn. Anything auto mode will not approve is denied, and so is any git write or GitHub publish.",
     `Each session starts a fresh conversation:\n${sessions}`,
     "Keep this computer awake: the run stops if VS Code closes.",
     repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
     setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
   ].filter(Boolean).join("\n\n");
-  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(input.name)}" unattended?`, { modal: true, detail }, "Run");
+  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, { modal: true, detail }, "Run");
   if (choice !== "Run") return;
 
   const config = vscode.workspace.getConfiguration("coordiner");
@@ -288,13 +297,21 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
   }
 
   const abort = new AbortController();
-  state.abort = abort;
-  ctx.onRunChange();
-  provider.update([]);
   const log = (line: string) => {
     output.appendLine(line);
     void journal({ type: "log", line });
   };
+  const chat = createRunChat({
+    title: `${plain(chain.name)} · ${plain(input.name)}`,
+    post: ctx.postChat,
+    record: (r) => void journal(r),
+    moved: ctx.onRunChange,
+    needsYou: ctx.needsYou,
+    log,
+  });
+  Object.assign(state, { abort, chainId: chain.id, chat });
+  ctx.onRunChange();
+  provider.update([]);
   const emit = (event: RunEvent) => {
     void journal(event);
     if (event.type === "step-started") {
@@ -308,14 +325,16 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
   let outcome: Outcome;
   try {
     outcome = await runChain(filled.chain, {
-      runTurn: (request) =>
-        runTurn({ ...request, cwd: added.path, env, requiredCommands: required, canUseTool: unattendedCanUseTool(log), systemPromptAppend: UNATTENDED_NOTE, signal: abort.signal, onGuard: log }),
+      runTurn: ({ interactive, ...request }) =>
+        runTurn({ ...request, ...chat.forTurn(interactive), cwd: added.path, env, requiredCommands: required, signal: abort.signal, onGuard: log }),
       models,
       emit,
       signal: abort.signal,
+      talk: chat.talk,
       prepareReview: () => prepareReview(added.path, exec),
     });
   } finally {
+    chat.talk.end();
     state.abort = undefined;
     ctx.onRunChange();
   }
@@ -324,6 +343,12 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
 }
 
 // ── Chains editor ─────────────────────────────────────────────────────────────
+
+// Where the run is, for the lanes to mark; nothing once it has ended.
+function runningAt({ abort, chainId, chat }: RunState): Pick<EditorState, "runningAt"> {
+  const view = chat?.view();
+  return abort && chainId && view?.index !== undefined && view.session !== undefined ? { runningAt: { chainId, session: view.session, index: view.index } } : {};
+}
 
 class ChainsEditor {
   private panel?: vscode.WebviewPanel;
@@ -347,14 +372,20 @@ class ChainsEditor {
     this.ctx = ctx;
   }
 
-  async open(): Promise<void> {
+  // `preserveFocus` brings the editor up for a waiting card without taking focus from wherever the user is.
+  async open(preserveFocus = false): Promise<void> {
     if (this.panel) {
-      this.panel.reveal();
+      this.panel.reveal(undefined, preserveFocus);
       return;
     }
     const media = vscode.Uri.joinPath(this.extension, "media");
     const dist = vscode.Uri.joinPath(this.extension, "dist");
-    const panel = vscode.window.createWebviewPanel("coordiner.chains", "Coordiner Chains", vscode.ViewColumn.Active, { enableScripts: true, localResourceRoots: [media, dist] });
+    const panel = vscode.window.createWebviewPanel(
+      "coordiner.chains",
+      "Coordiner Chains",
+      { viewColumn: vscode.ViewColumn.Active, preserveFocus },
+      { enableScripts: true, localResourceRoots: [media, dist] },
+    );
     this.panel = panel;
     const uri = (base: vscode.Uri, name: string) => panel.webview.asWebviewUri(vscode.Uri.joinPath(base, name)).toString();
     panel.webview.html = editorHtml({
@@ -368,14 +399,27 @@ class ChainsEditor {
     panel.webview.onDidReceiveMessage((raw: unknown) => void this.receive(raw));
   }
 
+  // A waiting card brings the editor up; a notification says so only when the editor was not already in view.
+  needsYou(card: string): void {
+    const inView = this.panel?.visible === true;
+    void this.open(true);
+    if (!inView) void vscode.window.showInformationMessage(`Coordiner: ${plain(card)} is waiting for you in the chains editor.`);
+  }
+
+  postChat(message: ChatMessage): void {
+    void this.panel?.webview.postMessage(message);
+  }
+
   post(): void {
     // A state sent while saves are queued would roll the editor back past them; the last save posts instead.
     if (this.pendingSaves > 0) return;
+    const run = this.ctx.state;
     const state: EditorState = {
       type: "state",
       templates: TEMPLATES,
       chains: this.chains,
-      running: this.ctx.state.abort !== undefined,
+      running: run.abort !== undefined,
+      ...runningAt(run),
       ...(this.palette ? { palette: this.palette } : {}),
       ...(this.paletteError ? { paletteError: this.paletteError } : {}),
       ...(this.mskills !== undefined ? { mskills: this.mskills } : {}),
@@ -394,6 +438,7 @@ class ChainsEditor {
       case "ready":
         if (!this.loaded) await this.load();
         this.post();
+        this.postChat({ type: "chat", chat: this.ctx.state.chat?.view() ?? IDLE_CHAT, entries: this.ctx.state.chat?.entries() ?? [] });
         if (!this.palette) await this.discover();
         return;
       case "save":
@@ -427,7 +472,20 @@ class ChainsEditor {
         return;
       case "checkEnvironment":
         await vscode.commands.executeCommand("coordiner.checkEnvironment");
+        return;
+      default:
+        this.chat(message);
     }
+  }
+
+  // The chat acts only on the run that is going; Talk itself refuses what does not fit the moment (a stale question, an empty message).
+  private chat(message: ChatAction): void {
+    const { chat, abort } = this.ctx.state;
+    if (!chat || !abort) {
+      this.ctx.output.appendLine("Coordiner: ignored a chat message; no run is going.");
+      return;
+    }
+    if (!actOnChat(chat.talk, () => abort.abort(), message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);
   }
 
   private async load(): Promise<void> {
@@ -506,11 +564,20 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Coordiner");
   const provider = new StepsProvider();
   const view = vscode.window.createTreeView("coordiner.run", { treeDataProvider: provider });
-  const state: { abort?: AbortController } = {};
+  const state: RunState = {};
   // Reveal without stealing focus; a hidden view just rejects, which is fine.
   const reveal = (step: StepView) => void view.reveal(step, { focus: false, select: false }).then(undefined, () => undefined);
   let editor: ChainsEditor | undefined;
-  const ctx: RunContext = { state, provider, reveal, output, storage: context.globalStorageUri, onRunChange: () => editor?.post() };
+  const ctx: RunContext = {
+    state,
+    provider,
+    reveal,
+    output,
+    storage: context.globalStorageUri,
+    onRunChange: () => editor?.post(),
+    postChat: (message) => editor?.postChat(message),
+    needsYou: (card) => editor?.needsYou(card),
+  };
   editor = new ChainsEditor(context.extensionUri, join(context.globalStorageUri.fsPath, "chains.json"), ctx);
   const story = TEMPLATES.find((t) => t.id === "story")!;
 

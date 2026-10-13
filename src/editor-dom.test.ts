@@ -83,9 +83,9 @@ describe("chains webview: loading", () => {
     page.send();
     assert.equal(page.doc.querySelector("#detail h2")!.textContent, "Story");
     assert.match(page.doc.getElementById("detail")!.textContent!, /Built-in template, read-only\./);
-    assert.equal(page.all('[role="separator"]').length, 1);
-    assert.equal(page.all('[role="separator"]')[0]!.getAttribute("aria-label"), "Fresh context: session 2 starts a new conversation");
-    assert.equal(page.all("textarea").length, 0);
+    assert.equal(page.all('#detail [role="separator"]').length, 1);
+    assert.equal(page.all('#detail [role="separator"]')[0]!.getAttribute("aria-label"), "Fresh context: session 2 starts a new conversation");
+    assert.equal(page.all("#detail textarea").length, 0);
     assert.equal(page.all('button[aria-label^="Remove"]').length, 0);
   });
 
@@ -351,18 +351,45 @@ describe("chains webview: running", () => {
     assert.deepEqual(page.posted.at(-1), { type: "run", id: "own" });
   });
 
-  it("disables Run with the reason linked to it, and announces the reason instead of running", async () => {
+  it("runs a template with a pausing card, and flags the card", async () => {
     const page = await open();
-    page.send();
+    page.send({ palette: palette([...REQUIRED_COMMANDS, "m-skills:kickoff"]) });
     page.select("New project, m-skills");
     const run = page.named("Run New project");
+    assert.equal(run.getAttribute("aria-disabled"), "false");
+    run.click();
+    assert.deepEqual(page.posted.at(-1), { type: "run", id: "new-project" });
+    assert.match(page.doc.getElementById("detail")!.textContent!, /Pauses for you/);
+  });
+
+  it("disables Run with the reason linked to it, and announces the reason instead of running", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send({ palette: palette(["acme:a", "acme:b"]) });
+    const run = page.named("Run Own");
     assert.equal(run.getAttribute("aria-disabled"), "true");
     const reason = page.doc.getElementById(run.getAttribute("aria-describedby")!)!;
-    assert.match(reason.textContent!, /chat panel/);
+    assert.match(reason.textContent!, /Missing skills/);
     run.click();
     assert.equal(page.posted.some((m) => m.type === "run"), false);
-    assert.match(page.status()!, /chat panel/);
-    assert.match(page.doc.getElementById("detail")!.textContent!, /Pauses for you/);
+    assert.match(page.status()!, /Missing skills/);
+  });
+
+  it("marks the card a run is on, in text and as the current step", async () => {
+    const page = await open();
+    page.send({ running: true, runningAt: { chainId: "story", session: 1, index: 0 } });
+    const current = page.all('.card[aria-current="step"]');
+    assert.equal(current.length, 1);
+    assert.match(current[0]!.textContent!, /^Review.*Running$/);
+    page.send({ running: true, runningAt: { chainId: "own", session: 0, index: 0 } });
+    assert.equal(page.all('.card[aria-current="step"]').length, 0);
+  });
+
+  it("marks the second of two cards that share a label when the run is on it", async () => {
+    const twice: Chain = { id: "twice", name: "Twice", sessions: [{ cards: [defaultCard("acme:lint"), defaultCard("acme:lint")] }] };
+    const page = await open({ selectedId: "twice" });
+    page.send({ chains: [twice], running: true, runningAt: { chainId: "twice", session: 0, index: 1 } });
+    const cards = page.all("#detail .card");
+    assert.deepEqual(cards.map((c) => c.getAttribute("aria-current")), [null, "step"]);
   });
 
   it("disables Run while another run is in progress", async () => {

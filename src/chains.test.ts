@@ -92,10 +92,8 @@ describe("runnable", () => {
     assert.deepEqual(runnable(both), { ok: false, reason: "Use only one of {{story}}, {{idea}}, {{bug}} in a chain; Run asks for one input." });
   });
 
-  it("refuses a chain with a pausing card", () => {
-    const outcome = runnable(TEMPLATES[1]!, requiredSkills(TEMPLATES[1]!));
-    assert.equal(outcome.ok, false);
-    assert.match(!outcome.ok ? outcome.reason : "", /chat panel/);
+  it("runs a chain with a pausing card; the card waits for the user in the chat", () => {
+    assert.deepEqual(runnable(TEMPLATES[1]!, requiredSkills(TEMPLATES[1]!)), { ok: true });
   });
 
   it("lists the missing skills", () => {

@@ -33,3 +33,12 @@ export const UNATTENDED_NOTE = [
   "The status line must be the last line of your final message.",
   "Questions you genuinely need answered go through AskUserQuestion, and every question must carry an option labelled (Recommended) that is safe to take without the user; for multi-select, label a recommended set. Coordiner takes the Recommended option and logs it.",
 ].join(" ");
+
+// For a turn the user is present for: a card that pauses, or one they paused. The status lines stay those of UNATTENDED_NOTE.
+export const INTERACTIVE_NOTE = [
+  "This session is driven by coordiner, which runs a chain of skills. Right now the user is at the keyboard, talking to you in coordiner's chat.",
+  "Ask what you need through AskUserQuestion, as often as the skill calls for; the user answers each question in the chat.",
+  "Do not offer a next-step picker or start another skill: the user moves the chain on with coordiner's Continue button.",
+  "When this skill's work is done, end your final message with the status line the skill would give in an unattended run: `COORDINER: NEXT <tier>` (Light, Standard or Heavy) for the next step's tier, `COORDINER: DONE` when the skill is finished, or `COORDINER: HALT <one-line reason>`.",
+  "Until the work is done, end your turn without a status line; the user replies in the chat.",
+].join(" ");

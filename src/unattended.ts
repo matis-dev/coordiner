@@ -1,17 +1,19 @@
 import type { CanUseTool, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { clip, plain } from "./text.ts";
 
-type Option = { label: string; description?: string };
-type Question = { question: string; options: Option[]; multiSelect?: boolean };
+export type Option = { label: string; description?: string };
+export type Question = { question: string; header?: string; options: Option[]; multiSelect?: boolean };
 
 const RECOMMENDED = /\(Recommended\)/i;
 
-const isQuestion = (q: unknown): q is Question => {
+export const isQuestion = (q: unknown): q is Question => {
   const v = q as Partial<Question> | null;
   return (
     typeof v === "object" &&
     v !== null &&
     typeof v.question === "string" &&
+    (v.header === undefined || typeof v.header === "string") &&
+    (v.multiSelect === undefined || typeof v.multiSelect === "boolean") &&
     Array.isArray(v.options) &&
     v.options.length > 0 &&
     v.options.every((o) => typeof o?.label === "string")
@@ -34,10 +36,30 @@ export function answerUnattended(input: Record<string, unknown>, log: (line: str
   return { behavior: "allow", updatedInput: { ...input, questions, answers } };
 }
 
+const denyTool = (toolName: string, input: Record<string, unknown>, log: (line: string) => void): PermissionResult => {
+  log(`denied tool: ${plain(toolName)} ${clip(plain(JSON.stringify(input)), 300)}`);
+  return { behavior: "deny", message: "coordiner runs unattended and cannot approve this action." };
+};
+
 export const unattendedCanUseTool =
   (log: (line: string) => void): CanUseTool =>
-  async (toolName, input) => {
-    if (toolName === "AskUserQuestion") return answerUnattended(input, log);
-    log(`denied tool: ${plain(toolName)} ${clip(plain(JSON.stringify(input)), 300)}`);
-    return { behavior: "deny", message: "coordiner runs unattended and cannot approve this action." };
+  async (toolName, input) => (toolName === "AskUserQuestion" ? answerUnattended(input, log) : denyTool(toolName, input, log));
+
+// The user answers in the chat; `ask` settles with their answers, keyed by question text, or rejects when the run stops.
+export type Ask = (questions: Question[], signal: AbortSignal) => Promise<Record<string, string>>;
+
+// Only questions reach the user; every other tool is decided exactly as in an unattended turn.
+export const interactiveCanUseTool =
+  (ask: Ask, log: (line: string) => void): CanUseTool =>
+  async (toolName, input, { signal }) => {
+    if (toolName !== "AskUserQuestion") return denyTool(toolName, input, log);
+    const { questions } = input;
+    if (!Array.isArray(questions) || !questions.every(isQuestion)) {
+      return { behavior: "deny", message: "coordiner could not read this question; ask it in plain text instead." };
+    }
+    try {
+      return { behavior: "allow", updatedInput: { ...input, questions, answers: await ask(questions, signal) } };
+    } catch {
+      return { behavior: "deny", message: "The run was stopped before the user answered." };
+    }
   };

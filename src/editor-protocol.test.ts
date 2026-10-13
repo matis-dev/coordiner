@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { defaultCard } from "./chains.ts";
+import { defaultCard, MAX_INPUT_CHARS } from "./chains.ts";
 import { parseEditorMessage } from "./editor-protocol.ts";
 
 const chain = { id: "mine", name: "Mine", sessions: [{ cards: [defaultCard("acme:lint")] }] };
@@ -32,6 +32,44 @@ describe("parseEditorMessage", () => {
     assert.equal(parseEditorMessage({ type: "run", id: "Bad Id" }), undefined);
     assert.equal(parseEditorMessage({ type: "delete", id: 4 }), undefined);
     assert.equal(parseEditorMessage({ type: "delete", id: "x", force: true }), undefined);
+  });
+
+  it("accepts the chat's messages with exactly their fields", () => {
+    for (const type of ["chatPause", "chatContinue", "chatStop"]) assert.deepEqual(parseEditorMessage({ type }), { type });
+    assert.deepEqual(parseEditorMessage({ type: "chatSend", text: "keep it small" }), { type: "chatSend", text: "keep it small" });
+    assert.deepEqual(parseEditorMessage({ type: "chatWithdraw", id: "m3" }), { type: "chatWithdraw", id: "m3" });
+    const picks = [{ picked: ["SQLite"] }, { picked: [], other: "Postgres" }];
+    assert.deepEqual(parseEditorMessage({ type: "chatAnswer", id: "q1", picks }), { type: "chatAnswer", id: "q1", picks });
+  });
+
+  it("drops a chat message that is empty, over the length limit, or carries extra fields", () => {
+    assert.equal(parseEditorMessage({ type: "chatSend", text: "  " }), undefined);
+    assert.equal(parseEditorMessage({ type: "chatSend", text: 7 }), undefined);
+    assert.equal(parseEditorMessage({ type: "chatSend", text: "x".repeat(MAX_INPUT_CHARS + 1) }), undefined);
+    assert.deepEqual(parseEditorMessage({ type: "chatSend", text: "x".repeat(MAX_INPUT_CHARS) }), { type: "chatSend", text: "x".repeat(MAX_INPUT_CHARS) });
+    assert.equal(parseEditorMessage({ type: "chatPause", card: "Implement" }), undefined);
+    assert.equal(parseEditorMessage({ type: "chatWithdraw", id: "M 3" }), undefined);
+  });
+
+  it("drops answers that are not a list of one to four picks of labels and Other text", () => {
+    const answer = (picks: unknown, id: unknown = "q1") => parseEditorMessage({ type: "chatAnswer", id, picks });
+    for (const picks of [
+      [],
+      "SQLite",
+      Array.from({ length: 5 }, () => ({ picked: ["a"] })),
+      [null],
+      [["SQLite"]],
+      [{ picked: "SQLite" }],
+      [{ picked: [3] }],
+      [{ picked: ["x".repeat(1001)] }],
+      [{ picked: [], other: 3 }],
+      [{ picked: [], other: "x".repeat(MAX_INPUT_CHARS + 1) }],
+      [{ picked: ["a"], extra: true }],
+    ]) {
+      assert.equal(answer(picks), undefined, JSON.stringify(picks).slice(0, 80));
+    }
+    assert.equal(answer([{ picked: ["a"] }], "Q 1"), undefined);
+    assert.equal(answer([{ picked: ["a"] }], 1), undefined);
   });
 
   it("drops a save whose chain fails validation, including one claiming a template id", () => {

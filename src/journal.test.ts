@@ -35,6 +35,20 @@ describe("createJournal", () => {
     assert.deepEqual(JSON.parse(lines[0]!), { at: "2026-10-10T19:51:03.123Z", type: "step-finished", index: 2, status: "done", detail: "next: Light", sessionId: "s-1" });
   });
 
+  it("records what the user said in the chat and how they answered, in call order", async () => {
+    const lines: string[] = [];
+    const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);
+    void journal({ type: "you", card: "Brainstorm", text: "keep it offline" });
+    await journal({ type: "answer", card: "Brainstorm", question: "Which store?", answer: "SQLite" });
+    assert.deepEqual(
+      lines.map((l) => JSON.parse(l)),
+      [
+        { at: "2026-10-10T19:51:03.123Z", type: "you", card: "Brainstorm", text: "keep it offline" },
+        { at: "2026-10-10T19:51:03.123Z", type: "answer", card: "Brainstorm", question: "Which store?", answer: "SQLite" },
+      ],
+    );
+  });
+
   it("keeps model text with quotes, newlines and control characters on one line", async () => {
     const lines: string[] = [];
     const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);

@@ -11,6 +11,10 @@ export function runReason(chain: Chain, view: EditorView): string | undefined {
   return result.ok ? undefined : result.reason;
 }
 
+// The card a run is on, in session `s` of `chain`, or -1. By index, since two cards in a session can share a label.
+export const runningCard = (chain: Chain, s: number, runningAt?: { chainId: string; session: number; index: number }): number =>
+  runningAt?.chainId === chain.id && runningAt.session === s ? runningAt.index : -1;
+
 // Unknown until discovery has run; a skill the workspace does not offer is flagged on its card.
 export const isMissing = (card: Card, view: EditorView): boolean => view.palette !== undefined && !view.palette.some((p) => p.skill === card.skill);
 

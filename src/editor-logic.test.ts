@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
-import { addKey, afterMove, afterRemove, argParts, copyName, isMissing, moveDelta, moveKey, newChainId, PLACEHOLDER_NOTE, removeKey, runReason, startsFrom } from "./editor-logic.ts";
+import { addKey, afterMove, afterRemove, argParts, copyName, isMissing, moveDelta, moveKey, newChainId, PLACEHOLDER_NOTE, removeKey, runningCard, runReason, startsFrom } from "./editor-logic.ts";
 import { REQUIRED_COMMANDS } from "./session.ts";
 
 const story = TEMPLATES[0]!;
@@ -15,6 +15,20 @@ describe("runReason", () => {
   it("blocks an m-skills chain when m-skills is missing", () => assert.equal(runReason(story, { running: false, mskills: false }), "Needs m-skills, which is not installed."));
   it("lets your own skills run without m-skills", () => assert.equal(runReason(own, { running: false, mskills: false, palette: palette(["acme:lint"]) }), undefined));
   it("passes on the chain's own reason", () => assert.match(runReason(own, { running: false, palette: [] })!, /Missing skills: acme:lint/));
+});
+
+describe("runningCard", () => {
+  it("finds the running card by its index in the running session of the running chain, else -1", () => {
+    assert.equal(runningCard(story, 1, { chainId: "story", session: 1, index: 1 }), 1);
+    assert.equal(runningCard(story, 0, { chainId: "story", session: 1, index: 1 }), -1);
+    assert.equal(runningCard(story, 1, { chainId: "own", session: 1, index: 1 }), -1);
+    assert.equal(runningCard(story, 1, undefined), -1);
+  });
+
+  it("tells apart two cards that share a label", () => {
+    const twice: Chain = { id: "twice", name: "Twice", sessions: [{ cards: [defaultCard("acme:lint"), defaultCard("acme:lint")] }] };
+    assert.equal(runningCard(twice, 0, { chainId: "twice", session: 0, index: 1 }), 1);
+  });
 });
 
 describe("isMissing", () => {

@@ -1,4 +1,4 @@
-/* structure: master-detail · palette: VS Code theme, anchor focusBorder, accent owns Run · type: host UI font / host editor font for skill names · signature: the fresh-context divider between sessions · critique P4 H4 E4 S5 R5 V4 */
+/* structure: master-detail, the run's chat docked below · palette: VS Code theme, anchor focusBorder, accent owns Run · type: host UI font / host editor font for skill names · signature: the fresh-context divider between sessions · critique P4 H4 E4 S5 R5 V4 */
 
 :root {
   --gap: 8px;
@@ -14,12 +14,18 @@ body {
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
   line-height: 1.4;
+  /* The chains scroll on their own above the run's chat, which stays in view. */
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
 }
 
 .layout {
   display: grid;
   grid-template-columns: minmax(180px, 240px) 1fr;
-  min-height: 100vh;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 @media (max-width: 560px) {
@@ -234,6 +240,114 @@ textarea {
 .banner.error { border-left-color: var(--vscode-errorForeground); }
 .banner h2 { font-size: 1em; margin: var(--gap) 0 4px; }
 .banner p { margin: 0 0 var(--gap); }
+
+/* The run's chat: one strip under the chains, its transcript scrolling on its own. */
+/* Its height is set by the divider above it (media/chat.js). */
+#chat {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 var(--gap-l) var(--gap);
+  box-sizing: border-box;
+  background: var(--vscode-panel-background, var(--vscode-editor-background));
+}
+
+#chat-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+/* A 24px band to grab, drawn as one rule with a grip in the middle. */
+#chat-splitter {
+  flex: none;
+  height: 24px;
+  cursor: row-resize;
+  touch-action: none;
+  background:
+    linear-gradient(var(--vscode-focusBorder), var(--vscode-focusBorder)) center / 32px 4px no-repeat,
+    linear-gradient(var(--vscode-panel-border, var(--vscode-foreground)), var(--vscode-panel-border, var(--vscode-foreground))) center / 100% 1px no-repeat,
+    var(--vscode-panel-background, var(--vscode-editor-background));
+}
+
+#chat-splitter:focus-visible { outline-offset: -2px; }
+
+.chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+}
+
+.chat-head h2 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 0;
+}
+
+.chat-status { margin: var(--gap) 0; }
+
+#transcript, .queued {
+  list-style: none;
+  margin: 0 0 var(--gap);
+  padding: 0;
+}
+
+#transcript {
+  flex: 1;
+  min-height: 3em;
+  overflow-y: auto;
+}
+
+.entry { margin: 0 0 var(--gap); }
+.entry .who { font-weight: 600; }
+
+.entry .text, .queued .text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 2px 0 0;
+}
+
+.entry.tool code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+
+.entry.you {
+  padding-left: var(--gap);
+  border-left: 2px solid var(--vscode-focusBorder);
+}
+
+#transcript .handover { margin: var(--gap) 0; }
+
+.queued li {
+  padding: 4px var(--gap);
+  margin-bottom: 4px;
+  border: 1px dashed var(--vscode-panel-border, var(--vscode-foreground));
+  border-radius: var(--radius);
+}
+
+.question fieldset {
+  margin: 0 0 var(--gap);
+  border: 1px solid var(--vscode-panel-border, var(--vscode-foreground));
+  border-radius: var(--radius);
+}
+
+.question h3 { font-size: 1em; margin: 0 0 var(--gap); }
+.question .option { margin: 4px 0; }
+.question .option .note { margin: 0 0 0 1.6em; }
+.question input[type="text"] { margin-left: 1.6em; width: calc(100% - 2em); box-sizing: border-box; }
+
+.composer .toolbar { margin: var(--gap) 0 0; }
+
+.flag.running { color: var(--vscode-focusBorder); font-weight: 600; }
+/* The second pixel is a shadow, so marking the running card never moves the lane. */
+.card[aria-current="step"] { border-color: var(--vscode-focusBorder); box-shadow: inset 0 0 0 1px var(--vscode-focusBorder); }
 
 .visually-hidden {
   position: absolute;

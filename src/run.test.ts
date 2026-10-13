@@ -1,9 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { storyText } from "./backlog.ts";
-import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
-import { fillInput, MAX_INPUT_CHARS, MAX_TURNS, remainingCommands, runChain, runSession, type ChainDeps, type Outcome, type RunDeps, type RunEvent } from "./run.ts";
+import { defaultCard, MAX_INPUT_CHARS, TEMPLATES, type Chain } from "./chains.ts";
+import { fillInput, MAX_TURNS, remainingCommands, runChain, runSession, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
 import type { TurnResult } from "./session.ts";
+import { Talk, type WaitRequest } from "./talk.ts";
 import type { ReviewPrep } from "./worktree.ts";
 
 const models = { strong: "m-strong", medium: "m-medium", weak: "m-weak" };
@@ -14,21 +15,41 @@ const AUTHOR_SESSION = chain.sessions[0]!;
 const REVIEW_SESSION = chain.sessions[1]!;
 const reply = (text: string, n: number): TurnResult => ({ ok: true, sessionId: `sess-${n}`, model: "ignored", resultText: text, commands: [] });
 
-// `script` answers turn N with script[N]; a function lets a test react to the request.
-function harness(script: Array<TurnResult | (() => TurnResult)>, signal = new AbortController().signal) {
-  const requests: Array<{ prompt: string; model: string; resume?: string }> = [];
+// `script` answers turn N with script[N]; a function lets a test react to the request, and act in the chat as the user would.
+// Each time a card waits for the user, the next of `moves` runs; a wait with no move left ends the chat, which stops the run.
+function harness(script: Array<TurnResult | ((talk: Talk) => TurnResult)>, signal = new AbortController().signal, moves: Array<(talk: Talk) => void> = []) {
+  const requests: TurnAsk[] = [];
   const events: RunEvent[] = [];
+  const waits: WaitRequest[] = [];
+  const talk = new Talk({ changed: () => undefined, delivered: () => undefined, answered: () => undefined });
   const deps: RunDeps = {
     runTurn: async (request) => {
       requests.push(request);
       const next = script[requests.length - 1]!;
-      return typeof next === "function" ? next() : next;
+      return typeof next === "function" ? next(talk) : next;
     },
     models,
     emit: (event) => void events.push(event),
     signal,
+    talk: {
+      at: (where) => talk.at(where),
+      takeQueued: (card) => talk.takeQueued(card),
+      pausePending: () => talk.pausePending(),
+      waitForYou: (request) => {
+        waits.push(request);
+        const move = talk.waitForYou(request);
+        // A wait that the queue answered at once has already moved on, and keeps the user's move for the next wait.
+        queueMicrotask(() => {
+          if (talk.snapshot().phase !== "waiting") return;
+          const act = moves.shift();
+          if (act) act(talk);
+          else talk.end();
+        });
+        return move;
+      },
+    },
   };
-  return { deps, requests, events };
+  return { deps, requests, events, waits, talk };
 }
 
 describe("runSession: session one", () => {
@@ -245,6 +266,130 @@ describe("runChain: the Story template", () => {
   });
 });
 
+describe("runSession: talking with the user", () => {
+  const idea = (fillInput(TEMPLATES.find((t) => t.id === "idea")!, "an offline notes app") as { ok: true; chain: Chain }).chain;
+  const IDEA_SESSION = idea.sessions[0]!;
+  const brief = (r: TurnAsk) => [r.prompt, r.model, r.resume, r.interactive];
+
+  it("waits after a pausing card's first turn, sends the user's message as its next turn, and moves on at Continue", async () => {
+    const { deps, requests, waits, events } = harness(
+      [reply("Which platforms?", 1), reply("deep dive\nCOORDINER: DONE", 2), reply("plan\nCOORDINER: NEXT Light", 3), reply("built\nCOORDINER: DONE", 4)],
+      undefined,
+      [(t) => void t.send("desktop only"), (t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "done", text: "built" });
+    assert.deepEqual(requests.map(brief), [
+      ["/m-skills:brainstorming-planner an offline notes app", "m-strong", undefined, true],
+      ["desktop only", "m-strong", "sess-1", true],
+      ["/m-skills:planning-architect Plan the Deep-Dive Execution Prompt above.", "m-strong", "sess-2", false],
+      ["/m-skills:implementing-architect Implement the approved plan above.", "m-weak", "sess-3", false],
+    ]);
+    assert.deepEqual(waits.map((w) => [w.card, w.nextCard, w.ready]), [["Brainstorm", "Plan", false], ["Brainstorm", "Plan", true]]);
+    assert.deepEqual(events.filter((e) => e.type === "step-started").map((e) => e.label), ["Brainstorm", "Brainstorm · chat", "Plan", "Implement"]);
+    assert.deepEqual(events.filter((e) => e.type === "step-finished").slice(0, 2).map((e) => e.detail), ["waiting for you", "waiting for you"]);
+  });
+
+  it("moves a pausing card on at Continue even when it never gave a status line", async () => {
+    const { deps, requests } = harness([reply("Which platforms?", 1), reply("plan\nCOORDINER: NEXT Light", 2), reply("built\nCOORDINER: DONE", 3)], undefined, [(t) => t.continue()]);
+    assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "done", text: "built" });
+    assert.equal(requests[1]!.prompt, "/m-skills:planning-architect Plan the Deep-Dive Execution Prompt above.");
+    assert.equal(requests[1]!.model, "m-strong");
+  });
+
+  it("does not count turns with the user toward the turn cap", async () => {
+    const chatting = Array.from({ length: MAX_TURNS + 5 }, (_, n) => reply(`answer ${n}`, n + 1));
+    const { deps, requests } = harness(
+      [...chatting, reply("plan\nCOORDINER: NEXT Light", 90), reply("built\nCOORDINER: DONE", 91)],
+      undefined,
+      [...Array.from({ length: MAX_TURNS + 4 }, () => (t: Talk) => void t.send("go on")), (t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "done", text: "built" });
+    assert.equal(requests.length, MAX_TURNS + 7);
+  });
+
+  it("halts at Continue when the card's latest status line was a HALT", async () => {
+    const { deps } = harness([reply("COORDINER: HALT the idea needs a budget first", 1), reply("ok, noted", 2)], undefined, [(t) => void t.send("why?"), (t) => t.continue()]);
+    assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "halted", reason: "the idea needs a budget first", sessionId: "sess-2" });
+  });
+
+  it("stops when the run is stopped while the card waits", async () => {
+    const stop = new AbortController();
+    const { deps, requests } = harness([reply("Which platforms?", 1)], stop.signal, [() => stop.abort()]);
+    assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "stopped" });
+    assert.equal(requests.length, 1);
+  });
+
+  it("sends what the user queued during the first turn as the first message of the pause", async () => {
+    const { deps, requests } = harness(
+      [(t) => (t.send("and it must sync"), reply("Which platforms?", 1)), reply("noted", 2), reply("plan\nCOORDINER: NEXT Light", 3), reply("COORDINER: DONE", 4)],
+      undefined,
+      [(t) => t.continue()],
+    );
+    await runSession(IDEA_SESSION, deps);
+    assert.deepEqual(requests.slice(0, 2).map(brief), [
+      ["/m-skills:brainstorming-planner an offline notes app", "m-strong", undefined, true],
+      ["and it must sync", "m-strong", "sess-1", true],
+    ]);
+  });
+
+  it("pauses an unattended card after its turn, talks, then Continue resumes the plan at the tier it named", async () => {
+    const { deps, requests, waits } = harness(
+      [reply("plan\nCOORDINER: NEXT Light", 1), (t) => (t.requestPause(), reply("step 1 done\nCOORDINER: NEXT Standard", 2)), reply("because it is shared", 3), reply("COORDINER: DONE", 4)],
+      undefined,
+      [(t) => void t.send("why that helper?"), (t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.deepEqual(requests.map((r) => [r.prompt, r.model, r.interactive]), [
+      ["/m-skills:planning-architect Story 1: Login\n\nAdd a login form.", "m-strong", false],
+      ["/m-skills:implementing-architect Implement the approved plan above.", "m-weak", false],
+      ["why that helper?", "m-weak", true],
+      ["Continue with the next step of the plan.", "m-medium", false],
+    ]);
+    assert.deepEqual(waits.map((w) => [w.card, w.nextCard, w.ready]), [["Implement", undefined, true], ["Implement", undefined, true]]);
+  });
+
+  it("reminds a paused card that gave no status line, once Continue is pressed", async () => {
+    const { deps, requests } = harness(
+      [reply("plan\nCOORDINER: NEXT Light", 1), (t) => (t.requestPause(), reply("halfway there", 2)), reply("COORDINER: DONE", 3)],
+      undefined,
+      [(t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.deepEqual(requests.map((r) => [r.prompt, r.interactive]).at(-1), ["End your reply with your COORDINER status line.", false]);
+  });
+
+  it("ends the run on an unattended HALT even when a pause was asked for", async () => {
+    const { deps, waits } = harness([(t) => (t.requestPause(), reply("COORDINER: HALT needs a migration decision", 1))]);
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "halted", reason: "needs a migration decision", sessionId: "sess-1" });
+    assert.equal(waits.length, 0);
+  });
+
+  it("tells the chat which card the turn is for by its place in the session, not only its label", async () => {
+    const seen: Array<[string | undefined, number | undefined]> = [];
+    const at = (t: Talk, r: TurnResult) => (seen.push([t.snapshot().card, t.snapshot().index]), r);
+    const { deps } = harness([(t) => at(t, reply("plan\nCOORDINER: NEXT Light", 1)), (t) => at(t, reply("built\nCOORDINER: DONE", 2))]);
+    await runSession(AUTHOR_SESSION, deps);
+    assert.deepEqual(seen, [["Plan", 0], ["Implement", 1]]);
+  });
+
+  it("puts queued messages in front of the next unattended prompt, also across the fresh-context divider", async () => {
+    let during: unknown;
+    const h = harness([
+      reply("plan\nCOORDINER: NEXT Light", 1),
+      (t) => (t.send("use the existing helper"), reply("COORDINER: NEXT Light", 2)),
+      (t) => ((during = [t.snapshot().session, t.snapshot().nextSession]), t.send("check the docs too"), reply("COORDINER: DONE", 3)),
+      (t) => ((during = [during, t.snapshot().session, t.snapshot().nextSession]), reply("COORDINER: DONE", 4)),
+      reply("brief\nCOORDINER: DONE", 5),
+    ]);
+    const deps: ChainDeps = { ...h.deps, prepareReview: async () => ({ kind: "ready", marked: 0 }) };
+    assert.deepEqual(await runChain(chain, deps), { status: "done", text: "brief" });
+    assert.equal(h.requests[2]!.prompt, "use the existing helper\n\nContinue with the next step of the plan.");
+    assert.equal(h.requests[3]!.prompt, "check the docs too\n\n/m-skills:code-review-architect-uncommitted");
+    assert.equal(h.requests[3]!.resume, undefined);
+    assert.deepEqual(during, [[0, "Review"], 1, undefined]);
+  });
+});
+
 describe("fillInput", () => {
   it("puts the story heading and body where the template says {{story}}", () => {
     assert.equal(AUTHOR_SESSION.cards[0]!.args, "Story 1: Login\n\nAdd a login form.");
@@ -281,7 +426,7 @@ describe("runChain: other chains", () => {
     const h = harness([reply("linted\nCOORDINER: DONE", 1)]);
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("acme:lint")] }] };
     assert.deepEqual(await runChain(own, deps(h).deps), { status: "done", text: "linted" });
-    assert.deepEqual(h.requests, [{ prompt: "/acme:lint", model: "m-medium" }]);
+    assert.deepEqual(h.requests, [{ prompt: "/acme:lint", model: "m-medium", interactive: false }]);
   });
 
   it("moves between generic cards on NEXT, on the tier it names", async () => {

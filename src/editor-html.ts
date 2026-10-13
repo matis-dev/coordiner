@@ -20,6 +20,7 @@ export function editorHtml({ cspSource, nonce, scriptUri, styleUri, chainEditUri
 <nav id="rail" aria-label="Chains"></nav>
 <main id="detail"></main>
 </div>
+<section id="chat" aria-labelledby="chat-h"></section>
 <div id="status" role="status" class="visually-hidden"></div>
 <script type="module" nonce="${attr(nonce)}" src="${attr(scriptUri)}"></script>
 </body>

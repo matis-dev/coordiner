@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import { answerUnattended, unattendedCanUseTool } from "./unattended.ts";
+import { answerUnattended, interactiveCanUseTool, unattendedCanUseTool, type Ask } from "./unattended.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
 const logger = () => {
@@ -42,7 +42,16 @@ describe("answerUnattended", () => {
 
   it("denies malformed input", () => {
     const { log } = logger();
-    for (const input of [{}, { questions: "no" }, { questions: [{ question: "Q?", options: [] }] }, { questions: [{ question: 1, options: opts("a") }] }, { questions: [null] }, { questions: [{ question: "Q?", options: [{ nolabel: 1 }] }] }]) {
+    for (const input of [
+      {},
+      { questions: "no" },
+      { questions: [{ question: "Q?", options: [] }] },
+      { questions: [{ question: 1, options: opts("a") }] },
+      { questions: [null] },
+      { questions: [{ question: "Q?", options: [{ nolabel: 1 }] }] },
+      { questions: [{ question: "Q?", header: 7, options: opts("a") }] },
+      { questions: [{ question: "Q?", multiSelect: "yes", options: opts("a") }] },
+    ]) {
       assert.equal(answerUnattended(input, log).behavior, "deny");
     }
   });
@@ -69,5 +78,46 @@ describe("unattendedCanUseTool", () => {
     assert.equal(result?.behavior, "deny");
     assert.match(lines[0]!, /^denied tool: Bash \{"command":"x+…$/);
     assert.equal(lines[0]!.length < 340, true);
+  });
+});
+
+describe("interactiveCanUseTool", () => {
+  const signal = new AbortController().signal;
+  const options = { signal } as Parameters<ReturnType<typeof interactiveCanUseTool>>[2];
+  const question = { question: "Which?", header: "Pick", multiSelect: false, options: opts("A", "B (Recommended)") };
+
+  it("asks the user and passes their answers back with the original input", async () => {
+    const { lines, log } = logger();
+    let asked: unknown;
+    const ask: Ask = async (questions, s) => {
+      asked = [questions, s];
+      return { "Which?": "A" };
+    };
+    const result = await interactiveCanUseTool(ask, log)("AskUserQuestion", { extra: 1, questions: [question] }, options);
+    assert.deepEqual(asked, [[question], signal]);
+    assert.deepEqual(answersOf(result), { "Which?": "A" });
+    assert.equal(result?.behavior === "allow" && result.updatedInput?.extra, 1);
+    assert.deepEqual(lines, []);
+  });
+
+  it("denies when the run stops before the user answers", async () => {
+    const { log } = logger();
+    const result = await interactiveCanUseTool(async () => Promise.reject(new Error("stopped")), log)("AskUserQuestion", { questions: [question] }, options);
+    assert.deepEqual(result, { behavior: "deny", message: "The run was stopped before the user answered." });
+  });
+
+  it("denies questions it cannot read without asking the user", async () => {
+    const { log } = logger();
+    const ask: Ask = async () => assert.fail("must not ask");
+    for (const input of [{}, { questions: [{ question: "Q?", options: [] }] }]) {
+      assert.equal((await interactiveCanUseTool(ask, log)("AskUserQuestion", input, options))?.behavior, "deny");
+    }
+  });
+
+  it("denies every other tool and logs it, as an unattended turn does", async () => {
+    const { lines, log } = logger();
+    const result = await interactiveCanUseTool(async () => assert.fail("must not ask"), log)("Bash", { command: "rm -rf build" }, options);
+    assert.equal(result?.behavior, "deny");
+    assert.equal(lines[0], 'denied tool: Bash {"command":"rm -rf build"}');
   });
 });

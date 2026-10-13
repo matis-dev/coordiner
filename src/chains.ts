@@ -12,6 +12,8 @@ type SkillDefault = { kind: "once" | "loop"; tier: Tier; label: string; next?: s
 
 export const MSKILLS = "m-skills:";
 export const MSKILLS_URL = "https://github.com/matis-dev/m-skills";
+// The most a user types in one go: the input Run asks for, or a message in the run's chat.
+export const MAX_INPUT_CHARS = 20_000;
 const PLAN = `${MSKILLS}planning-architect`;
 const IMPLEMENT = `${MSKILLS}implementing-architect`;
 export const REVIEW = `${MSKILLS}code-review-architect-uncommitted`;
@@ -110,7 +112,6 @@ export function runnable(chain: Chain, commands?: readonly string[]): Runnable {
   if (chain.sessions.length === 0) return { ok: false, reason: "This chain has no sessions." };
   const empty = chain.sessions.findIndex((s) => s.cards.length === 0);
   if (empty !== -1) return { ok: false, reason: `Session ${empty + 1} has no skills.` };
-  if (chain.sessions.some((s) => s.cards.some((c) => c.pause))) return { ok: false, reason: "A card here pauses for you, and that needs the chat panel, which comes in the next slice." };
   if (inputKinds(chain).length > 1) return { ok: false, reason: `Use only one of ${INPUT_KINDS.map((k) => INPUTS[k].placeholder).join(", ")} in a chain; Run asks for one input.` };
   const missing = commands ? requiredSkills(chain).filter((s) => !commands.includes(s)) : [];
   if (missing.length > 0) return { ok: false, reason: `Missing skills: ${missing.join(", ")}.` };

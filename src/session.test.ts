@@ -36,6 +36,20 @@ describe("runTurn", () => {
     assert.equal(seen.prompt, "go");
   });
 
+  it("passes on the conversation's own assistant messages as they arrive, not a subagent's", async () => {
+    const own = msg({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "text", text: "hi" }] } });
+    const sub = msg({ type: "assistant", parent_tool_use_id: "tool-1", message: { content: [{ type: "text", text: "inner" }] } });
+    const seen: SDKMessage[] = [];
+    const { query } = fakeQuery(async function* () {
+      yield init();
+      yield own;
+      yield sub;
+      yield success();
+    });
+    assert.equal((await runTurn({ ...base, query, onMessage: (m) => void seen.push(m) })).ok, true);
+    assert.deepEqual(seen, [own]);
+  });
+
   it("configures the session: cwd, model, env, settings, auto mode, preset prompt", async () => {
     const { query, seen } = fakeQuery(async function* () {
       yield init();

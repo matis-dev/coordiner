@@ -8,11 +8,14 @@ export async function start() {
   const edit = await import(editUri);
   const chainsModule = await import(sibling("chains"));
   const logic = await import(sibling("editor-logic"));
+  const chatLogic = await import(sibling("chat-logic"));
+  const { startChat } = await import("./chat.js");
 
   const rail = document.getElementById("rail");
   const detail = document.getElementById("detail");
   const banner = document.getElementById("banner");
   const status = document.getElementById("status");
+  const chatRoot = document.getElementById("chat");
 
   let state = { templates: [], chains: [], running: false };
   let selectedId = vscode.getState()?.selectedId ?? "story";
@@ -32,10 +35,15 @@ export async function start() {
     return node;
   }
 
+  // The webview's saved state is shared with the chat (which keeps its height there), so each write keeps what the other wrote.
+  const remember = (patch) => vscode.setState({ ...vscode.getState(), ...patch });
+
   const announce = (text) => {
     status.textContent = "";
     requestAnimationFrame(() => (status.textContent = text));
   };
+
+  startChat({ vscode, root: chatRoot, logic: chatLogic, maxChars: chainsModule.MAX_INPUT_CHARS, announce, remember });
 
   const allChains = () => [...state.templates, ...state.chains];
   const selected = () => allChains().find((c) => c.id === selectedId) ?? state.templates[0];
@@ -43,7 +51,7 @@ export async function start() {
 
   function select(id) {
     selectedId = id;
-    vscode.setState({ selectedId });
+    remember({ selectedId });
     pendingFocus = "chain-title";
     render();
   }
@@ -60,7 +68,7 @@ export async function start() {
   function copyOf(chain) {
     const copy = edit.duplicate(chain, newId(), logic.copyName(chain.name));
     selectedId = copy.id;
-    vscode.setState({ selectedId });
+    remember({ selectedId });
     save(copy, `Created ${copy.name}`, "chain-title");
   }
 
@@ -109,7 +117,7 @@ export async function start() {
         { type: "button", "data-focus": "new-chain", onclick: () => {
           const chain = { id: newId(), name: "New chain", sessions: [{ cards: [] }] };
           selectedId = chain.id;
-          vscode.setState({ selectedId });
+          remember({ selectedId });
           save(chain, "Created New chain", "chain-title");
         } },
         "New empty chain",
@@ -119,8 +127,10 @@ export async function start() {
 
   function card(chain, s, i, c, editable) {
     const missing = logic.isMissing(c, state);
+    const running = logic.runningCard(chain, s, state.runningAt) === i;
     const label = c.label;
     const children = [el("span", { class: "card-label" }, label), el("code", { class: "skill" }, c.skill)];
+    if (running) children.push(el("span", { class: "flag running" }, "Running"));
     if (editable) {
       const id = `args-${s}-${i}`;
       children.push(
@@ -130,7 +140,7 @@ export async function start() {
     } else if (c.args) {
       children.push(el("p", { class: "args" }, logic.argParts(c.args).map((part) => ("chip" in part ? el("span", { class: "chip" }, part.chip) : part.text))));
     }
-    if (c.pause) children.push(el("span", { class: "flag" }, "Pauses for you (comes with the chat panel)"));
+    if (c.pause) children.push(el("span", { class: "flag" }, "Pauses for you"));
     if (missing) children.push(el("span", { class: "flag" }, "Not available in this workspace"));
     if (editable) {
       const cards = chain.sessions[s].cards;
@@ -153,7 +163,7 @@ export async function start() {
       );
       return el(
         "li",
-        { class: "card", onkeydown: (e) => {
+        { class: "card", "aria-current": running ? "step" : undefined, onkeydown: (e) => {
           const delta = logic.moveDelta(e);
           if (delta === undefined) return;
           e.preventDefault();
@@ -162,7 +172,7 @@ export async function start() {
         children,
       );
     }
-    return el("li", { class: "card" }, children);
+    return el("li", { class: "card", "aria-current": running ? "step" : undefined }, children);
   }
 
   function addSkill(chain, s) {
@@ -281,7 +291,8 @@ export async function start() {
   // if the typing was undone, it renders once focus has left the field.
   const typing = () => {
     const field = document.activeElement;
-    return field.matches("textarea, input") && field.value !== field.defaultValue;
+    // The chat's own fields are never replaced by a chains state, so typing there holds nothing back.
+    return field.matches("textarea, input") && !chatRoot.contains(field) && field.value !== field.defaultValue;
   };
 
   window.addEventListener("message", (event) => {

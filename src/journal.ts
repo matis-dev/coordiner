@@ -5,6 +5,9 @@ export type JournalRecord =
   | { type: "run-started"; chain: string; story: string; repo: string; worktree: string; branch: string; models: Models }
   | RunEvent
   | { type: "log"; line: string }
+  // What the user said in the run's chat, and how they answered a skill's question.
+  | { type: "you"; card: string; text: string }
+  | { type: "answer"; card: string; question: string; answer: string }
   | { type: "outcome"; outcome: Outcome };
 
 // One JSON line per record, written in call order. A failed write is reported once and the run goes on: the journal is a record, not a control.

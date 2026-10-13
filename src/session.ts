@@ -1,4 +1,4 @@
-import { query as sdkQuery, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk";
+import { query as sdkQuery, type CanUseTool, type Options, type SDKAssistantMessage, type SDKMessage, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk";
 import { guardHook } from "./guard.ts";
 
 // The m-skills commands the shipped templates use; all present means m-skills is installed.
@@ -29,6 +29,8 @@ export type TurnRequest = {
   signal?: AbortSignal;
   // Told when coordiner's own guard denies a command.
   onGuard?: (line: string) => void;
+  // Told each assistant message of the conversation itself, not of a subagent inside it, as it arrives.
+  onMessage?: (message: SDKAssistantMessage) => void;
   query?: QueryFn;
 };
 
@@ -73,7 +75,7 @@ export function pluginProblem(init: InitMessage, required: readonly string[]): s
 }
 
 // One turn = one SDK query. A later turn continues the same conversation through `resume`, optionally on another model.
-export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool, env, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
+export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool, env, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
   let sessionId: string | undefined;
@@ -112,6 +114,7 @@ export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool
           return { ok: false, sessionId, error: `the session runs ${message.model}, not the requested ${model}. Set a full model ID in the Coordiner settings.` };
         }
       }
+      if (message.type === "assistant" && message.parent_tool_use_id === null) onMessage?.(message);
       if (message.type === "result") {
         sessionId = message.session_id;
         // Returning here also avoids the throw query() raises after an error result.

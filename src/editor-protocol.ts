@@ -1,5 +1,8 @@
-import { parseChain, type Chain } from "./chains.ts";
+import { MAX_INPUT_CHARS, parseChain, type Chain } from "./chains.ts";
+import type { Pick } from "./chat-logic.ts";
 import type { PaletteEntry } from "./skills.ts";
+import type { TalkSnapshot } from "./talk.ts";
+import type { Entry } from "./transcript.ts";
 
 // Messages from the webview are untrusted input: each type has an exact set of keys, and anything else is dropped.
 export type EditorMessage =
@@ -9,7 +12,14 @@ export type EditorMessage =
   | { type: "run"; id: string }
   | { type: "refreshPalette" }
   | { type: "openMskills" }
-  | { type: "checkEnvironment" };
+  | { type: "checkEnvironment" }
+  // The run's chat
+  | { type: "chatSend"; text: string }
+  | { type: "chatWithdraw"; id: string }
+  | { type: "chatPause" }
+  | { type: "chatContinue" }
+  | { type: "chatAnswer"; id: string; picks: Pick[] }
+  | { type: "chatStop" };
 
 export type EditorState = {
   type: "state";
@@ -20,8 +30,18 @@ export type EditorState = {
   paletteError?: string;
   mskills?: boolean;
   running: boolean;
+  // The chain running, and where in it (the card's index in its session): the lanes mark that card.
+  runningAt?: { chainId: string; session: number; index: number };
   storageError?: string;
 };
+
+// The run's chat, kept apart from the chains state so a new message never re-renders the chain being edited.
+export type ChatView = TalkSnapshot & { title?: string };
+export type ChatMessage =
+  // Everything: on "ready", and when a run starts.
+  | { type: "chat"; chat: ChatView; entries: Entry[] }
+  | { type: "chatAppend"; entries: Entry[] }
+  | { type: "chatUpdate"; chat: ChatView };
 
 const ID = /^[a-z0-9-]{1,64}$/;
 const KEYS: Record<EditorMessage["type"], readonly string[]> = {
@@ -32,7 +52,31 @@ const KEYS: Record<EditorMessage["type"], readonly string[]> = {
   refreshPalette: [],
   openMskills: [],
   checkEnvironment: [],
+  chatSend: ["text"],
+  chatWithdraw: ["id"],
+  chatPause: [],
+  chatContinue: [],
+  chatAnswer: ["id", "picks"],
+  chatStop: [],
 };
+
+const MAX_QUESTIONS = 4;
+const MAX_LABEL = 1000;
+const isText = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max;
+
+// A question has at most four parts; each pick holds offered labels (checked against the open question later) and maybe Other text.
+function parsePicks(v: unknown): Pick[] | undefined {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_QUESTIONS) return undefined;
+  const picks: Pick[] = [];
+  for (const p of v) {
+    if (typeof p !== "object" || p === null || Array.isArray(p)) return undefined;
+    const { picked, other, ...extra } = p as Record<string, unknown>;
+    if (Object.keys(extra).length > 0 || !Array.isArray(picked) || !picked.every((l) => isText(l, MAX_LABEL))) return undefined;
+    if (other !== undefined && !isText(other, MAX_INPUT_CHARS)) return undefined;
+    picks.push({ picked: [...picked], ...(other !== undefined ? { other } : {}) });
+  }
+  return picks;
+}
 
 export function parseEditorMessage(v: unknown): EditorMessage | undefined {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return undefined;
@@ -48,7 +92,14 @@ export function parseEditorMessage(v: unknown): EditorMessage | undefined {
     }
     case "delete":
     case "run":
+    case "chatWithdraw":
       return typeof m.id === "string" && ID.test(m.id) ? { type, id: m.id } : undefined;
+    case "chatSend":
+      return isText(m.text, MAX_INPUT_CHARS) && m.text.trim() !== "" ? { type, text: m.text } : undefined;
+    case "chatAnswer": {
+      const picks = parsePicks(m.picks);
+      return typeof m.id === "string" && ID.test(m.id) && picks ? { type, id: m.id, picks } : undefined;
+    }
     default:
       return { type };
   }
