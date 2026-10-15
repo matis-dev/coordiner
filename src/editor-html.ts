@@ -15,12 +15,16 @@ export function editorHtml({ cspSource, nonce, scriptUri, styleUri, chainEditUri
 <title>Coordiner chains</title>
 </head>
 <body data-chain-edit="${attr(chainEditUri)}">
-<div id="banner"></div>
 <div class="layout">
 <nav id="rail" aria-label="Chains"></nav>
+<div class="workspace">
+<div class="pane">
+<div id="banner"></div>
 <main id="detail"></main>
 </div>
 <section id="chat" aria-labelledby="chat-h"></section>
+</div>
+</div>
 <div id="status" role="status" class="visually-hidden"></div>
 <script type="module" nonce="${attr(nonce)}" src="${attr(scriptUri)}"></script>
 </body>

@@ -354,7 +354,7 @@ describe("run chat: the divider above it", () => {
     const page = await open();
     const splitter = page.splitter();
     assert.equal(splitter.nextElementSibling, page.chat());
-    assert.equal(splitter.previousElementSibling, page.doc.querySelector(".layout"));
+    assert.equal(splitter.previousElementSibling, page.doc.querySelector(".pane"));
     assert.deepEqual(
       ["role", "tabindex", "aria-orientation", "aria-label", "aria-controls", "aria-valuemin", "aria-valuemax", "aria-valuenow", "aria-valuetext"].map((a) => splitter.getAttribute(a)),
       ["separator", "0", "horizontal", "Chat height", "chat", "15", "80", "35", "35% of the window"],

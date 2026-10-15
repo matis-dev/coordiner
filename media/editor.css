@@ -1,9 +1,13 @@
-/* structure: master-detail, the run's chat docked below · palette: VS Code theme, anchor focusBorder, accent owns Run · type: host UI font / host editor font for skill names · signature: the fresh-context divider between sessions · critique P4 H4 E4 S5 R5 V4 */
+/* structure: master-detail, full-height rail, the run's chat docked under the detail column · palette: VS Code theme, anchor textLink (focusBorder is near-invisible in some themes), accent owns Run · type: host UI font, sidebar-style section labels, host editor font for skill names · signature: the fresh-context divider between sessions · critique P4 H4 E4 S5 R4 V4 */
 
 :root {
   --gap: 8px;
   --gap-l: 16px;
-  --radius: 3px;
+  /* The detail and the chat share one inset, so their edges line up. */
+  --inset: 24px;
+  --radius: 4px;
+  --anchor: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  --rule: var(--vscode-panel-border, var(--vscode-foreground));
 }
 
 body {
@@ -13,38 +17,58 @@ body {
   background: var(--vscode-editor-background);
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
-  line-height: 1.4;
-  /* The chains scroll on their own above the run's chat, which stays in view. */
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
+  line-height: 1.45;
+  /* Every region scrolls on its own; the page itself never does. */
+  overflow: hidden;
 }
 
+/* The rail runs the full height; the chains scroll on their own above the run's chat, which stays in view under them. */
 .layout {
   display: grid;
   grid-template-columns: minmax(180px, 240px) 1fr;
+  height: 100vh;
+}
+
+.workspace {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane {
   flex: 1;
   min-height: 0;
   overflow: auto;
 }
 
 @media (max-width: 560px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  #rail { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--rule); }
+  :root { --inset: var(--gap-l); }
 }
 
 #rail {
-  padding: var(--gap-l);
-  border-right: 1px solid var(--vscode-panel-border, transparent);
+  min-height: 0;
+  overflow: auto;
+  padding: var(--gap-l) var(--gap);
+  border-right: 1px solid var(--rule);
   background: var(--vscode-sideBar-background, transparent);
 }
 
+/* Section labels in the voice of VS Code's own sidebar headers. */
 #rail h2, #detail h3 {
-  font-size: 1em;
+  font-size: 0.8em;
   font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-descriptionForeground));
   margin: var(--gap-l) 0 var(--gap);
 }
 
+#rail h2 { padding: 0 var(--gap); }
 #rail h2:first-child { margin-top: 0; }
+#rail > .note { padding: 0 var(--gap); }
 
 #rail ul, .lane {
   list-style: none;
@@ -56,38 +80,59 @@ body {
 
 #rail li button {
   width: 100%;
+  min-height: 28px;
   text-align: left;
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: var(--gap);
+  padding: 2px var(--gap);
+  border-color: transparent;
   background: transparent;
   color: var(--vscode-foreground);
 }
 
+#rail li button:hover { background: var(--vscode-list-hoverBackground); }
+
 #rail li button[aria-pressed="true"] {
   background: var(--vscode-list-activeSelectionBackground);
   color: var(--vscode-list-activeSelectionForeground);
+  font-weight: 600;
 }
 
-#rail li button:hover { background: var(--vscode-list-hoverBackground); }
+/* "New empty chain": a slot waiting to be filled, not another chain. */
+#rail > button {
+  width: 100%;
+  margin-top: var(--gap);
+  text-align: left;
+  padding: 4px var(--gap);
+  border: 1px dashed var(--rule);
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+}
 
+#rail > button:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
+
+/* Quiet, so four of them in a column read as a tag, not a row of lights. */
 .badge {
-  font-size: 0.85em;
+  font-size: 0.8em;
+  font-weight: 400;
   padding: 0 6px;
-  border-radius: var(--radius);
-  background: var(--vscode-badge-background);
-  color: var(--vscode-badge-foreground);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  opacity: 0.75;
 }
 
 #detail {
-  padding: var(--gap-l);
+  padding: var(--inset) var(--inset) var(--gap-l);
   max-width: 1100px;
 }
 
 #detail > h2 {
-  font-size: 1.4em;
+  font-size: 1.6em;
   font-weight: 600;
-  margin: 0 0 var(--gap);
+  letter-spacing: -0.01em;
+  margin: 0 0 4px;
 }
 
 .toolbar {
@@ -98,15 +143,21 @@ body {
   margin-bottom: var(--gap-l);
 }
 
+#detail > .toolbar {
+  margin-top: var(--gap-l);
+  padding-bottom: var(--gap-l);
+  border-bottom: 1px solid var(--rule);
+}
+
 .note, .reason {
   color: var(--vscode-descriptionForeground);
   margin: 0 0 var(--gap);
 }
 
 button {
-  min-height: 24px;
+  min-height: 26px;
   min-width: 24px;
-  padding: 2px 10px;
+  padding: 2px 12px;
   border: 1px solid var(--vscode-button-border, transparent);
   border-radius: var(--radius);
   background: var(--vscode-button-secondaryBackground);
@@ -120,6 +171,7 @@ button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 button.run {
   background: var(--vscode-button-background);
   color: var(--vscode-button-foreground);
+  font-weight: 600;
 }
 
 button.run:hover { background: var(--vscode-button-hoverBackground); }
@@ -140,7 +192,7 @@ input, textarea, select {
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
   border-radius: var(--radius);
-  padding: 2px 6px;
+  padding: 4px 8px;
 }
 
 textarea {
@@ -150,31 +202,55 @@ textarea {
   resize: vertical;
 }
 
+/* Columns line up from one session to the next, so the stations of the flow read as a grid. */
 .lane {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: var(--gap);
   margin-bottom: var(--gap);
+  counter-reset: station;
 }
 
 .card {
-  flex: 0 1 260px;
+  counter-increment: station;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: var(--gap);
-  border: 1px solid var(--vscode-panel-border, var(--vscode-foreground));
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
   border-radius: var(--radius);
   background: var(--vscode-editorWidget-background, transparent);
 }
 
-.card-label { font-weight: 600; }
+.card-label {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  font-weight: 600;
+}
+
+/* The station number; the list already says it, so it is hidden from screen readers. */
+.card-label::before {
+  content: counter(station) / "";
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1.5em;
+  height: 1.5em;
+  border: 1px solid var(--anchor);
+  border-radius: 50%;
+  color: var(--anchor);
+  font-size: 0.8em;
+  font-weight: 600;
+}
 
 .skill {
   font-family: var(--vscode-editor-font-family);
   font-size: 0.9em;
   color: var(--vscode-descriptionForeground);
-  word-break: break-all;
+  background: none;
+  padding: 0;
+  overflow-wrap: anywhere;
 }
 
 .args {
@@ -187,13 +263,14 @@ textarea {
 /* A placeholder, shown as what Run will put there. */
 .chip {
   padding: 0 4px;
-  border: 1px solid var(--vscode-focusBorder);
+  border: 1px dashed var(--anchor);
   border-radius: var(--radius);
   font-style: italic;
 }
 
 .starts {
   margin: 0 0 var(--gap);
+  max-width: 70ch;
 }
 
 .flag {
@@ -212,15 +289,18 @@ textarea {
   display: flex;
   align-items: center;
   gap: var(--gap);
-  margin: var(--gap-l) 0;
-  color: var(--vscode-focusBorder);
+  margin: var(--inset) 0 var(--gap);
+  color: var(--anchor);
+  font-size: 0.85em;
   font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .handover::before, .handover::after {
   content: "";
   flex: 1;
-  border-top: 2px dashed var(--vscode-focusBorder);
+  border-top: 2px dashed var(--anchor);
 }
 
 .add-skill {
@@ -231,9 +311,9 @@ textarea {
 }
 
 .banner {
-  margin: var(--gap-l);
+  margin: var(--inset) var(--inset) 0;
   padding: var(--gap) var(--gap-l);
-  border-left: 4px solid var(--vscode-focusBorder);
+  border-left: 4px solid var(--anchor);
   background: var(--vscode-textBlockQuote-background, transparent);
 }
 
@@ -243,12 +323,13 @@ textarea {
 
 /* The run's chat: one strip under the chains, its transcript scrolling on its own. */
 /* Its height is set by the divider above it (media/chat.js). */
+/* It may shrink below that height: on narrow widths the rail shares the column, and a tall chat would push its composer off the page. */
 #chat {
-  flex: none;
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 0 var(--gap-l) var(--gap);
+  padding: 0 var(--inset) var(--gap);
   box-sizing: border-box;
   background: var(--vscode-panel-background, var(--vscode-editor-background));
 }
@@ -268,8 +349,8 @@ textarea {
   cursor: row-resize;
   touch-action: none;
   background:
-    linear-gradient(var(--vscode-focusBorder), var(--vscode-focusBorder)) center / 32px 4px no-repeat,
-    linear-gradient(var(--vscode-panel-border, var(--vscode-foreground)), var(--vscode-panel-border, var(--vscode-foreground))) center / 100% 1px no-repeat,
+    linear-gradient(var(--anchor), var(--anchor)) center / 32px 4px no-repeat,
+    linear-gradient(var(--rule), var(--rule)) center / 100% 1px no-repeat,
     var(--vscode-panel-background, var(--vscode-editor-background));
 }
 
@@ -283,12 +364,12 @@ textarea {
 }
 
 .chat-head h2 {
-  font-size: 1em;
+  font-size: 1.15em;
   font-weight: 600;
   margin: 0;
 }
 
-.chat-status { margin: var(--gap) 0; }
+.chat-status { margin: 4px 0; color: var(--vscode-descriptionForeground); }
 
 #transcript, .queued {
   list-style: none;
@@ -298,7 +379,7 @@ textarea {
 
 #transcript {
   flex: 1;
-  min-height: 3em;
+  min-height: 1.5em;
   overflow-y: auto;
 }
 
@@ -320,7 +401,7 @@ textarea {
 
 .entry.you {
   padding-left: var(--gap);
-  border-left: 2px solid var(--vscode-focusBorder);
+  border-left: 2px solid var(--anchor);
 }
 
 #transcript .handover { margin: var(--gap) 0; }
@@ -328,13 +409,13 @@ textarea {
 .queued li {
   padding: 4px var(--gap);
   margin-bottom: 4px;
-  border: 1px dashed var(--vscode-panel-border, var(--vscode-foreground));
+  border: 1px dashed var(--rule);
   border-radius: var(--radius);
 }
 
 .question fieldset {
   margin: 0 0 var(--gap);
-  border: 1px solid var(--vscode-panel-border, var(--vscode-foreground));
+  border: 1px solid var(--rule);
   border-radius: var(--radius);
 }
 
@@ -345,9 +426,9 @@ textarea {
 
 .composer .toolbar { margin: var(--gap) 0 0; }
 
-.flag.running { color: var(--vscode-focusBorder); font-weight: 600; }
+.flag.running { color: var(--anchor); font-weight: 600; }
 /* The second pixel is a shadow, so marking the running card never moves the lane. */
-.card[aria-current="step"] { border-color: var(--vscode-focusBorder); box-shadow: inset 0 0 0 1px var(--vscode-focusBorder); }
+.card[aria-current="step"] { border-color: var(--anchor); box-shadow: inset 0 0 0 1px var(--anchor); }
 
 .visually-hidden {
   position: absolute;

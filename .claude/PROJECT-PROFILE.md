@@ -45,19 +45,19 @@ Coverage: `pnpm coverage` (`node --test --experimental-test-coverage`, src only)
 ## Design
 
 - **Does this project have a UI?** yes: built-in VS Code views plus the chains editor webview (visitor mode: Operate).
-- **Direction brief** (established 2026-10-11 with the chains editor; stamp at the top of `media/editor.css`):
+- **Direction brief** (established 2026-10-11 with the chains editor, refined 2026-10-13; stamp at the top of `media/editor.css`):
 
 ```
 /* direction
 surface:   Coordiner chains editor (webview panel) · mode: Operate
 visitor:   the user, at the start of a work session, deciding what runs next · task: pick or tweak a chain and press Run
 world:     relay baton, shift handover, fresh notebook, assembly line, worktree
-structure: master-detail, the run's chat docked below (2026-10-13) · weight: the selected chain's lanes · divides: space within a session, a labelled "fresh context" rule between sessions (also in the chat's transcript)
-palette:   anchor --vscode-focusBorder · paper --vscode-editor-background (follows the theme) · accent owns the Run button only
-type:      --vscode-font-family / --vscode-editor-font-family for skill names (code) · tone: technical (faces supplied by the host)
+structure: master-detail; full-height rail, the run's chat docked under the detail column (2026-10-13) · weight: the selected chain's lanes · divides: numbered stations in a lane (columns aligned across sessions), a labelled "fresh context" rule between sessions (also in the chat's transcript)
+palette:   anchor --vscode-textLink-foreground, falling back to focusBorder (2026-10-13: the divider, chip and grip drawn in focusBorder barely showed in an Atom One Dark screenshot) · paper --vscode-editor-background (follows the theme) · accent owns the Run button only · focus ring stays on focusBorder (the host's own)
+type:      --vscode-font-family; uppercase sidebar-style section labels; --vscode-editor-font-family for skill names (code) · tone: technical (faces supplied by the host)
 signature: the "fresh context" divider between sessions — the handover the flow is designed around, the one strong rule on the page
 refuses:   a node canvas with wires · nested cards · colour as the only status signal
-source:    profile §Design (VS Code's own vocabulary) — webview direction established 2026-10-11
+source:    profile §Design (VS Code's own vocabulary) — webview direction established 2026-10-11, refined 2026-10-13
 */
 ```
 
@@ -99,7 +99,7 @@ n-a beyond the install shape above — no hosting, environments, or rollback.
 ## Guardrails Specific to This Project
 
 - **Do not touch:** pending
-- **Known blind spots:** the extension host wiring (`src/extension.ts`) and the real SDK, git and install commands are not covered by automated tests; slice 1 is verified by the F5 smoke only. The exact arguments for creating a worktree are inferred from git's usage, not run. Intent-to-add marking of new files, and the uncommitted review seeing them, is verified only by the F5 smoke. The chains webview's DOM is tested in jsdom, which is not a real webview: VS Code's CSP and the dynamic imports from `dist/` through `asWebviewUri`, layout and theme colours, and what a real screen reader speaks are verified only by the F5 smoke. The run chat's round trip with the real SDK (a live AskUserQuestion answer accepted in the `answers` shape coordiner sends, assistant messages arriving per block), the editor opening on a pause, dragging the chat divider, and the chat's layout, themes and screen-reader speech are verified only by the F5 smoke. The git guard scans the whole command string: a quoted mention such as `echo "git commit"` is denied (harmless), and a command assembled at run time (`g=git; $g commit`) is not caught.
+- **Known blind spots:** the extension host wiring (`src/extension.ts`) and the real SDK, git and install commands are not covered by automated tests; slice 1 is verified by the F5 smoke only. The exact arguments for creating a worktree are inferred from git's usage, not run. Intent-to-add marking of new files, and the uncommitted review seeing them, is verified only by the F5 smoke. The chains webview's DOM is tested in jsdom, which is not a real webview: VS Code's CSP and the dynamic imports from `dist/` through `asWebviewUri`, layout and theme colours, and what a real screen reader speaks are verified only by the F5 smoke. The run chat's round trip with the real SDK (a live AskUserQuestion answer accepted in the `answers` shape coordiner sends, assistant messages arriving per block), the editor opening on a pause, dragging the chat divider, and the chat's layout, themes and screen-reader speech are verified only by the F5 smoke. Check the layout at ≤560px wide with the chat at its 80% maximum: the rail stacks above the workspace there, and a chat that cannot shrink pushes its composer off the page. The git guard scans the whole command string: a quoted mention such as `echo "git commit"` is denied (harmless), and a command assembled at run time (`g=git; $g commit`) is not caught.
 - **Coordinator state lives outside target repos.** The per-story journal is JSONL in the journal folder of the extension's global storage (`<slug>-<UTC stamp>.jsonl`), and saved chains are chains.json in the same storage. Neither is ever in a worktree, because `code-review-architect-uncommitted` would review it as a change.
 
 ## Recurring Propagation Sites
