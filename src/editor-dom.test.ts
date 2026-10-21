@@ -1,7 +1,7 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
-import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
+import { defaultCard, MAX_ARGS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, TEMPLATES, type Chain } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import type { EditorState } from "./editor-protocol.ts";
 import { REQUIRED_COMMANDS } from "./session.ts";
@@ -223,6 +223,53 @@ describe("chains webview: editing a chain", () => {
     assert.deepEqual(page.cardSkills(), ["acme:a", "acme:b", "acme:c", "acme:lint"]);
     assert.equal(page.focused(), page.named("Remove lint"));
     assert.equal(page.status(), "Added lint");
+  });
+
+  it("keeps the skill picked in the palette, and focus on it, when a state arrives before Add", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send();
+    const before = page.doc.getElementById("palette-0") as HTMLSelectElement;
+    before.value = "acme:lint";
+    before.dispatchEvent(new page.w.Event("change"));
+    before.focus();
+    page.send({ running: true });
+    const after = page.doc.getElementById("palette-0") as HTMLSelectElement;
+    assert.notEqual(after, before, "the state re-rendered the palette");
+    assert.equal(after.value, "acme:lint");
+    assert.equal(page.focused(), after);
+    page.named("Add").click();
+    assert.deepEqual(page.cardSkills(), ["acme:a", "acme:b", "acme:c", "acme:lint"]);
+  });
+
+  it("turns Add off at the most skills a session holds, says why, and saves nothing", async () => {
+    const full: Chain = { id: "own", name: "Own", sessions: [{ cards: Array.from({ length: MAX_CARDS }, () => defaultCard("acme:a")) }] };
+    const page = await open({ selectedId: "own" });
+    page.send({ chains: [full] });
+    const add = page.named("Add");
+    assert.equal(add.getAttribute("aria-disabled"), "true");
+    assert.equal(page.doc.getElementById(add.getAttribute("aria-describedby")!)!.textContent, `A session holds at most ${MAX_CARDS} skills.`);
+    add.click();
+    assert.deepEqual(page.saves(), []);
+    assert.equal(page.status(), `A session holds at most ${MAX_CARDS} skills.`);
+  });
+
+  it("turns Add a session off at the most sessions a chain holds, says why, and saves nothing", async () => {
+    const full: Chain = { id: "own", name: "Own", sessions: Array.from({ length: MAX_SESSIONS }, () => ({ cards: [defaultCard("acme:a")] })) };
+    const page = await open({ selectedId: "own" });
+    page.send({ chains: [full] });
+    const add = page.named("Add a session");
+    assert.equal(add.getAttribute("aria-disabled"), "true");
+    assert.equal(page.doc.getElementById(add.getAttribute("aria-describedby")!)!.textContent, `A chain holds at most ${MAX_SESSIONS} sessions.`);
+    add.click();
+    assert.deepEqual(page.saves(), []);
+    assert.equal(page.status(), `A chain holds at most ${MAX_SESSIONS} sessions.`);
+  });
+
+  it("keeps a card's arguments and the chain's name within what a stored chain holds", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send();
+    assert.equal(page.doc.getElementById("args-0-0")!.getAttribute("maxlength"), String(MAX_ARGS));
+    assert.equal(page.doc.getElementById("chain-name")!.getAttribute("maxlength"), String(MAX_NAME));
   });
 
   it("does nothing on Add when the workspace offers no skills", async () => {
@@ -450,10 +497,27 @@ describe("chains webview: m-skills and skill listing", () => {
     assert.deepEqual(page.posted.at(-1), { type: "refreshPalette" });
   });
 
-  it("shows a storage problem as its own banner", async () => {
+  it("shows a storage problem as its own banner, and says it aloud when it first arrives", async () => {
     const page = await open();
-    page.send({ storageError: "The saved chains were set aside." });
-    assert.match(page.doc.getElementById("banner")!.textContent!, /Saved chains could not be read.*set aside/);
+    page.send({ storageError: "A change was not saved." });
+    assert.match(page.doc.getElementById("banner")!.textContent!, /A problem with your saved chains.*not saved/);
+    assert.equal(page.status(), "A change was not saved.");
+    page.doc.getElementById("status")!.textContent = "";
+    page.send({ storageError: "A change was not saved." });
+    assert.equal(page.status(), "", "the same problem again is not repeated");
+  });
+
+  it("says each change that could not be saved aloud, even when the reason is the same as the last", async () => {
+    const page = await open();
+    const failed = "Changes could not be saved: EACCES: permission denied";
+    page.send({ storageError: failed, unsaved: 1 });
+    assert.equal(page.status(), failed);
+    page.doc.getElementById("status")!.textContent = "";
+    page.send({ storageError: failed, unsaved: 2 });
+    assert.equal(page.status(), failed, "a second failure with the same reason is said again");
+    page.doc.getElementById("status")!.textContent = "";
+    page.send({ storageError: failed, unsaved: 2 });
+    assert.equal(page.status(), "", "a state that brings no new failure stays quiet");
   });
 
   it("shows an empty detail pane when there is no chain at all", async () => {

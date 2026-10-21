@@ -1,7 +1,9 @@
 import type { HookCallback, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 
 // Ported from m-skills scripts/guard-mutations.sh and guard-outward.sh. The whole command string is scanned,
-// so `&&`, `;` and `bash -c "…"` are caught; a command assembled at run time (`g=git; $g commit`) is not.
+// so `&&`, `;` and `bash -c "…"` are caught; a command assembled at run time (`g=git; $g commit`), a script file that runs git,
+// and an alias from the user's own git config, or from a config file a session edits directly, are not. It stops a session's
+// accidental writes, not a determined one.
 // A lookbehind rather than a consumed prefix, so `/usr/bin/git` matches without a quadratic scan over long tokens.
 const BEFORE = "(?<![A-Za-z0-9_.-])";
 const VALUE = `(?:"[^"]*"|'[^']*'|\\S+)`;
@@ -20,6 +22,16 @@ const SOFT =
 
 const GIT_HARD = new RegExp(`${GIT}${HARD}(?:[^A-Za-z0-9_-]|$)`);
 const GIT_SOFT = new RegExp(`${GIT}${SOFT}`);
+// `git -c alias.x=commit x` commits under a name the subcommand scan cannot see, and an include can pull in a file defining one,
+// so either set on the command line is denied. Config keys ignore case but options do not (`-C` is not `-c`), so only the key is folded.
+const anyCase = (word: string): string => [...word].map((ch) => `[${ch}${ch.toUpperCase()}]`).join("");
+const RISKY_KEY = `(?:${anyCase("alias")}|${anyCase("include")}(?:${anyCase("if")})?)\\.`;
+const GIT_ALIAS = new RegExp(`${BEFORE}git["']?(?:\\s+${OPTION})*?\\s+(?:-c\\s*|--config-env[=\\s]\\s*)["']?${RISKY_KEY}`);
+// Reading config stays open, flags before the read verb included; any other `git config` can define an alias, so it is denied.
+const CONFIG_READ = "(?:\\s+-\\S*)*?\\s+(?:--get(?:-all|-regexp|-urlmatch|-color|-colorbool)?|--list|-l|get|list)(?:[\\s=]|$)";
+const GIT_CONFIG = new RegExp(`${GIT}config(?![A-Za-z0-9_-])(?!${CONFIG_READ})`);
+// GIT_CONFIG_COUNT with its KEY_n and VALUE_n, GIT_CONFIG_PARAMETERS and GIT_CONFIG_GLOBAL all set config for one command.
+const GIT_CONFIG_ENV = /(?<![A-Za-z0-9_])GIT_CONFIG\w*=/;
 const NO_VERIFY = /(?:^|\s)--(?:no-verify|no-gpg-sign)(?:\s|=|$)/;
 const GH_WRITE = new RegExp(
   `${BEFORE}gh["']?\\s+(?:` +
@@ -35,11 +47,14 @@ const GH_WRITE = new RegExp(
     `|${BEFORE}gh["']?\\s+api\\s+.*(?:-X|--method)\\s*(?:POST|PUT|PATCH|DELETE)`,
 );
 
-const STAYS_OPEN = "Read-only git stays open: status, diff, log, show, blame, and the listing forms of branch, tag, remote, stash and worktree.";
+const STAYS_OPEN = "Read-only git stays open: status, diff, log, show, blame, `git config --get` and `--list`, and the listing forms of branch, tag, remote, stash and worktree.";
 
 export function gitWriteDenial(command: string): string | undefined {
   const hard = GIT_HARD.exec(command) ?? GIT_SOFT.exec(command);
   if (hard) return `coordiner: \`git ${hard[1]!.split(/\s/)[0]}\` writes to the repository; commits are the user's to make. ${STAYS_OPEN}`;
+  if (GIT_CONFIG.test(command)) return `coordiner: \`git config\` changes git's settings and can define an alias that runs any git command, so only reading it is allowed. ${STAYS_OPEN}`;
+  if (GIT_ALIAS.test(command)) return `coordiner: an alias or an include set with -c or --config-env can run any git command, so it is denied. ${STAYS_OPEN}`;
+  if (GIT_CONFIG_ENV.test(command)) return `coordiner: a GIT_CONFIG_* variable changes git's settings for the command and can define an alias that runs any git command, so it is denied. ${STAYS_OPEN}`;
   if (NO_VERIFY.test(command)) return "coordiner: skipping hooks with --no-verify or --no-gpg-sign is not allowed.";
   if (GH_WRITE.test(command)) return "coordiner: this `gh` command publishes to GitHub; that is the user's to run. Read-only `gh` (view, list, diff, checks) stays open.";
   return undefined;

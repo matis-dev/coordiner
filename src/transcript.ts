@@ -1,4 +1,5 @@
 import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
+import { MAX_ENTRIES } from "./chat-logic.ts";
 import { clip, plain } from "./text.ts";
 
 // What the run's chat shows. Model text reaches it only through plain(), and the webview sets it with textContent.
@@ -10,7 +11,6 @@ export type Entry =
   | { kind: "divider"; session: number }
   | { kind: "dropped" };
 
-export const MAX_ENTRIES = 1000;
 const MAX_TOOL_INPUT = 300;
 
 // Text and tool calls only; thinking and any other block are left out.

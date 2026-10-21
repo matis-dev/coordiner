@@ -6,6 +6,9 @@ import type { Question } from "./unattended.ts";
 // The decisions behind the run's chat, kept out of the DOM script so they can be tested. The webview loads this module from dist/,
 // so it imports nothing at runtime beyond chains.ts.
 
+// The most transcript entries kept, by the extension and by the chat on the page alike; older ones are dropped.
+export const MAX_ENTRIES = 1000;
+
 // What the user chose for one question: offered labels, and their own text when they picked Other.
 export type Pick = { picked: string[]; other?: string };
 

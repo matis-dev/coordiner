@@ -23,6 +23,8 @@ export async function start() {
   // A state that arrived while a field held unsaved typing, not rendered yet.
   let deferred = false;
   let shown;
+  // The skill picked in each session's palette, by chain and session: a re-render (a run moving on, say) keeps it.
+  const picks = new Map();
 
   function el(tag, attrs = {}, ...children) {
     const node = document.createElement(tag);
@@ -76,7 +78,7 @@ export async function start() {
     banner.replaceChildren();
     if (state.storageError) {
       banner.append(
-        el("section", { class: "banner error", "aria-labelledby": "storage-h" }, el("h2", { id: "storage-h" }, "Saved chains could not be read"), el("p", {}, state.storageError)),
+        el("section", { class: "banner error", "aria-labelledby": "storage-h" }, el("h2", { id: "storage-h" }, "A problem with your saved chains"), el("p", {}, state.storageError)),
       );
     }
     if (state.mskills === false) {
@@ -135,7 +137,7 @@ export async function start() {
       const id = `args-${s}-${i}`;
       children.push(
         el("label", { for: id, class: "visually-hidden" }, `Arguments for ${label}`),
-        el("textarea", { id, rows: 2, "data-focus": id, onchange: (e) => save(edit.setArgs(chain, s, i, e.target.value), `Saved ${label}`, id) }, c.args),
+        el("textarea", { id, rows: 2, maxlength: chainsModule.MAX_ARGS, "data-focus": id, onchange: (e) => save(edit.setArgs(chain, s, i, e.target.value), `Saved ${label}`, id) }, c.args),
       );
     } else if (c.args) {
       children.push(el("p", { class: "args" }, logic.argParts(c.args).map((part) => ("chip" in part ? el("span", { class: "chip" }, part.chip) : part.text))));
@@ -186,15 +188,18 @@ export async function start() {
         state.paletteError ? el("button", { type: "button", "data-focus": `check-environment-${s}`, onclick: () => vscode.postMessage({ type: "checkEnvironment" }) }, "Check Environment") : undefined,
       );
     }
-    const options = state.palette.map((p) => el("option", { value: p.skill }, p.mskills ? `${p.label} (${p.skill})` : p.skill));
+    const key = `${chain.id}:${s}`;
+    const full = logic.addCardReason(chain, s);
+    const options = state.palette.map((p) => el("option", { value: p.skill, selected: p.skill === picks.get(key) }, p.mskills ? `${p.label} (${p.skill})` : p.skill));
     return el(
       "div",
       { class: "add-skill" },
       el("label", { for: id }, `Add a skill to session ${s + 1}`),
-      el("select", { id }, options),
+      el("select", { id, "data-focus": id, onchange: (e) => picks.set(key, e.target.value) }, options),
       el(
         "button",
-        { type: "button", "data-focus": logic.addKey(s), onclick: () => {
+        { type: "button", "data-focus": logic.addKey(s), "aria-disabled": String(full !== undefined), "aria-describedby": full ? `full-${s}` : undefined, onclick: () => {
+          if (full) return announce(full);
           const skill = document.getElementById(id).value;
           if (!skill) return;
           const next = edit.addCard(chain, s, skill);
@@ -202,6 +207,7 @@ export async function start() {
         } },
         "Add",
       ),
+      full ? el("p", { id: `full-${s}`, class: "reason" }, full) : undefined,
     );
   }
 
@@ -217,7 +223,7 @@ export async function start() {
     if (editable) {
       toolbar.push(
         el("label", { for: "chain-name" }, "Name"),
-        el("input", { id: "chain-name", "data-focus": "chain-name", value: chain.name, maxlength: 100, onchange: (e) => e.target.value.trim() && save(edit.rename(chain, e.target.value.trim()), "Renamed", "chain-title") }),
+        el("input", { id: "chain-name", "data-focus": "chain-name", value: chain.name, maxlength: chainsModule.MAX_NAME, onchange: (e) => e.target.value.trim() && save(edit.rename(chain, e.target.value.trim()), "Renamed", "chain-title") }),
         el("button", { type: "button", "data-focus": "duplicate", onclick: () => copyOf(chain) }, "Duplicate"),
         el("button", { type: "button", "data-focus": "delete-chain", onclick: () => vscode.postMessage({ type: "delete", id: chain.id }) }, "Delete chain"),
       );
@@ -259,7 +265,24 @@ export async function start() {
         ),
       );
     });
-    if (editable) parts.push(el("p", {}, el("button", { type: "button", "data-focus": "add-session", onclick: () => save(edit.addSession(chain), `Added session ${chain.sessions.length + 1}`, logic.addKey(chain.sessions.length)) }, "Add a session")));
+    if (editable) {
+      const full = logic.addSessionReason(chain);
+      parts.push(
+        el(
+          "p",
+          {},
+          el(
+            "button",
+            { type: "button", "data-focus": "add-session", "aria-disabled": String(full !== undefined), "aria-describedby": full ? "sessions-full" : undefined, onclick: () => {
+              if (full) return announce(full);
+              save(edit.addSession(chain), `Added session ${chain.sessions.length + 1}`, logic.addKey(chain.sessions.length));
+            } },
+            "Add a session",
+          ),
+        ),
+        full ? el("p", { id: "sessions-full", class: "reason" }, full) : undefined,
+      );
+    }
     detail.replaceChildren(...parts);
   }
 
@@ -297,6 +320,10 @@ export async function start() {
 
   window.addEventListener("message", (event) => {
     if (event.data?.type !== "state") return;
+    // A save the extension could not make arrives as a storage problem; the banner shows it, and it is said aloud. A problem that
+    // reads the same as the last is said again when the count of unsaved changes rose, since the editor went back once more.
+    const unsavedRose = (event.data.unsaved ?? 0) > (state.unsaved ?? 0);
+    if (event.data.storageError && (event.data.storageError !== state.storageError || unsavedRose)) announce(event.data.storageError);
     state = event.data;
     if (typing()) deferred = true;
     else applyState();

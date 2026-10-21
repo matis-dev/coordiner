@@ -1,4 +1,4 @@
-import { INPUT_KINDS, inputOf, INPUTS, runnable, usesMskills, type Card, type Chain } from "./chains.ts";
+import { INPUT_KINDS, inputOf, INPUTS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, runnable, usesMskills, type Card, type Chain } from "./chains.ts";
 
 // The decisions behind the chains webview, kept out of the DOM script so they can be tested. The webview loads this module from dist/.
 
@@ -37,7 +37,12 @@ export const argParts = (args: string): ({ text: string } | { chip: string })[] 
       return kind ? { chip: INPUTS[kind].chip } : { text: part };
     });
 
-export const copyName = (name: string): string => `${name} copy`.slice(0, 100);
+// Why Add or Add a session is off: the chain is at a limit the extension would refuse to save past.
+export const addCardReason = (chain: Chain, s: number): string | undefined =>
+  (chain.sessions[s]?.cards.length ?? 0) >= MAX_CARDS ? `A session holds at most ${MAX_CARDS} skills.` : undefined;
+export const addSessionReason = (chain: Chain): string | undefined => (chain.sessions.length >= MAX_SESSIONS ? `A chain holds at most ${MAX_SESSIONS} sessions.` : undefined);
+
+export const copyName = (name: string): string => `${name} copy`.slice(0, MAX_NAME);
 export const newChainId = (now: number): string => `chain-${now.toString(36)}`;
 
 // Alt+Left / Alt+Right on a card move it; anything else is not ours.

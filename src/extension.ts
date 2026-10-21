@@ -5,13 +5,15 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { parseStories, slugify, storyText, type Story } from "./backlog.ts";
-import { inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, parseChains, requiredSkills, runnable, serializeChains, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
+import { ChainStore, type StoreFs } from "./chain-store.ts";
+import { inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
 import { checkEnvironment, sessionEnv, type Models } from "./environment.ts";
 import { createJournal, journalFileName } from "./journal.ts";
 import { fillInput, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
+import { oneRun, type OneRun } from "./one-run.ts";
 import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type RunChat } from "./run-chat.ts";
 import { listCommands, runTurn } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
@@ -199,6 +201,8 @@ type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat };
 
 type RunContext = {
   state: RunState;
+  // Held from the moment Run is pressed until the run ends; `state.abort` only exists once the sessions start.
+  slot: OneRun;
   provider: StepsProvider;
   reveal: (step: StepView) => void;
   output: vscode.OutputChannel;
@@ -211,11 +215,11 @@ type RunContext = {
 };
 
 async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
+  if (!(await ctx.slot.run(() => startRun(chain, ctx)))) await vscode.window.showWarningMessage("Coordiner: a run is already in progress. Stop it first.");
+}
+
+async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
   const { state, provider, reveal, output, storage } = ctx;
-  if (state.abort) {
-    await vscode.window.showWarningMessage("Coordiner: a run is already in progress. Stop it first.");
-    return;
-  }
   const check = runnable(chain);
   if (!check.ok) {
     await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${check.reason}`);
@@ -352,24 +356,23 @@ function runningAt({ abort, chainId, chat }: RunState): Pick<EditorState, "runni
 
 class ChainsEditor {
   private panel?: vscode.WebviewPanel;
-  private chains: Chain[] = [];
-  private storageError?: string;
-  // Set when the stored file could neither be read nor moved aside; saving then would overwrite it.
-  private blocked = false;
   private palette?: PaletteEntry[];
   private paletteError?: string;
   private mskills?: boolean;
-  private loaded = false;
-  private saving: Promise<void> = Promise.resolve();
-  private pendingSaves = 0;
   private readonly extension: vscode.Uri;
-  private readonly file: string;
+  private readonly store: ChainStore;
   private readonly ctx: RunContext;
 
   constructor(extension: vscode.Uri, file: string, ctx: RunContext) {
     this.extension = extension;
-    this.file = file;
     this.ctx = ctx;
+    const fs: StoreFs = {
+      readFile: (path) => readFile(path, "utf8"),
+      writeFile: (path, text) => writeFile(path, text, "utf8"),
+      rename,
+      mkdir: async (path) => void (await mkdir(path, { recursive: true })),
+    };
+    this.store = new ChainStore(file, fs, () => new Date(), () => this.post());
   }
 
   // `preserveFocus` brings the editor up for a waiting card without taking focus from wherever the user is.
@@ -412,18 +415,20 @@ class ChainsEditor {
 
   post(): void {
     // A state sent while saves are queued would roll the editor back past them; the last save posts instead.
-    if (this.pendingSaves > 0) return;
+    if (this.store.saving) return;
     const run = this.ctx.state;
+    const { error, unsaved } = this.store;
     const state: EditorState = {
       type: "state",
       templates: TEMPLATES,
-      chains: this.chains,
-      running: run.abort !== undefined,
+      chains: this.store.chains,
+      running: this.ctx.slot.busy(),
       ...runningAt(run),
       ...(this.palette ? { palette: this.palette } : {}),
       ...(this.paletteError ? { paletteError: this.paletteError } : {}),
       ...(this.mskills !== undefined ? { mskills: this.mskills } : {}),
-      ...(this.storageError ? { storageError: this.storageError } : {}),
+      ...(error ? { storageError: error } : {}),
+      ...(unsaved ? { unsaved } : {}),
     };
     void this.panel?.webview.postMessage(state);
   }
@@ -432,31 +437,33 @@ class ChainsEditor {
     const message = parseEditorMessage(raw);
     if (!message) {
       this.ctx.output.appendLine("Coordiner: ignored an unexpected message from the chains editor.");
+      // The editor already shows the edit it asked to save; it goes back to the saved chains, and says why.
+      if ((raw as { type?: unknown } | null)?.type === "save") await this.store.refuse();
       return;
     }
     switch (message.type) {
       case "ready":
-        if (!this.loaded) await this.load();
+        await this.store.load();
         this.post();
         this.postChat({ type: "chat", chat: this.ctx.state.chat?.view() ?? IDLE_CHAT, entries: this.ctx.state.chat?.entries() ?? [] });
         if (!this.palette) await this.discover();
         return;
       case "save":
-        await this.store((chains) => (chains.some((c) => c.id === message.chain.id) ? chains.map((c) => (c.id === message.chain.id ? message.chain : c)) : [...chains, message.chain]));
+        await this.store.save((chains) => (chains.some((c) => c.id === message.chain.id) ? chains.map((c) => (c.id === message.chain.id ? message.chain : c)) : [...chains, message.chain]));
         return;
       case "delete": {
-        const chain = this.chains.find((c) => c.id === message.id);
+        const chain = this.store.chains.find((c) => c.id === message.id);
         if (!chain) return;
         const choice = await vscode.window.showWarningMessage(`Delete the chain ${plain(chain.name)}?`, { modal: true }, "Delete");
-        if (choice === "Delete") await this.store((chains) => chains.filter((c) => c.id !== message.id));
+        if (choice === "Delete") await this.store.save((chains) => chains.filter((c) => c.id !== message.id));
         else this.post();
         return;
       }
       case "run": {
-        const chain = [...TEMPLATES, ...this.chains].find((c) => c.id === message.id);
+        const chain = [...TEMPLATES, ...this.store.chains].find((c) => c.id === message.id);
         if (!chain) return;
         // The webview disables Run on its own, but its state is not trusted.
-        const reason = runReason(chain, { running: this.ctx.state.abort !== undefined, ...(this.mskills !== undefined ? { mskills: this.mskills } : {}), ...(this.palette ? { palette: this.palette } : {}) });
+        const reason = runReason(chain, { running: this.ctx.slot.busy(), ...(this.mskills !== undefined ? { mskills: this.mskills } : {}), ...(this.palette ? { palette: this.palette } : {}) });
         if (reason) {
           await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${reason}`);
           return;
@@ -486,56 +493,6 @@ class ChainsEditor {
       return;
     }
     if (!actOnChat(chat.talk, () => abort.abort(), message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);
-  }
-
-  private async load(): Promise<void> {
-    this.loaded = true;
-    let text: string;
-    try {
-      text = await readFile(this.file, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      await this.setAside(`it could not be read (${(error as Error).message})`);
-      return;
-    }
-    const parsed = parseChains(text);
-    if (parsed.error) await this.setAside(parsed.error);
-    else this.chains = parsed.chains;
-  }
-
-  // A bad file is moved aside, never overwritten; if it cannot be moved, saving stays off.
-  private async setAside(problem: string): Promise<void> {
-    const backup = `${this.file}.bak-${new Date().toISOString().replace(/[-:.]/g, "")}`;
-    try {
-      await rename(this.file, backup);
-      this.storageError = `The saved chains were set aside because ${problem}. The file is kept at ${backup}.`;
-    } catch (error) {
-      this.blocked = true;
-      this.storageError = `The saved chains could not be used because ${problem}, and the file could not be set aside (${(error as Error).message}). Changes are not saved until it is fixed: ${this.file}`;
-    }
-  }
-
-  // Saves run one at a time, each edit applied to what the save before it left, and the file lands by rename, so neither a burst
-  // of edits nor a crash mid-write leaves it torn.
-  private store(edit: (chains: readonly Chain[]) => Chain[]): Promise<void> {
-    this.pendingSaves++;
-    this.saving = this.saving.then(async () => {
-      if (!this.blocked) {
-        const chains = edit(this.chains);
-        const temp = `${this.file}.tmp`;
-        try {
-          await mkdir(join(this.file, ".."), { recursive: true });
-          await writeFile(temp, serializeChains(chains), "utf8");
-          await rename(temp, this.file);
-          this.chains = chains;
-        } catch (error) {
-          this.storageError = `Changes could not be saved: ${(error as Error).message}`;
-        }
-      }
-      this.pendingSaves--;
-      this.post();
-    });
-    return this.saving;
   }
 
   // Asks a session for its skills without running a model turn; once per window, or again on "Try again".
@@ -570,6 +527,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let editor: ChainsEditor | undefined;
   const ctx: RunContext = {
     state,
+    slot: oneRun(() => editor?.post()),
     provider,
     reveal,
     output,

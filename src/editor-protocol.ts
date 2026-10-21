@@ -33,6 +33,8 @@ export type EditorState = {
   // The chain running, and where in it (the card's index in its session): the lanes mark that card.
   runningAt?: { chainId: string; session: number; index: number };
   storageError?: string;
+  // How many changes could not be saved so far: each rise is said aloud, even when storageError reads the same as before.
+  unsaved?: number;
 };
 
 // The run's chat, kept apart from the chains state so a new message never re-renders the chain being edited.

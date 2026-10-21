@@ -2,6 +2,7 @@ import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { MAX_INPUT_CHARS, TEMPLATES } from "./chains.ts";
+import { MAX_ENTRIES } from "./chat-logic.ts";
 import { editorHtml } from "./editor-html.ts";
 import type { ChatView, EditorState } from "./editor-protocol.ts";
 import type { Entry } from "./transcript.ts";
@@ -117,6 +118,20 @@ describe("run chat: before and during a run", () => {
     assert.equal(page.entries().length, 3);
     assert.equal(first.isConnected, true);
     assert.equal(page.status(), "Implement replied");
+  });
+
+  it("keeps only the newest entries on the page, with one note at the top that older ones were dropped", async () => {
+    const page = await open();
+    const said = (i: number): Entry => ({ kind: "assistant", card: "Implement", text: `reply ${i}` });
+    page.reset(view(), Array.from({ length: MAX_ENTRIES }, (_, i) => said(i)));
+    page.append([said(MAX_ENTRIES), said(MAX_ENTRIES + 1)]);
+    page.append([said(MAX_ENTRIES + 2)]);
+    const shown = page.entries();
+    assert.equal(shown.length, MAX_ENTRIES + 1);
+    assert.equal(shown[0]!.textContent, "Earlier messages were dropped to keep the chat short.");
+    assert.equal(shown.filter((li) => li.dataset.dropped).length, 1);
+    assert.match(shown[1]!.textContent!, /reply 3$/);
+    assert.match(shown.at(-1)!.textContent!, new RegExp(`reply ${MAX_ENTRIES + 2}$`));
   });
 
   it("keeps what the user is typing when the chat or the chains change", async () => {
@@ -266,10 +281,11 @@ describe("run chat: pause, continue and stop", () => {
 describe("run chat: answering a question", () => {
   const waiting = (patch: Partial<ChatView> = {}) => view({ phase: "waiting", card: "Brainstorm", attended: true, question, ...patch });
 
-  it("shows the question as a form, moves focus to its first option when focus was in the chat, and announces it", async () => {
+  it("shows the question as a form, and moves focus to its first option when focus was in the chat, without also announcing it", async () => {
     const page = await open();
     page.reset(view({ card: "Brainstorm", attended: true }));
     page.input().focus();
+    page.doc.getElementById("status")!.textContent = "";
     page.update(waiting());
     const form = page.doc.querySelector<HTMLFormElement>("form.question")!;
     assert.equal(form.hidden, false);
@@ -277,10 +293,20 @@ describe("run chat: answering a question", () => {
     const first = form.querySelector<HTMLInputElement>('input[type="radio"]')!;
     assert.equal(page.doc.activeElement, first);
     assert.equal(page.doc.getElementById(first.getAttribute("aria-describedby")!)!.textContent, "one file");
-    assert.equal(page.status(), "Brainstorm asks: Store");
+    assert.equal(page.status(), "", "focus on the question reads it; the status region stays quiet");
   });
 
-  it("leaves focus where it was when it was outside the chat", async () => {
+  it("still announces how many questions there are when focus moves to the first of several", async () => {
+    const page = await open();
+    page.reset(view({ card: "Brainstorm", attended: true }));
+    page.input().focus();
+    const two = { ...question, questions: [question.questions[0]!, { question: "Which cache?", header: "Cache", options: [{ label: "None" }] }] };
+    page.update(waiting({ question: two }));
+    assert.equal(page.doc.activeElement, page.doc.querySelector('form.question input[type="radio"]'));
+    assert.equal(page.status(), "Brainstorm asks 2 questions");
+  });
+
+  it("leaves focus where it was when it was outside the chat, and announces the question instead", async () => {
     const page = await open();
     page.state();
     page.reset(view({ card: "Brainstorm", attended: true }));
@@ -288,6 +314,7 @@ describe("run chat: answering a question", () => {
     rail.focus();
     page.update(waiting());
     assert.equal(page.doc.activeElement, rail);
+    assert.equal(page.status(), "Brainstorm asks: Store");
   });
 
   it("moves focus to a question left unanswered, and sends nothing", async () => {

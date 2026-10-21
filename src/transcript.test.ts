@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
-import { entriesFrom, MAX_ENTRIES, Transcript, type Entry } from "./transcript.ts";
+import { MAX_ENTRIES } from "./chat-logic.ts";
+import { entriesFrom, Transcript, type Entry } from "./transcript.ts";
 
 // Fixtures carry only the fields entriesFrom reads.
 const assistant = (...content: object[]) => ({ type: "assistant", parent_tool_use_id: null, message: { content } }) as unknown as SDKAssistantMessage;

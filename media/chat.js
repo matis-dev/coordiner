@@ -135,13 +135,19 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
       case "divider":
         return el("li", { class: "handover" }, `fresh context: session ${e.session + 1}`);
       default:
-        return el("li", { class: "note" }, "Earlier messages were dropped to keep the chat short.");
+        return el("li", { class: "note", "data-dropped": "true" }, "Earlier messages were dropped to keep the chat short.");
     }
   }
 
+  // The page keeps the newest entries, as the extension does, so a long run cannot grow it without end.
   function append(entries) {
     const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
     transcript.append(...entries.map(entry));
+    const kept = [...transcript.children].filter((li) => !li.dataset.dropped);
+    if (kept.length > logic.MAX_ENTRIES) {
+      for (const li of kept.slice(0, kept.length - logic.MAX_ENTRIES)) li.remove();
+      if (!transcript.firstElementChild.dataset.dropped) transcript.prepend(entry({ kind: "dropped" }));
+    }
     if (atBottom) transcript.scrollTop = transcript.scrollHeight;
   }
 
@@ -232,15 +238,19 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
       ),
     );
 
+    let readByFocus = false;
     if (next.question?.id !== prev?.question?.id) {
       const inside = root.contains(document.activeElement);
       renderQuestion(next.question);
       if (next.question && inside) form.querySelector("input").focus();
+      // Focus landing on a lone question reads it out already, so announcing it would say it twice. With several, focus reads
+      // only the first, so the count is still announced.
+      readByFocus = next.question !== undefined && inside && next.question.questions.length === 1;
     }
     if (next.returned && !prev?.returned) {
       input.value = input.value ? `${next.returned}\n\n${input.value}` : next.returned;
     }
-    const said = prev ? logic.announcement(prev, next) : undefined;
+    const said = prev && !readByFocus ? logic.announcement(prev, next) : undefined;
     if (said) announce(said);
   }
 

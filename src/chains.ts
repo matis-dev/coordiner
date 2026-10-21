@@ -30,8 +30,16 @@ export const SKILL_DEFAULTS: Readonly<Record<string, SkillDefault>> = {
   [`${MSKILLS}kickoff`]: { kind: "once", tier: "strong", label: "Kickoff", pause: true },
 };
 
+// What a stored chain may hold; the editor stops at the same limits, so an edit it shows is one the extension can save.
+export const MAX_SESSIONS = 20;
+export const MAX_CARDS = 30;
+export const MAX_ARGS = 20_000;
+export const MAX_LABEL = 60;
+export const MAX_NAME = 100;
+
 const GENERIC: SkillDefault = { kind: "once", tier: "medium", label: "" };
-export const skillDefault = (skill: string): SkillDefault => SKILL_DEFAULTS[skill] ?? { ...GENERIC, label: skill.split(":").at(-1)! };
+// A skill name ending in ":" has no last part to show, so its label is the whole name.
+export const skillDefault = (skill: string): SkillDefault => SKILL_DEFAULTS[skill] ?? { ...GENERIC, label: (skill.split(":").at(-1) || skill).slice(0, MAX_LABEL) };
 
 export function defaultCard(skill: string): Card {
   const d = skillDefault(skill);
@@ -123,7 +131,6 @@ export function runnable(chain: Chain, commands?: readonly string[]): Runnable {
 
 const SKILL = /^[A-Za-z0-9:_.-]{1,100}$/;
 const ID = /^[a-z0-9-]{1,64}$/;
-const MAX_ARGS = 20_000;
 const TEMPLATE_IDS = new Set(TEMPLATES.map((t) => t.id));
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -132,7 +139,7 @@ const text = (v: unknown, max: number, min = 0): v is string => typeof v === "st
 function parseCard(v: unknown): Card | string {
   if (!isRecord(v)) return "a card is not an object";
   if (!text(v.skill, 100) || !SKILL.test(v.skill)) return "a card has an invalid skill name";
-  if (!text(v.args, MAX_ARGS) || !text(v.label, 60, 1) || typeof v.pause !== "boolean") return `card ${v.skill} has invalid fields`;
+  if (!text(v.args, MAX_ARGS) || !text(v.label, MAX_LABEL, 1) || typeof v.pause !== "boolean") return `card ${v.skill} has invalid fields`;
   if (v.next !== undefined && !text(v.next, 500, 1)) return `card ${v.skill} has an invalid next prompt`;
   return { skill: v.skill, args: v.args, label: v.label, pause: v.pause, ...(v.next !== undefined ? { next: v.next } : {}) };
 }
@@ -141,11 +148,11 @@ export function parseChain(v: unknown): Chain | string {
   if (!isRecord(v)) return "a chain is not an object";
   if (!text(v.id, 64) || !ID.test(v.id)) return "a chain has an invalid id";
   if (TEMPLATE_IDS.has(v.id)) return `chain id ${v.id} belongs to a built-in template`;
-  if (!text(v.name, 100, 1)) return `chain ${v.id} has an invalid name`;
-  if (!Array.isArray(v.sessions) || v.sessions.length > 20) return `chain ${v.id} has invalid sessions`;
+  if (!text(v.name, MAX_NAME, 1)) return `chain ${v.id} has an invalid name`;
+  if (!Array.isArray(v.sessions) || v.sessions.length > MAX_SESSIONS) return `chain ${v.id} has invalid sessions`;
   const sessions: ChainSession[] = [];
   for (const s of v.sessions) {
-    if (!isRecord(s) || !Array.isArray(s.cards) || s.cards.length > 30) return `chain ${v.id} has an invalid session`;
+    if (!isRecord(s) || !Array.isArray(s.cards) || s.cards.length > MAX_CARDS) return `chain ${v.id} has an invalid session`;
     const cards: Card[] = [];
     for (const c of s.cards) {
       const parsed = parseCard(c);

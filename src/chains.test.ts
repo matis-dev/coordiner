@@ -51,6 +51,14 @@ describe("skill defaults", () => {
     assert.deepEqual(defaultCard("deploy"), { skill: "deploy", args: "", label: "deploy", pause: false });
   });
 
+  it("gives every valid skill name a label a stored chain accepts, so a new card can always be saved", () => {
+    const long = `acme:${"x".repeat(90)}`;
+    assert.equal(skillDefault(long).label, "x".repeat(60));
+    assert.equal(skillDefault("acme:").label, "acme:");
+    const chain = { id: "a", name: "A", sessions: [{ cards: [defaultCard(long), defaultCard("acme:")] }] };
+    assert.deepEqual(parseChain(chain), chain);
+  });
+
   it("builds a card with the default continuation prompt for a loop skill", () => {
     assert.equal(defaultCard("m-skills:implementing-architect").next, "Continue with the next step of the plan.");
   });

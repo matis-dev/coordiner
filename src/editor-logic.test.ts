@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
-import { addKey, afterMove, afterRemove, argParts, copyName, isMissing, moveDelta, moveKey, newChainId, PLACEHOLDER_NOTE, removeKey, runningCard, runReason, startsFrom } from "./editor-logic.ts";
+import { defaultCard, MAX_CARDS, MAX_SESSIONS, TEMPLATES, type Chain } from "./chains.ts";
+import { addCardReason, addKey, addSessionReason, afterMove, afterRemove, argParts, copyName, isMissing, moveDelta, moveKey, newChainId, PLACEHOLDER_NOTE, removeKey, runningCard, runReason, startsFrom } from "./editor-logic.ts";
 import { REQUIRED_COMMANDS } from "./session.ts";
 
 const story = TEMPLATES[0]!;
@@ -45,6 +45,22 @@ describe("names and ids", () => {
   });
 
   it("makes ids a stored chain accepts", () => assert.match(newChainId(1_760_000_000_000), /^chain-[a-z0-9]+$/));
+});
+
+describe("limits in the editor", () => {
+  const sessions = (count: number, cards: number): Chain => ({ id: "own", name: "Own", sessions: Array.from({ length: count }, () => ({ cards: Array.from({ length: cards }, () => defaultCard("acme:lint")) })) });
+
+  it("lets a session take skills up to the stored limit, then says why Add is off", () => {
+    assert.equal(addCardReason(sessions(1, MAX_CARDS - 1), 0), undefined);
+    assert.equal(addCardReason(sessions(1, MAX_CARDS), 0), `A session holds at most ${MAX_CARDS} skills.`);
+  });
+
+  it("lets a chain take sessions up to the stored limit, then says why Add a session is off", () => {
+    assert.equal(addSessionReason(sessions(MAX_SESSIONS - 1, 0)), undefined);
+    assert.equal(addSessionReason(sessions(MAX_SESSIONS, 0)), `A chain holds at most ${MAX_SESSIONS} sessions.`);
+  });
+
+  it("has nothing to say about a session that does not exist", () => assert.equal(addCardReason(sessions(1, 0), 5), undefined));
 });
 
 describe("moveDelta", () => {
