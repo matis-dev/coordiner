@@ -2,9 +2,33 @@
   "name": "coordiner",
   "displayName": "Coordiner",
   "version": "0.1.0",
-  "private": true,
-  "publisher": "local",
+  "publisher": "matis-dev",
   "description": "Drives the m-skills story flow through headless Claude Code sessions, up to the commit brief.",
+  "license": "MIT",
+  "author": {
+    "name": "Mateusz Kruszona"
+  },
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matis-dev/coordiner.git"
+  },
+  "homepage": "https://github.com/matis-dev/coordiner#readme",
+  "bugs": {
+    "url": "https://github.com/matis-dev/coordiner/issues"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "m-skills",
+    "ai",
+    "agent",
+    "worktree",
+    "workflow"
+  ],
   "type": "module",
   "main": "./dist/extension.js",
   "engines": {
@@ -100,6 +124,7 @@
     ]
   },
   "scripts": {
+    "vscode:prepublish": "pnpm run build",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "test": "node --test \"src/**/*.test.ts\"",

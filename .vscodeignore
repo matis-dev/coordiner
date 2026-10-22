@@ -1,0 +1,13 @@
+.vscode/**
+.claude/**
+.husky/**
+.git*
+src/**
+!dist/**
+!media/**
+tsconfig*.json
+commitlint.config.js
+pnpm-lock.yaml
+**/*.test.ts
+**/*.map
+
