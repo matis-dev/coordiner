@@ -36,8 +36,9 @@ export function answerUnattended(input: Record<string, unknown>, log: (line: str
   return { behavior: "allow", updatedInput: { ...input, questions, answers } };
 }
 
+// Only the input's keys are logged: its values can hold file contents or a credential, and the log is kept in the journal.
 const denyTool = (toolName: string, input: Record<string, unknown>, log: (line: string) => void): PermissionResult => {
-  log(`denied tool: ${plain(toolName)} ${clip(plain(JSON.stringify(input)), 300)}`);
+  log(`denied tool: ${plain(toolName)} (${clip(plain(Object.keys(input).join(", ")), 300)})`);
   return { behavior: "deny", message: "coordiner runs unattended and cannot approve this action." };
 };
 

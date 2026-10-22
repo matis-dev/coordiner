@@ -72,11 +72,23 @@ describe("unattendedCanUseTool", () => {
     assert.deepEqual(answersOf(result), { "Q?": "A (Recommended)" });
   });
 
-  it("denies every other tool and logs the name and a clipped input", async () => {
+  it("denies every other tool and logs its name and input keys", async () => {
     const { lines, log } = logger();
-    const result = await unattendedCanUseTool(log)("Bash", { command: "x".repeat(500) }, options);
+    const result = await unattendedCanUseTool(log)("Bash", { command: "ls", description: "List" }, options);
     assert.equal(result?.behavior, "deny");
-    assert.match(lines[0]!, /^denied tool: Bash \{"command":"x+…$/);
+    assert.deepEqual(lines, ["denied tool: Bash (command, description)"]);
+  });
+
+  it("never logs the values of a denied tool's input, where a credential can sit", async () => {
+    const { lines, log } = logger();
+    await unattendedCanUseTool(log)("Write", { file_path: "/home/u/.netrc", content: "password hunter2-not-real" }, options);
+    assert.doesNotMatch(lines.join("\n"), /netrc|hunter2/);
+  });
+
+  it("logs a denied tool's input keys clipped and without control characters", async () => {
+    const { lines, log } = logger();
+    await unattendedCanUseTool(log)("Odd\u001b[2J", { [`k\u0007${"y".repeat(400)}`]: 1 }, options);
+    assert.doesNotMatch(lines[0]!, /[\u0007\u001b]/);
     assert.equal(lines[0]!.length < 340, true);
   });
 });
@@ -118,6 +130,6 @@ describe("interactiveCanUseTool", () => {
     const { lines, log } = logger();
     const result = await interactiveCanUseTool(async () => assert.fail("must not ask"), log)("Bash", { command: "rm -rf build" }, options);
     assert.equal(result?.behavior, "deny");
-    assert.equal(lines[0], 'denied tool: Bash {"command":"rm -rf build"}');
+    assert.deepEqual(lines, ["denied tool: Bash (command)"]);
   });
 });

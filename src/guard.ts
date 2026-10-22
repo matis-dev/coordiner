@@ -10,10 +10,18 @@ const VALUE = `(?:"[^"]*"|'[^']*'|\\S+)`;
 // Global options before the subcommand: the ones that take a separate value, then any other flag (-P, --no-pager, --git-dir=x).
 const OPTION = `(?:(?:-[cC]|--(?:git-dir|work-tree|namespace|exec-path|config-env|super-prefix))\\s+${VALUE}|-\\S*)`;
 const GIT = `${BEFORE}git["']?(?:\\s+${OPTION})*\\s+`;
-const HARD = "(add|stage|commit|push|checkout|switch|reset|rebase|cherry-pick|revert|clean|am|mv|rm|merge|pull|fetch|gc|prune|filter-branch|update-ref|symbolic-ref|restore|bisect|apply|notes|replace)";
-// Listing forms stay open; only the writing form of each subcommand matches.
+// Plumbing that stages, commits or overwrites files is here too, and send-email and imap-send, which send patches out.
+const HARD =
+  "(add|stage|commit|push|checkout|switch|reset|rebase|cherry-pick|revert|clean|am|mv|rm|merge|pull|fetch|gc|prune|filter-branch|update-ref|symbolic-ref|restore|bisect|apply|notes|replace" +
+  "|update-index|commit-tree|read-tree|checkout-index|send-email|imap-send)";
+// Listing forms stay open; only the writing form of each subcommand matches. A branch's writing flag counts wherever it sits
+// among the flags (`git branch -q -f x`), but a name only right after `branch`: `--contains X` and `--list pattern` look the same.
 const SOFT =
-  "(branch\\s+(?:-[dDmMcC](?:\\s|$)|--(?:delete|move|copy|set-upstream-to|unset-upstream|edit-description)|[^-\\s])" +
+  "(branch(?:\\s+-\\S+)*?\\s+(?:-[dDmMcCftu]|--(?:delete|move|copy|force|track|no-track|set-upstream-to|unset-upstream|edit-description))(?:[\\s=]|$)" +
+  "|branch\\s+[^-\\s]" +
+  "|reflog\\s+(?:expire|delete)" +
+  "|svn\\s+dcommit" +
+  "|sparse-checkout\\s+(?:set|add|init|reapply|disable)" +
   "|tag\\s+(?:-[adsfD](?:\\s|$)|--(?:delete|force|annotate|sign)|[^-\\s])" +
   "|remote\\s+(?:add|remove|rm|rename|set-url|set-head|prune)" +
   "|worktree\\s+(?:add|remove|move|prune|lock)" +

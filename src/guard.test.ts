@@ -51,6 +51,27 @@ describe("gitWriteDenial", () => {
     ["an alias set through GIT_CONFIG_PARAMETERS", `GIT_CONFIG_PARAMETERS="'alias.c=commit'" git c -m x`],
     ["a config file named through an exported GIT_CONFIG_GLOBAL", "export GIT_CONFIG_GLOBAL=/tmp/x; git c"],
   );
+  // Writes that never name a denied porcelain command: moving a ref, staging through plumbing, and sending patches out.
+  denied.push(
+    ["a branch moved with -f", "git branch -f other HEAD"],
+    ["a branch moved with --force", "git branch --force other HEAD"],
+    ["a branch created with -t", "git branch -t new origin/main"],
+    ["a branch created with --track", "git branch --track new origin/main"],
+    ["a branch moved with -f after another flag", "git branch -q -f other HEAD"],
+    ["a branch created with --no-track", "git branch --no-track new origin/main"],
+    ["an upstream set with -u", "git branch -u origin/main"],
+    ["an upstream set with --set-upstream-to= after another flag", "git branch -q --set-upstream-to=origin/main"],
+    ["patches stored with imap-send", "git imap-send < 0001.patch"],
+    ["commits published with svn dcommit", "git svn dcommit"],
+    ["staging through update-index", "git update-index --add src/a.ts"],
+    ["a commit made with commit-tree", "git commit-tree HEAD^{tree} -p HEAD -m x"],
+    ["the index replaced with read-tree", "git read-tree HEAD"],
+    ["the working tree overwritten with checkout-index", "git checkout-index -a -f"],
+    ["patches sent with send-email", "git send-email --to=a@example.com HEAD^"],
+    ["the reflog expired", "git reflog expire --expire=now --all"],
+    ["a reflog entry deleted", "git reflog delete HEAD@{1}"],
+    ["the sparse checkout changed", "git sparse-checkout set src"],
+  );
   for (const [name, command] of denied) {
     it(`denies ${name}`, () => assert.notEqual(gitWriteDenial(command), undefined));
   }
@@ -62,6 +83,16 @@ describe("gitWriteDenial", () => {
     "git show HEAD:src/a.ts",
     "git branch",
     "git branch -a",
+    "git branch --list",
+    "git branch -vv",
+    "git branch --contains HEAD",
+    "git branch -r --list 'origin/*'",
+    "git branch -vv | sort -u",
+    "git branch --sort=-committerdate --format '%(refname) -d'",
+    "git svn log",
+    "git reflog",
+    "git reflog show HEAD",
+    "git sparse-checkout list",
     "git tag",
     "git tag -l",
     "git stash list",
