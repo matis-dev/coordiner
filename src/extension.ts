@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { constants } from "node:fs";
 import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
@@ -10,7 +12,7 @@ import { inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable
 import { editorHtml } from "./editor-html.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
-import { checkEnvironment, sessionEnv, type Models } from "./environment.ts";
+import { checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
 import { createJournal, journalFileName } from "./journal.ts";
 import { fillInput, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
@@ -62,6 +64,8 @@ function readModels(config: vscode.WorkspaceConfiguration): Models {
 }
 
 const sessionEnvFor = (config: vscode.WorkspaceConfiguration) => sessionEnv(process.env, config.get<string>("extraPath", ""));
+const isExecutable = (path: string) => access(path, constants.X_OK).then(() => true, () => false);
+const claudeFor = (config: vscode.WorkspaceConfiguration, env: Record<string, string | undefined>) => findClaude(config.get<string>("claudePath", ""), env, homedir(), isExecutable);
 const openFolder = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 const noTools = async () => ({ behavior: "deny" as const, message: "This check uses no tools." });
 
@@ -72,6 +76,8 @@ async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<vo
     return;
   }
   const config = vscode.workspace.getConfiguration("coordiner");
+  const env = sessionEnvFor(config);
+  const claude = await claudeFor(config, env);
   output.show(true);
   output.appendLine("Checking the environment: three short model calls and one resume.");
   const results = await vscode.window.withProgress(
@@ -80,9 +86,10 @@ async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<vo
       checkEnvironment({
         runTurn,
         nodeVersion: async (env) => (await run("node", ["--version"], { env })).stdout.trim(),
+        claude,
         models: readModels(config),
         cwd,
-        env: sessionEnvFor(config),
+        env,
         canUseTool: noTools,
       }),
   );
@@ -237,6 +244,13 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
     await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
     return;
   }
+  const config = vscode.workspace.getConfiguration("coordiner");
+  const env = sessionEnvFor(config);
+  const claude = await claudeFor(config, env);
+  if (!claude.ok) {
+    await vscode.window.showErrorMessage(`Coordiner: ${claude.error}`);
+    return;
+  }
   const input = await askInput(inputOf(chain));
   if (!input) return;
   const filled = fillInput(chain, input.text);
@@ -268,8 +282,6 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
   const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, { modal: true, detail }, "Run");
   if (choice !== "Run") return;
 
-  const config = vscode.workspace.getConfiguration("coordiner");
-  const env = sessionEnvFor(config);
   const added = await addWorktree(repo.root, slug, { exec, exists: (path) => access(path).then(() => true, () => false) });
   if (!added.ok) {
     if (added.detail) output.appendLine(added.detail);
@@ -330,7 +342,7 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
   try {
     outcome = await runChain(filled.chain, {
       runTurn: ({ interactive, ...request }) =>
-        runTurn({ ...request, ...chat.forTurn(interactive), cwd: added.path, env, requiredCommands: required, signal: abort.signal, onGuard: log }),
+        runTurn({ ...request, ...chat.forTurn(interactive), cwd: added.path, env, claudePath: claude.path, requiredCommands: required, signal: abort.signal, onGuard: log }),
       models,
       emit,
       signal: abort.signal,
@@ -506,7 +518,10 @@ class ChainsEditor {
       return;
     }
     this.post();
-    const result = await listCommands({ cwd, env: sessionEnvFor(vscode.workspace.getConfiguration("coordiner")) });
+    const config = vscode.workspace.getConfiguration("coordiner");
+    const env = sessionEnvFor(config);
+    const claude = await claudeFor(config, env);
+    const result = claude.ok ? await listCommands({ cwd, env, claudePath: claude.path }) : claude;
     if (result.ok) {
       this.palette = palette(result.commands);
       this.mskills = mskillsPresent(result.commands);

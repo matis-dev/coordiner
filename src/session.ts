@@ -23,6 +23,8 @@ export type TurnRequest = {
   requiredCommands: readonly string[];
   canUseTool: CanUseTool;
   env: Record<string, string | undefined>;
+  // The installed Claude Code binary; the packaged extension does not ship the SDK's own.
+  claudePath?: string;
   resume?: string;
   systemPromptAppend?: string;
   maxTurns?: number;
@@ -42,7 +44,7 @@ export const LIST_TIMEOUT_MS = 60_000;
 
 // Lists the slash commands a session in `cwd` offers without running a model turn: the prompt stream never sends a message,
 // the commands come from the session's initialize answer, and the session is aborted once they arrive.
-export async function listCommands({ cwd, env, timeoutMs = LIST_TIMEOUT_MS, query = sdkQuery as unknown as ListQueryFn }: { cwd: string; env: Record<string, string | undefined>; timeoutMs?: number; query?: ListQueryFn }): Promise<CommandList> {
+export async function listCommands({ cwd, env, claudePath, timeoutMs = LIST_TIMEOUT_MS, query = sdkQuery as unknown as ListQueryFn }: { cwd: string; env: Record<string, string | undefined>; claudePath?: string; timeoutMs?: number; query?: ListQueryFn }): Promise<CommandList> {
   const abortController = new AbortController();
   // Registered now, not when the stream is first pulled, so a pull after the abort still ends.
   const aborted = new Promise<void>((resolve) => abortController.signal.addEventListener("abort", () => resolve(), { once: true }));
@@ -53,7 +55,7 @@ export async function listCommands({ cwd, env, timeoutMs = LIST_TIMEOUT_MS, quer
   const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`no answer within ${timeoutMs / 1000} seconds`)), timeoutMs)));
   let result: CommandList;
   try {
-    const session = query({ prompt: silent, options: { cwd, env, abortController, settingSources: ["user", "project"] } });
+    const session = query({ prompt: silent, options: { cwd, env, abortController, settingSources: ["user", "project"], ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}) } });
     const commands = await Promise.race([session.supportedCommands(), timeout]);
     result = { ok: true, commands: commands.map((c) => c.name) };
   } catch (error) {
@@ -75,7 +77,7 @@ export function pluginProblem(init: InitMessage, required: readonly string[]): s
 }
 
 // One turn = one SDK query. A later turn continues the same conversation through `resume`, optionally on another model.
-export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool, env, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
+export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool, env, claudePath, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
   let sessionId: string | undefined;
@@ -93,6 +95,7 @@ export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool
         canUseTool,
         // coordiner's own guard: no git writes or GitHub publishing, whichever skills the chain uses.
         hooks: { PreToolUse: [{ matcher: "Bash", hooks: [guardHook(onGuard)] }] },
+        ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
         ...(resume ? { resume } : {}),
         ...(maxTurns ? { maxTurns } : {}),
       },

@@ -1,4 +1,4 @@
-import { delimiter } from "node:path";
+import { delimiter, join } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { MSKILLS_URL } from "./chains.ts";
 import type { TurnRequest, TurnResult } from "./session.ts";
@@ -12,6 +12,7 @@ export type CheckResult = { name: string; ok: boolean; detail: string };
 export type CheckDeps = {
   runTurn(request: TurnRequest): Promise<TurnResult>;
   nodeVersion(env: Record<string, string | undefined>): Promise<string>;
+  claude: ClaudeLookup;
   models: Models;
   cwd: string;
   env: Record<string, string | undefined>;
@@ -24,13 +25,46 @@ export function sessionEnv(processEnv: NodeJS.ProcessEnv, extraPath: string): Re
   return { ...processEnv, PATH: [extraPath, processEnv.PATH].filter(Boolean).join(delimiter) };
 }
 
+export type ClaudeLookup = { ok: true; path: string } | { ok: false; error: string };
+
+// The packaged extension does not ship the SDK's platform binary, so sessions run the Claude Code the user installed:
+// the configured path, else the first `claude` on the sessions' PATH, else the native installer's ~/.local/bin.
+// Without one the SDK would fall back to the binary it lacks, so callers stop on a failed lookup.
+export async function findClaude(configured: string, env: Record<string, string | undefined>, home: string, isExecutable: (path: string) => Promise<boolean>): Promise<ClaudeLookup> {
+  const candidates = configured !== "" ? [configured] : [...(env.PATH ?? "").split(delimiter).filter(Boolean).map((dir) => join(dir, "claude")), join(home, ".local", "bin", "claude")];
+  for (const candidate of candidates) if (await isExecutable(candidate)) return { ok: true, path: candidate };
+  return {
+    ok: false,
+    error: configured !== ""
+      ? `coordiner.claudePath is ${configured}, which is not an executable file. Fix: set coordiner.claudePath to the full path of claude.`
+      : "Claude Code was not found on PATH or in ~/.local/bin. Fix: coordiner.claudePath (the full path to claude).",
+  };
+}
+
 const PING = "Reply with OK. Do not use any tools.";
 
 export async function checkEnvironment(deps: CheckDeps): Promise<CheckResult[]> {
+  const { claude, env } = deps;
+  const results: CheckResult[] = claude.ok
+    ? [{ name: "claude executable", ok: true, detail: claude.path }, ...(await sessionChecks(deps, claude.path))]
+    : [
+        { name: "claude executable", ok: false, detail: claude.error },
+        ...["strong tier", "medium tier", "weak tier", "model switch on resume"].map((name) => ({ name, ok: false, detail: "not run: no claude executable." })),
+      ];
+
+  try {
+    results.push({ name: "node on PATH", ok: true, detail: await deps.nodeVersion(env) });
+  } catch {
+    results.push({ name: "node on PATH", ok: false, detail: "node was not found. Fix: coordiner.extraPath (the folder that contains node)." });
+  }
+  return results;
+}
+
+async function sessionChecks(deps: CheckDeps, claudePath: string): Promise<CheckResult[]> {
   const { models, cwd, env, canUseTool } = deps;
   const results: CheckResult[] = [];
   const turn = (request: Partial<TurnRequest> & { model: string }) =>
-    deps.runTurn({ prompt: PING, cwd, env, canUseTool, maxTurns: 1, requiredCommands: [], ...request });
+    deps.runTurn({ prompt: PING, cwd, env, claudePath, canUseTool, maxTurns: 1, requiredCommands: [], ...request });
 
   let strongSession: string | undefined;
   let commands: string[] | undefined;
@@ -65,12 +99,6 @@ export async function checkEnvironment(deps: CheckDeps): Promise<CheckResult[]> 
       ok: result.ok,
       detail: result.ok ? `strong session resumed on ${result.model}` : `${result.error} Slice 1 needs this: stop and re-plan.`,
     });
-  }
-
-  try {
-    results.push({ name: "node on PATH", ok: true, detail: await deps.nodeVersion(env) });
-  } catch {
-    results.push({ name: "node on PATH", ok: false, detail: "node was not found. Fix: coordiner.extraPath (the folder that contains node)." });
   }
   return results;
 }

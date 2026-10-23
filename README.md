@@ -2,14 +2,14 @@
 
 A VS Code extension that runs a chain of Claude Code skills on one backlog story without you at the keyboard. It creates a git worktree for the story and runs each session of the chain in it. The default chain, **Story**, is the m-skills story flow: a planning and implementing session, then a fresh review session that fixes its findings and writes a commit brief. Nothing is committed: you review the worktree and commit by hand.
 
-Coordiner is a personal tool. It runs from source in an Extension Development Host; there is no packaged `.vsix` yet.
+Coordiner is a personal tool. Run it from source in an Extension Development Host, or [install a packaged `.vsix`](#install-a-packaged-vsix).
 
 ## Prerequisites
 
 - **VS Code or VSCodium 1.135 or newer** (`engines.vscode` in [package.json](package.json)).
 - **Node.js 24 or newer** and **pnpm 12** (pinned in `packageManager` in [package.json](package.json)); `corepack enable` provides it.
 - **git**.
-- **Claude Code, signed in on this machine.** Sessions use your existing Claude Code login.
+- **Claude Code, installed and signed in on this machine.** Sessions run your installed `claude` with your existing login: the one set in `coordiner.claudePath`, else the first `claude` on PATH, else `~/.local/bin/claude`.
 - **Recommended: the [m-skills](https://github.com/matis-dev/m-skills) plugin**, enabled in your Claude Code settings. Coordiner is built around it, and every shipped template uses its skills. Chains made only of your own skills run without it. A chain refuses to start when a skill it uses is not available in the session.
 
 ## Run the extension from source
@@ -21,7 +21,7 @@ Coordiner is a personal tool. It runs from source in an Extension Development Ho
    pnpm build
    ```
 
-   The build writes the extension to `dist/`. Run `pnpm build` again after every source change; the launch config does not build for you.
+   The build bundles the extension and its dependencies into `dist/`. Run `pnpm build` again after every source change; the launch config does not build for you.
 
 2. Open this folder in VS Code and press **F5** (launch config **Run Coordiner extension**). A second window opens, titled **Extension Development Host**, with Coordiner loaded.
 
@@ -29,15 +29,31 @@ Coordiner is a personal tool. It runs from source in an Extension Development Ho
 
 A **Coordiner** icon appears in the activity bar.
 
+## Install a packaged `.vsix`
+
+1. Build and package it. The bundle in `dist/` carries every dependency, so the package needs none of `node_modules`:
+
+   ```sh
+   pnpm install --frozen-lockfile
+   pnpm dlx @vscode/vsce@4.0.0 package --no-dependencies
+   ```
+
+   `vsce` runs `pnpm build` first and writes `coordiner-<version>.vsix`.
+
+2. Install it with **Extensions: Install from VSIX…** in the Command Palette, then reload the window.
+
+3. Run **Coordiner: Check Environment** (below). The `claude executable` line shows which Claude Code the sessions run.
+
 ## Check your setup
 
-Run **Coordiner: Check Environment** from the Command Palette. It makes three short model calls (one per tier), resumes the first session on another model, reports whether m-skills is installed (information only, never a failure), and checks that `node` is on the PATH sessions get. Results are in the **Coordiner** output channel, one line per check; a passing run ends with the message "every environment check passed".
+Run **Coordiner: Check Environment** from the Command Palette. It first checks that sessions can find `claude`; without it nothing else that needs a session runs, and a chain refuses to start. Then it makes three short model calls (one per tier), resumes the first session on another model, reports whether m-skills is installed (information only, never a failure), and checks that `node` is on the PATH sessions get. Results are in the **Coordiner** output channel, one line per check; a passing run ends with the message "every environment check passed".
 
 If a check fails, the line names the setting that fixes it:
 
 | Failing check | Fix |
 |---|---|
 | `strong tier`, `medium tier` or `weak tier` | Set a full model ID in `coordiner.models.strong`, `.medium` or `.weak`. |
+| `claude executable` | Set `coordiner.claudePath` to the full path of `claude`. A flatpak editor's PATH has no `~/.local/bin`, and a `claude` link there breaks when its target moves. |
 | `node on PATH` | Set `coordiner.extraPath` to the folder that contains `node`, for example `~/.nvm/versions/node/v24.21.0/bin`. Editors started from a launcher or a flatpak often lack your shell's PATH. |
 
 The settings are application-scoped: set them in your user settings, not in a workspace. Their defaults are in [package.json](package.json) under `contributes.configuration`.

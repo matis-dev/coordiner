@@ -66,6 +66,16 @@ describe("runTurn", () => {
     assert.equal(options.canUseTool, canUseTool);
     assert.equal(options.resume, undefined);
     assert.equal(options.maxTurns, undefined);
+    assert.equal(options.pathToClaudeCodeExecutable, undefined);
+  });
+
+  it("runs the given claude executable", async () => {
+    const { query, seen } = fakeQuery(async function* () {
+      yield init();
+      yield success();
+    });
+    await runTurn({ ...base, claudePath: "/h/.local/bin/claude", query });
+    assert.equal(seen.options!.pathToClaudeCodeExecutable, "/h/.local/bin/claude");
   });
 
   it("passes resume, the prompt append and the turn cap when given", async () => {
@@ -235,6 +245,13 @@ describe("listCommands", () => {
     assert.equal(seen.options!.cwd, "/repo");
     assert.deepEqual(seen.options!.settingSources, ["user", "project"]);
     assert.equal(seen.options!.model, undefined);
+    assert.equal(seen.options!.pathToClaudeCodeExecutable, undefined);
+  });
+
+  it("runs the given claude executable", async () => {
+    const { query, seen } = fakeList(async () => []);
+    await listCommands({ cwd: "/repo", env: {}, claudePath: "/h/.local/bin/claude", query });
+    assert.equal(seen.options!.pathToClaudeCodeExecutable, "/h/.local/bin/claude");
   });
 
   it("never sends a prompt, so no model turn runs", async () => {

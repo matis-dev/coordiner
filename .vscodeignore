@@ -6,6 +6,8 @@ src/**
 !dist/**
 !media/**
 tsconfig*.json
+build.ts
+pnpm-workspace.yaml
 commitlint.config.js
 pnpm-lock.yaml
 **/*.test.ts
