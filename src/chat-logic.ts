@@ -9,6 +9,26 @@ import type { Question } from "./unattended.ts";
 // The most transcript entries kept, by the extension and by the chat on the page alike; older ones are dropped.
 export const MAX_ENTRIES = 1000;
 
+// The prompt cache of the session a card waits in: warm from `since` for `ttlMs`. `assumed` when the session never said which
+// lifetime it writes, and five minutes is taken.
+export type CacheClock = { since: number; ttlMs: number; assumed: boolean };
+
+const pad = (n: number): string => String(n).padStart(2, "0");
+function clock(ms: number): string {
+  const s = Math.ceil(ms / 1000);
+  const hours = Math.floor(s / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(s % 60)}` : `${minutes}:${pad(s % 60)}`;
+}
+
+// Worked out from the clock each time, never counted down, so a computer that slept shows the right time when it wakes.
+export function cacheLabel(cache: CacheClock, now: number): { text: string; expired: boolean } {
+  const left = cache.since + cache.ttlMs - now;
+  const assumed = cache.assumed ? " (assumed 5-minute cache)" : "";
+  if (left <= 0) return { text: `Prompt cache expired: your next message re-reads the whole conversation without the cache discount.${assumed}`, expired: true };
+  return { text: `Prompt cache warm for ${clock(left)}${assumed}`, expired: false };
+}
+
 // What the user chose for one question: offered labels, and their own text when they picked Other.
 export type Pick = { picked: string[]; other?: string };
 

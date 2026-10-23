@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addWorktree, inspectRepo, MAX_NEW_FILES, prepareReview, type Exec } from "./worktree.ts";
+import { addWorktree, inspectRepo, MAX_NEW_FILES, prepareReview, removalCommands, removalNote, worktreeClean, type Exec } from "./worktree.ts";
 
 type Call = { file: string; args: string[]; cwd: string };
 
@@ -20,7 +20,7 @@ describe("inspectRepo", () => {
   it("returns the top level and the dirty lines, without blank ones", async () => {
     const { exec, calls } = fakeExec({ "rev-parse": "/home/u/app\n", status: " M a.ts\n?? b.ts\n\n" });
     assert.deepEqual(await inspectRepo("/home/u/app/sub", exec), { root: "/home/u/app", dirty: [" M a.ts", "?? b.ts"] });
-    assert.deepEqual(calls.map((c) => c.args), [["rev-parse", "--show-toplevel"], ["status", "--porcelain"]]);
+    assert.deepEqual(calls.map((c) => c.args), [["rev-parse", "--show-toplevel"], ["rev-parse", "--verify", "--quiet", "HEAD"], ["status", "--porcelain"]]);
   });
 
   it("reports a clean tree as no dirty lines", async () => {
@@ -28,9 +28,88 @@ describe("inspectRepo", () => {
     assert.deepEqual((await inspectRepo("/r", exec)).dirty, []);
   });
 
-  it("explains when the folder is not a repository", async () => {
+  it("explains when the folder is not a repository, and how to make it one", async () => {
     const { exec } = fakeExec({}, ["rev-parse"]);
-    await assert.rejects(inspectRepo("/tmp/x", exec), /not a git repository/);
+    await assert.rejects(inspectRepo("/tmp/x", exec), /^Error: \/tmp\/x is not a git repository, or git is unavailable\. Run git init there and make a first commit/);
+  });
+
+  it("refuses a repository with no commits, since a worktree starts from HEAD", async () => {
+    const { exec, calls } = fakeExec({ "rev-parse": "/r\n" }, ["rev-parse --verify"]);
+    await assert.rejects(inspectRepo("/r", exec), /^Error: \/r has no commits yet\. Make a first commit, then start again/);
+    assert.equal(calls.some((c) => c.args[0] === "status"), false);
+  });
+
+  it("explains when git fails after finding the repository", async () => {
+    const { exec } = fakeExec({ "rev-parse": "/r\n" }, ["status"]);
+    await assert.rejects(inspectRepo("/r", exec), /^Error: \/r is not a git repository, or git is unavailable\.$/);
+  });
+});
+
+describe("worktreeClean", () => {
+  it("is true for a worktree with nothing to show", async () => {
+    const { exec, calls } = fakeExec({ status: "\n" });
+    assert.equal(await worktreeClean("/w", exec), true);
+    assert.deepEqual(calls, [{ file: "git", args: ["status", "--porcelain"], cwd: "/w" }]);
+  });
+
+  it("is false when a file changed", async () => assert.equal(await worktreeClean("/w", fakeExec({ status: "?? new.md\n" }).exec), false));
+  it("is unknown when git fails", async () => assert.equal(await worktreeClean("/w", fakeExec({}, ["status"]).exec), undefined));
+});
+
+// Splits a command line the way a POSIX shell does for single quotes, so a test can see which arguments git would get.
+function shellWords(line: string): string[] {
+  const words: string[] = [];
+  let word: string | undefined;
+  for (const m of line.matchAll(/'([^']*)'|\\(.)|(\s+)|([^\s'\\]+)/g)) {
+    if (m[3] !== undefined) {
+      if (word !== undefined) words.push(word);
+      word = undefined;
+    } else word = (word ?? "") + (m[1] ?? m[2] ?? m[4]);
+  }
+  if (word !== undefined) words.push(word);
+  return words;
+}
+
+describe("removalNote", () => {
+  const worktree = { root: "/home/u/app", path: "/home/u/app.coordiner/audit", branch: "coordiner/audit" };
+
+  it("prints the removal commands, indented, under the worktree it found unchanged", async () => {
+    assert.deepEqual(await removalNote(worktree, fakeExec({ status: "" }).exec), [
+      "Nothing changed in /home/u/app.coordiner/audit. To remove the worktree and its branch, run:",
+      "  git -C '/home/u/app' worktree remove '/home/u/app.coordiner/audit'",
+      "  git -C '/home/u/app' branch -D 'coordiner/audit'",
+    ]);
+  });
+
+  it("says nothing when a file changed, or when git could not say", async () => {
+    assert.equal(await removalNote(worktree, fakeExec({ status: " M a.ts\n" }).exec), undefined);
+    assert.equal(await removalNote(worktree, fakeExec({}, ["status"]).exec), undefined);
+  });
+
+  it("says how to remove an unchanged worktree, without a command, when its path cannot be shown safely", async () => {
+    assert.deepEqual(await removalNote({ ...worktree, path: "/home/u/a\u001b[2K" }, fakeExec({ status: "" }).exec), [
+      "Nothing changed in /home/u/a[2K. Its path has a control character, so no command is printed; remove it with git worktree remove and its branch coordiner/audit with git branch -D.",
+    ]);
+  });
+});
+
+describe("removalCommands", () => {
+  it("removes the worktree, then its branch, from the repository", () => {
+    assert.deepEqual(removalCommands("/home/u/app", "/home/u/app.coordiner/audit", "coordiner/audit"), [
+      "git -C '/home/u/app' worktree remove '/home/u/app.coordiner/audit'",
+      "git -C '/home/u/app' branch -D 'coordiner/audit'",
+    ]);
+  });
+
+  it("keeps a path with a space or a quote as one argument", () => {
+    const [remove, branch] = removalCommands("/home/u/my app's", "/home/u/my app's.coordiner/a", "coordiner/a")!;
+    assert.deepEqual(shellWords(remove!), ["git", "-C", "/home/u/my app's", "worktree", "remove", "/home/u/my app's.coordiner/a"]);
+    assert.deepEqual(shellWords(branch!), ["git", "-C", "/home/u/my app's", "branch", "-D", "coordiner/a"]);
+  });
+
+  it("prints no command for a path with a control character", () => {
+    assert.equal(removalCommands("/home/u/a\nrm -rf ~", "/home/u/a.coordiner/x", "coordiner/x"), undefined);
+    assert.equal(removalCommands("/home/u/a", "/home/u/a.coordiner/x\u001b[2K", "coordiner/x"), undefined);
   });
 });
 

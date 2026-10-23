@@ -278,6 +278,24 @@ textarea {
   color: var(--vscode-editorWarning-foreground);
 }
 
+/* Model and effort: labels in one column, selects in the other, so the two line up inside the card. */
+.card-settings {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 0.9em;
+}
+
+.card-settings select {
+  min-width: 0;
+}
+
+.card-settings .note, .card-settings .reason {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .card-actions {
   display: flex;
   gap: 4px;
@@ -370,6 +388,7 @@ textarea {
 }
 
 .chat-status { margin: 4px 0; color: var(--vscode-descriptionForeground); }
+.chat-cache { margin: 0 0 4px; font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 
 #transcript, .queued {
   list-style: none;

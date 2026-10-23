@@ -1,7 +1,7 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
-import { defaultCard, MAX_ARGS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, TEMPLATES, type Chain } from "./chains.ts";
+import { defaultCard, MAX_ARGS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, TEMPLATES, type Card, type Chain, type Effort } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import type { EditorState } from "./editor-protocol.ts";
 import { REQUIRED_COMMANDS } from "./session.ts";
@@ -72,8 +72,12 @@ describe("chains webview: loading", () => {
     const page = await open();
     page.send();
     const rail = page.doc.getElementById("rail")!;
-    assert.deepEqual([...rail.querySelectorAll("h2")].map((h) => h.textContent), ["Templates", "My chains"]);
-    assert.equal(rail.querySelectorAll(".badge").length, 4);
+    assert.deepEqual([...rail.querySelectorAll("h2")].map((h) => h.textContent), ["Templates", "Single skills", "My chains"]);
+    assert.deepEqual(
+      [...rail.querySelectorAll("ul")].slice(0, 2).map((ul) => [...ul.querySelectorAll("button > span:first-child")].map((s) => s.textContent)),
+      [["Story", "Idea", "Bug", "New project"], ["Kickoff", "Onboard", "Security audit", "UI audit", "Accessibility audit", "Docs audit"]],
+    );
+    assert.equal(rail.querySelectorAll(".badge").length, 10);
     assert.ok(page.named("Story, m-skills"), "the badge is spoken as part of the name, separated");
     assert.ok(page.named("Own"));
   });
@@ -147,6 +151,16 @@ describe("chains webview: selecting and copying", () => {
     assert.equal(page.focused()!.textContent, "Own");
     assert.deepEqual(page.stored(), { selectedId: "own" });
     assert.equal(page.all('#rail button[aria-pressed="true"]').length, 1);
+  });
+
+  it("duplicates a single skill into a one-card chain of your own", async () => {
+    const page = await open();
+    page.send();
+    page.select("Security audit, m-skills");
+    page.named("Duplicate to edit").click();
+    const [copy] = page.saves();
+    assert.equal(copy!.name, "Security audit copy");
+    assert.deepEqual(copy!.sessions, [{ cards: [{ skill: "m-skills:security-audit", args: "", label: "Security audit", pause: false }] }]);
   });
 
   it("duplicates a template into an editable chain of your own and selects it", async () => {
@@ -388,6 +402,123 @@ describe("chains webview: editing a chain", () => {
   });
 });
 
+describe("chains webview: model and effort", () => {
+  const models = [
+    { id: "m-opus", label: "Opus", efforts: ["low", "high"] as Effort[] },
+    { id: "m-haiku", label: "Haiku", efforts: [] as Effort[] },
+  ];
+  const listed = { models, tierEfforts: ["low"] as Effort[] };
+  const withB = (patch: Partial<Card>): Chain => ({ ...own, sessions: [{ cards: [own.sessions[0]!.cards[0]!, { ...own.sessions[0]!.cards[1]!, ...patch }, own.sessions[0]!.cards[2]!] }] });
+  const options = (page: Awaited<ReturnType<typeof open>>, id: string) => [...(page.doc.getElementById(id) as HTMLSelectElement).options].map((o) => o.textContent);
+  const choose = (page: Awaited<ReturnType<typeof open>>, id: string, value: string) => {
+    const field = page.doc.getElementById(id) as HTMLSelectElement;
+    field.value = value;
+    field.dispatchEvent(new page.w.Event("change", { bubbles: true }));
+  };
+
+  it("labels both selects with the card's name and offers the listed models and the tier efforts", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send(listed);
+    assert.equal(page.doc.querySelector('label[for="model-0-1"]')!.textContent, "Model for b");
+    assert.equal(page.doc.querySelector('label[for="effort-0-1"]')!.textContent, "Effort for b");
+    assert.deepEqual(options(page, "model-0-1"), ["By tier", "Opus", "Haiku"]);
+    assert.deepEqual(options(page, "effort-0-1"), ["Model default", "low"]);
+    assert.equal((page.doc.getElementById("model-0-1") as HTMLSelectElement).value, "");
+  });
+
+  it("shows no selects on a built-in template", async () => {
+    const page = await open({ selectedId: "story" });
+    page.send(listed);
+    assert.equal(page.doc.querySelector("#detail select[id^=model]"), null);
+  });
+
+  it("pins a model, keeps focus on its select and says it saved", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send(listed);
+    choose(page, "model-0-1", "m-opus");
+    assert.deepEqual(page.saves()[0]!.sessions[0]!.cards[1], { ...own.sessions[0]!.cards[1]!, model: "m-opus" });
+    assert.equal(page.focused()?.id, "model-0-1");
+    assert.equal(page.status(), "Saved b");
+    assert.deepEqual(options(page, "effort-0-1"), ["Model default", "low", "high"]);
+  });
+
+  it("keeps the effort when the new model takes it, and drops it when it does not", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send({ ...listed, chains: [withB({ effort: "low" }), other] });
+    choose(page, "model-0-1", "m-opus");
+    assert.deepEqual(page.saves()[0]!.sessions[0]!.cards[1], { ...own.sessions[0]!.cards[1]!, model: "m-opus", effort: "low" });
+    page.send({ ...listed, chains: [withB({ model: "m-opus", effort: "high" }), other] });
+    choose(page, "model-0-1", "");
+    assert.deepEqual(page.saves()[1]!.sessions[0]!.cards[1], own.sessions[0]!.cards[1]);
+  });
+
+  it("sets and clears the effort", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send(listed);
+    choose(page, "effort-0-1", "low");
+    assert.equal(page.saves()[0]!.sessions[0]!.cards[1]!.effort, "low");
+    assert.equal(page.focused()?.id, "effort-0-1");
+    choose(page, "effort-0-1", "");
+    assert.equal(Object.hasOwn(page.saves()[1]!.sessions[0]!.cards[1]!, "effort"), false);
+  });
+
+  it("turns Effort off and says why when there is nothing to pick", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send({ ...listed, chains: [withB({ model: "m-haiku" }), other] });
+    const effort = page.doc.getElementById("effort-0-1")!;
+    assert.equal(effort.getAttribute("aria-disabled"), "true");
+    assert.equal(page.doc.getElementById(effort.getAttribute("aria-describedby")!)!.textContent, "This model has no effort setting.");
+    page.send();
+    assert.equal(page.doc.getElementById("effort-0-1")!.getAttribute("aria-disabled"), "true");
+    assert.match(page.doc.getElementById("effort-why-0-1")!.textContent!, /once the session's models are listed/);
+  });
+
+  it("keeps a stored model the session does not offer, marks it, and turns Run off", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send({ ...listed, chains: [withB({ model: "m-gone" }), other] });
+    const model = page.doc.getElementById("model-0-1") as HTMLSelectElement;
+    assert.equal(model.value, "m-gone");
+    assert.equal(model.selectedOptions[0]!.textContent, "m-gone (not offered by this session)");
+    assert.ok(page.all(".card .flag").some((f) => f.textContent === "Model not offered by this session"));
+    assert.equal(page.doc.getElementById("run-reason")!.textContent, "b: model m-gone is not offered by this session.");
+  });
+
+  it("lets an effort the model no longer takes go back to the default", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send({ ...listed, chains: [withB({ model: "m-opus", effort: "max" }), other] });
+    const effort = page.doc.getElementById("effort-0-1") as HTMLSelectElement;
+    assert.equal(effort.selectedOptions[0]!.textContent, "max (not offered)");
+    assert.equal(effort.getAttribute("aria-disabled"), "false");
+    choose(page, "effort-0-1", "");
+    assert.deepEqual(page.saves()[0]!.sessions[0]!.cards[1], { ...own.sessions[0]!.cards[1]!, model: "m-opus" });
+  });
+
+  it("says when the models could not be listed", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send({ modelsError: "unsupported" });
+    assert.ok(
+      page.all("#detail .note").some((n) => n.textContent === "Cards on By tier run on their tier's model, and a pinned card keeps its model, checked when its session starts. Models could not be listed: unsupported"),
+    );
+  });
+
+  it("shows a pinned model as stored, unmarked, while the models are not listed", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send({ modelsError: "unsupported", chains: [withB({ model: "m-opus" }), other] });
+    const model = page.doc.getElementById("model-0-1") as HTMLSelectElement;
+    assert.deepEqual(options(page, "model-0-1"), ["By tier", "m-opus"]);
+    assert.equal(model.selectedOptions[0]!.textContent, "m-opus");
+    assert.ok(!page.all(".card .flag").some((f) => f.textContent === "Model not offered by this session"));
+    assert.equal(page.named("Run Own").getAttribute("aria-disabled"), "false");
+  });
+
+  it("notes that a pinned loop card keeps its model through tier stops", async () => {
+    const loop: Chain = { id: "own", name: "Own", sessions: [{ cards: [{ ...defaultCard("m-skills:implementing-architect"), model: "m-opus" }] }] };
+    const page = await open({ selectedId: "own" });
+    page.send({ ...listed, chains: [loop] });
+    assert.ok(page.all(".card-settings .note").some((n) => n.textContent === "Pinned: NEXT <tier> does not change this card's model."));
+  });
+});
+
 describe("chains webview: running", () => {
   it("runs a runnable chain", async () => {
     const page = await open({ selectedId: "own" });
@@ -407,6 +538,15 @@ describe("chains webview: running", () => {
     run.click();
     assert.deepEqual(page.posted.at(-1), { type: "run", id: "new-project" });
     assert.match(page.doc.getElementById("detail")!.textContent!, /Pauses for you/);
+  });
+
+  it("runs a single skill from its template", async () => {
+    const page = await open();
+    page.send({ palette: palette([...REQUIRED_COMMANDS, "m-skills:kickoff"]) });
+    page.select("Kickoff, m-skills");
+    page.named("Run Kickoff").click();
+    assert.deepEqual(page.posted.at(-1), { type: "run", id: "kickoff" });
+    assert.match(page.doc.getElementById("detail")!.textContent!, /Starts from a name only/);
   });
 
   it("disables Run with the reason linked to it, and announces the reason instead of running", async () => {
@@ -478,7 +618,7 @@ describe("chains webview: m-skills and skill listing", () => {
     const page = await open({ selectedId: "own" });
     page.send({ palette: undefined });
     assert.match(page.doc.getElementById("detail")!.textContent!, /Listing the skills this workspace offers/);
-    assert.equal(page.all("select").length, 0);
+    assert.equal(page.all("select[id^=palette]").length, 0);
   });
 
   it("offers Try again and Check Environment when listing failed", async () => {

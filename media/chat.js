@@ -18,6 +18,9 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   const title = el("h2", { id: "chat-h" }, "Run");
   const toggle = el("button", { type: "button", "aria-expanded": "true", "aria-controls": "chat-body", onclick: () => setOpen(toggle.getAttribute("aria-expanded") !== "true") }, "Hide chat");
   const line = el("p", { class: "chat-status" });
+  // Plain text, not a live region: it changes every second. Only the expiry is announced, once.
+  const cacheLine = el("p", { class: "chat-cache", hidden: true });
+  let cacheTimer;
   const transcript = el("ol", { id: "transcript", "aria-label": "Run transcript" });
   const queuedList = el("ul", { class: "queued", "aria-label": "Queued messages" });
   const form = el("form", { class: "question", "aria-labelledby": "question-h", hidden: true, onsubmit: (e) => (e.preventDefault(), submitAnswers()) });
@@ -42,6 +45,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     "div",
     { id: "chat-body" },
     line,
+    cacheLine,
     transcript,
     queuedList,
     form,
@@ -252,6 +256,28 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     }
     const said = prev && !readByFocus ? logic.announcement(prev, next) : undefined;
     if (said) announce(said);
+    showCache(next);
+  }
+
+  // One timer at most, running only while a card waits; any update starts over from the cache it carries.
+  function showCache(next) {
+    clearInterval(cacheTimer);
+    cacheTimer = undefined;
+    cacheLine.hidden = !(next.phase === "waiting" && next.cache);
+    if (cacheLine.hidden) return;
+    let expired = logic.cacheLabel(next.cache, Date.now()).expired;
+    const tick = () => {
+      const label = logic.cacheLabel(next.cache, Date.now());
+      cacheLine.textContent = label.text;
+      if (label.expired && !expired) announce(`Prompt cache expired for ${next.card}`);
+      expired = label.expired;
+      if (expired) {
+        clearInterval(cacheTimer);
+        cacheTimer = undefined;
+      }
+    };
+    tick();
+    if (!expired) cacheTimer = setInterval(tick, 1000);
   }
 
   window.addEventListener("message", (event) => {

@@ -1,14 +1,51 @@
-import { INPUT_KINDS, inputOf, INPUTS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, runnable, usesMskills, type Card, type Chain } from "./chains.ts";
+import { INPUT_KINDS, inputOf, INPUTS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, runnable, skillDefault, usesMskills, type Card, type Chain, type Effort } from "./chains.ts";
+import type { ModelOption } from "./skills.ts";
 
 // The decisions behind the chains webview, kept out of the DOM script so they can be tested. The webview loads this module from dist/.
 
-export type EditorView = { running: boolean; mskills?: boolean; palette?: readonly { skill: string }[] };
+export type EditorView = {
+  running: boolean;
+  mskills?: boolean;
+  palette?: readonly { skill: string }[];
+  models?: readonly ModelOption[];
+  tierEfforts?: readonly Effort[];
+};
+
+// Until the models are listed nothing is offered, and nothing is refused: the session's own model check still guards the turn.
+function effortsFor(model: string | undefined, view: EditorView): readonly Effort[] {
+  if (!view.models) return [];
+  if (model === undefined) return view.tierEfforts ?? [];
+  return view.models.find((m) => m.id === model)?.efforts ?? [];
+}
+export const effortChoices = (card: Card, view: EditorView): readonly Effort[] => effortsFor(card.model, view);
+// A new model keeps the card's effort only when it takes that effort too.
+export const effortAfterModel = (card: Card, model: string | undefined, view: EditorView): Effort | undefined =>
+  card.effort !== undefined && effortsFor(model, view).includes(card.effort) ? card.effort : undefined;
+export const modelOffered = (card: Card, view: EditorView): boolean => card.model === undefined || !view.models || view.models.some((m) => m.id === card.model);
+const effortOffered = (card: Card, view: EditorView): boolean => card.effort === undefined || !view.models || effortChoices(card, view).includes(card.effort);
+
+// Why the Effort list holds only the model's default.
+export function effortReason(card: Card, view: EditorView): string | undefined {
+  if (effortChoices(card, view).length > 0) return undefined;
+  if (!view.models) return "Effort can be set once the session's models are listed.";
+  return card.model === undefined ? "The tier models do not share an effort setting; pin a model to set one." : "This model has no effort setting.";
+}
+
+// A pinned loop card keeps its model through the plan's tier stops.
+export const pinNote = (card: Card): string | undefined =>
+  card.model !== undefined && skillDefault(card.skill).kind === "loop" ? "Pinned: NEXT <tier> does not change this card's model." : undefined;
 
 export function runReason(chain: Chain, view: EditorView): string | undefined {
   if (view.running) return "A run is in progress.";
   if (view.mskills === false && usesMskills(chain)) return "Needs m-skills, which is not installed.";
   const result = runnable(chain, view.palette?.map((p) => p.skill));
-  return result.ok ? undefined : result.reason;
+  if (!result.ok) return result.reason;
+  const cards = chain.sessions.flatMap((s) => s.cards);
+  const stale = cards.find((c) => !modelOffered(c, view));
+  if (stale) return `${stale.label}: model ${stale.model} is not offered by this session.`;
+  const unoffered = cards.find((c) => !effortOffered(c, view));
+  if (unoffered) return `${unoffered.label}: effort ${unoffered.effort} is not available for ${unoffered.model ?? "its tier's models"}.`;
+  return undefined;
 }
 
 // The card a run is on, in session `s` of `chain`, or -1. By index, since two cards in a session can share a label.
@@ -57,6 +94,8 @@ export function moveDelta(key: { altKey: boolean; key: string }): -1 | 1 | undef
 export const moveKey = (s: number, i: number, delta: -1 | 1): string => `move-${s}-${i}-${delta}`;
 export const removeKey = (s: number, i: number): string => `remove-${s}-${i}`;
 export const addKey = (s: number): string => `add-${s}`;
+export const modelKey = (s: number, i: number): string => `model-${s}-${i}`;
+export const effortKey = (s: number, i: number): string => `effort-${s}-${i}`;
 
 // After a move, focus stays on the same button of the moved card; at either end nothing moves.
 export function afterMove(s: number, i: number, delta: -1 | 1, count: number): string | undefined {

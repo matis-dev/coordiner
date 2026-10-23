@@ -111,7 +111,9 @@ export async function start() {
   function renderRail() {
     rail.replaceChildren(
       el("h2", {}, "Templates"),
-      el("ul", {}, state.templates.map(railItem)),
+      el("ul", {}, state.templates.filter((t) => !chainsModule.singleSkill(t)).map(railItem)),
+      el("h2", {}, "Single skills"),
+      el("ul", {}, state.templates.filter(chainsModule.singleSkill).map(railItem)),
       el("h2", {}, "My chains"),
       state.chains.length > 0 ? el("ul", {}, state.chains.map(railItem)) : el("p", { class: "note" }, "No chains yet. Duplicate a template to start."),
       el(
@@ -138,12 +140,14 @@ export async function start() {
       children.push(
         el("label", { for: id, class: "visually-hidden" }, `Arguments for ${label}`),
         el("textarea", { id, rows: 2, maxlength: chainsModule.MAX_ARGS, "data-focus": id, onchange: (e) => save(edit.setArgs(chain, s, i, e.target.value), `Saved ${label}`, id) }, c.args),
+        settings(chain, s, i, c),
       );
     } else if (c.args) {
       children.push(el("p", { class: "args" }, logic.argParts(c.args).map((part) => ("chip" in part ? el("span", { class: "chip" }, part.chip) : part.text))));
     }
     if (c.pause) children.push(el("span", { class: "flag" }, "Pauses for you"));
     if (missing) children.push(el("span", { class: "flag" }, "Not available in this workspace"));
+    if (!logic.modelOffered(c, state)) children.push(el("span", { class: "flag" }, "Model not offered by this session"));
     if (editable) {
       const cards = chain.sessions[s].cards;
       const move = (delta) => {
@@ -175,6 +179,49 @@ export async function start() {
       );
     }
     return el("li", { class: "card", "aria-current": running ? "step" : undefined }, children);
+  }
+
+  // Model and effort, each a native select whose visible label names the card. A stored value the session does not offer stays
+  // selected, marked, so the card shows what Run would refuse rather than quietly changing it.
+  function settings(chain, s, i, c) {
+    const label = c.label;
+    const modelId = logic.modelKey(s, i);
+    const effortId = logic.effortKey(s, i);
+    const models = state.models ?? [];
+    const efforts = logic.effortChoices(c, state);
+    // Until the session lists its models, a pinned one is shown as stored: only a listed session can say it does not offer it.
+    const unlisted = c.model !== undefined && !models.some((m) => m.id === c.model);
+    const why = logic.effortReason(c, state);
+    const note = logic.pinNote(c);
+    const named = (text) => [text, el("span", { class: "visually-hidden" }, ` for ${label}`)];
+    return el(
+      "div",
+      { class: "card-settings" },
+      el("label", { for: modelId }, named("Model")),
+      el(
+        "select",
+        { id: modelId, "data-focus": modelId, onchange: (e) => {
+          const model = e.target.value || undefined;
+          save(edit.setModel(chain, s, i, model, logic.effortAfterModel(c, model, state)), `Saved ${label}`, modelId);
+        } },
+        el("option", { value: "" }, "By tier"),
+        models.map((m) => el("option", { value: m.id, selected: m.id === c.model }, m.label)),
+        unlisted ? el("option", { value: c.model, selected: true }, logic.modelOffered(c, state) ? c.model : `${c.model} (not offered by this session)`) : undefined,
+      ),
+      el("label", { for: effortId }, named("Effort")),
+      el(
+        "select",
+        // Off only when there is nothing to pick; an effort the model no longer takes can still be set back to the default.
+        { id: effortId, "data-focus": effortId, "aria-disabled": String(why !== undefined && c.effort === undefined), "aria-describedby": why ? `effort-why-${s}-${i}` : undefined, onchange: (e) => {
+          save(edit.setEffort(chain, s, i, e.target.value || undefined), `Saved ${label}`, effortId);
+        } },
+        el("option", { value: "" }, "Model default"),
+        efforts.map((effort) => el("option", { value: effort, selected: effort === c.effort }, effort)),
+        c.effort !== undefined && !efforts.includes(c.effort) ? el("option", { value: c.effort, selected: true }, `${c.effort} (not offered)`) : undefined,
+      ),
+      why ? el("p", { id: `effort-why-${s}-${i}`, class: "reason" }, why) : undefined,
+      note ? el("p", { class: "note" }, note) : undefined,
+    );
   }
 
   function addSkill(chain, s) {
@@ -247,6 +294,7 @@ export async function start() {
     parts.push(el("p", { class: "starts" }, logic.startsFrom(chain)));
     if (editable) {
       parts.push(el("p", { class: "note" }, logic.PLACEHOLDER_NOTE));
+      if (state.modelsError) parts.push(el("p", { class: "note" }, `Cards on By tier run on their tier's model, and a pinned card keeps its model, checked when its session starts. Models could not be listed: ${state.modelsError}`));
     }
 
     chain.sessions.forEach((session, s) => {

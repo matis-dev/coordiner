@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { parseStories, slugify, storyText, type Story } from "./backlog.ts";
 import { ChainStore, type StoreFs } from "./chain-store.ts";
-import { inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
+import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
@@ -17,41 +17,60 @@ import { createJournal, journalFileName } from "./journal.ts";
 import { fillInput, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
 import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type RunChat } from "./run-chat.ts";
-import { listCommands, runTurn } from "./session.ts";
+import { listCommands, runTurn, type TurnControl } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
-import { mskillsPresent, palette, type PaletteEntry } from "./skills.ts";
+import { commonEfforts, modelOptions, mskillsPresent, palette, type ModelOption, type PaletteEntry } from "./skills.ts";
 import { plain } from "./text.ts";
-import { stepItem, type StepView } from "./view.ts";
-import { addWorktree, inspectRepo, prepareReview, type Exec } from "./worktree.ts";
+import { applyTask, liveProcess, stopLine, type Process } from "./processes.ts";
+import { finishedMessage, nothingToReviewMessage, pickedChain, processItem, startItems, stepItem, type StepView } from "./view.ts";
+import { addWorktree, inspectRepo, prepareReview, removalNote, type Exec, type Worktree } from "./worktree.ts";
 
 const run = promisify(execFile);
 const exec: Exec = (file, args, options) => run(file, args, options);
 
-class StepsProvider implements vscode.TreeDataProvider<StepView> {
+// The run's steps, and under the running one the background processes of its turn.
+type RunItem = StepView | Process;
+const isProcess = (item: RunItem): item is Process => "id" in item;
+
+class StepsProvider implements vscode.TreeDataProvider<RunItem> {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
   steps: StepView[] = [];
+  processes: Process[] = [];
 
   update(steps: StepView[]): void {
     this.steps = steps;
     this.changed.fire();
   }
 
-  getTreeItem(step: StepView): vscode.TreeItem {
-    const view = stepItem(step);
+  setProcesses(processes: Process[]): void {
+    this.processes = processes;
+    this.changed.fire();
+  }
+
+  private running(): StepView | undefined {
+    return this.steps.findLast((s) => s.status === "running");
+  }
+
+  getTreeItem(element: RunItem): vscode.TreeItem {
+    const view = isProcess(element) ? processItem(element, this.running()?.label ?? "") : stepItem(element);
     const item = new vscode.TreeItem(view.label);
     item.description = view.description;
     item.iconPath = new vscode.ThemeIcon(view.icon);
     item.accessibilityInformation = { label: view.accessibleLabel, role: "treeitem" };
+    // The Stop process action (inline, and in the context menu for the keyboard) shows on these items only.
+    if (isProcess(element)) item.contextValue = "process";
+    else if (element === this.running() && this.processes.length > 0) item.collapsibleState = vscode.TreeItemCollapsibleState.Expanded;
     return item;
   }
 
-  getChildren(): vscode.ProviderResult<StepView[]> {
-    return this.steps;
+  getChildren(element?: RunItem): vscode.ProviderResult<RunItem[]> {
+    if (!element) return this.steps;
+    return !isProcess(element) && element === this.running() ? this.processes : [];
   }
 
-  getParent(): undefined {
-    return undefined;
+  getParent(element: RunItem): RunItem | undefined {
+    return isProcess(element) ? this.running() : undefined;
   }
 }
 
@@ -171,24 +190,37 @@ async function askInput(kind: InputKind | undefined): Promise<RunInput | undefin
   return name === undefined ? undefined : { name, text };
 }
 
+// A run that changed nothing leaves its worktree and branch behind; the output says how to remove them, and Coordiner removes nothing.
+async function offerRemoval(worktree: Worktree, output: vscode.OutputChannel): Promise<boolean> {
+  const note = await removalNote(worktree, exec);
+  for (const line of note ?? []) output.appendLine(line);
+  return note !== undefined;
+}
+
 // The commit brief is model text: it is shown, never offered as a command to copy or run.
-async function announce(outcome: Outcome, heading: string, worktree: string, chain: Chain, output: vscode.OutputChannel): Promise<void> {
+async function announce(outcome: Outcome, heading: string, worktree: Worktree, chain: Chain, output: vscode.OutputChannel): Promise<void> {
   const name = plain(heading);
   if ((outcome.status === "halted" || outcome.status === "failed") && outcome.sessionId) {
-    output.appendLine(`To take over this session, run in ${worktree}: claude --resume ${outcome.sessionId}`);
+    output.appendLine(`To take over this session, run in ${worktree.path}: claude --resume ${outcome.sessionId}`);
   }
   const remaining = remainingCommands(chain, outcome);
-  if (remaining.length > 0) output.appendLine(`To finish by hand, run these in a Claude Code session in ${worktree}: ${remaining.map(plain).join(" → ")}`);
+  if (remaining.length > 0) output.appendLine(`To finish by hand, run these in a Claude Code session in ${worktree.path}: ${remaining.map(plain).join(" → ")}`);
   switch (outcome.status) {
-    case "done":
-      output.appendLine("Commit brief:");
-      output.appendLine(plain(outcome.text) || "(the session returned no commit brief)");
+    case "done": {
+      const brief = briefHeading(chain);
+      output.appendLine(`${brief}:`);
+      output.appendLine(plain(outcome.text) || `(the session returned no ${brief.toLowerCase()})`);
+      const unchanged = await offerRemoval(worktree, output);
       output.show(true);
-      await vscode.window.showInformationMessage(`Coordiner: ${name} is finished. The commit brief is in the Coordiner output; review the worktree at ${worktree}.`);
+      await vscode.window.showInformationMessage(finishedMessage(name, brief, unchanged ? undefined : worktree.path));
       return;
-    case "no-changes":
-      await vscode.window.showInformationMessage(`Coordiner: ${name} finished without changing any file, so there is nothing to review.`);
+    }
+    case "no-changes": {
+      const removable = await offerRemoval(worktree, output);
+      if (removable) output.show(true);
+      await vscode.window.showInformationMessage(nothingToReviewMessage(name, removable));
       return;
+    }
     case "halted":
       await vscode.window.showWarningMessage(`Coordiner: ${name} halted: ${plain(outcome.reason)} See the Coordiner output.`);
       return;
@@ -204,14 +236,15 @@ async function announce(outcome: Outcome, heading: string, worktree: string, cha
 }
 
 // The run's chat outlives the run, so the editor still shows the last transcript after it ends, until the next run starts.
-type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat };
+// `stopProcess` exists while a run is going; it acts on the turn running at the time.
+type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat; stopProcess?: (process: Process) => Promise<void> };
 
 type RunContext = {
   state: RunState;
   // Held from the moment Run is pressed until the run ends; `state.abort` only exists once the sessions start.
   slot: OneRun;
   provider: StepsProvider;
-  reveal: (step: StepView) => void;
+  reveal: (step: RunItem) => void;
   output: vscode.OutputChannel;
   storage: vscode.Uri;
   onRunChange: () => void;
@@ -331,18 +364,46 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
   const emit = (event: RunEvent) => {
     void journal(event);
     if (event.type === "step-started") {
-      provider.update([...provider.steps, { label: event.label, tier: event.tier, model: event.model, status: "running" }]);
+      provider.update([...provider.steps, { label: event.label, tier: event.tier, model: event.model, ...(event.effort ? { effort: event.effort } : {}), status: "running" }]);
       reveal(provider.steps[event.index]!);
       return;
     }
     provider.update(provider.steps.map((step, i) => (i === event.index ? { ...step, status: event.status, detail: event.detail } : step)));
   };
   const required = requiredSkills(chain);
+  // What can act on the turn that is running; the turn's processes are listed only while it runs.
+  let control: TurnControl | undefined;
+  state.stopProcess = async (process) => {
+    if (!control) return;
+    try {
+      await control.stopTask(process.id);
+      log(stopLine(process));
+    } catch {
+      output.appendLine("Coordiner: that process had already ended.");
+    }
+  };
   let outcome: Outcome;
   try {
     outcome = await runChain(filled.chain, {
-      runTurn: ({ interactive, ...request }) =>
-        runTurn({ ...request, ...chat.forTurn(interactive), cwd: added.path, env, claudePath: claude.path, requiredCommands: required, signal: abort.signal, onGuard: log }),
+      runTurn: async ({ interactive, ...request }) => {
+        try {
+          return await runTurn({
+            ...request,
+            ...chat.forTurn(interactive),
+            cwd: added.path,
+            env,
+            claudePath: claude.path,
+            requiredCommands: required,
+            signal: abort.signal,
+            onGuard: log,
+            onStarted: (c) => (control = c),
+            onTask: (message) => provider.setProcesses(applyTask(provider.processes, message)),
+          });
+        } finally {
+          control = undefined;
+          provider.setProcesses([]);
+        }
+      },
       models,
       emit,
       signal: abort.signal,
@@ -352,10 +413,11 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
   } finally {
     chat.talk.end();
     state.abort = undefined;
+    state.stopProcess = undefined;
     ctx.onRunChange();
   }
   void journal({ type: "outcome", outcome });
-  await announce(outcome, input.name, added.path, filled.chain, output);
+  await announce(outcome, input.name, { root: repo.root, path: added.path, branch: added.branch }, filled.chain, output);
 }
 
 // ── Chains editor ─────────────────────────────────────────────────────────────
@@ -371,6 +433,8 @@ class ChainsEditor {
   private palette?: PaletteEntry[];
   private paletteError?: string;
   private mskills?: boolean;
+  private models?: ModelOption[];
+  private modelsError?: string;
   private readonly extension: vscode.Uri;
   private readonly store: ChainStore;
   private readonly ctx: RunContext;
@@ -421,6 +485,35 @@ class ChainsEditor {
     if (!inView) void vscode.window.showInformationMessage(`Coordiner: ${plain(card)} is waiting for you in the chains editor.`);
   }
 
+  // The saved chains, read once whether or not the editor was opened; an unreadable file leaves only the templates.
+  async startable(): Promise<{ templates: readonly Chain[]; chains: readonly Chain[] }> {
+    await this.store.load();
+    return { templates: TEMPLATES, chains: this.store.chains };
+  }
+
+  // The same checks for Run in the editor and for Start…. Start… can come before the editor was ever opened, so the skills are
+  // listed first: a missing one is caught here, not after the worktree and its setup. If listing fails, the session checks them.
+  async run(chain: Chain): Promise<void> {
+    if (!this.palette) await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: "Coordiner: listing skills" }, () => this.discover());
+    // The webview disables Run on its own, but its state is not trusted.
+    const reason = runReason(chain, { running: this.ctx.slot.busy(), ...this.discovered() });
+    if (reason) {
+      await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${reason}`);
+      return;
+    }
+    await runChainCommand(structuredClone(chain), this.ctx);
+  }
+
+  // What discovery found, for the Run checks here and in the webview. The tier efforts follow the settings as they are now.
+  private discovered(): Pick<EditorState, "mskills" | "palette" | "models" | "tierEfforts"> {
+    const tiers = Object.values(readModels(vscode.workspace.getConfiguration("coordiner")));
+    return {
+      ...(this.mskills !== undefined ? { mskills: this.mskills } : {}),
+      ...(this.palette ? { palette: this.palette } : {}),
+      ...(this.models ? { models: this.models, tierEfforts: commonEfforts(this.models, tiers) } : {}),
+    };
+  }
+
   postChat(message: ChatMessage): void {
     void this.panel?.webview.postMessage(message);
   }
@@ -436,9 +529,9 @@ class ChainsEditor {
       chains: this.store.chains,
       running: this.ctx.slot.busy(),
       ...runningAt(run),
-      ...(this.palette ? { palette: this.palette } : {}),
+      ...this.discovered(),
       ...(this.paletteError ? { paletteError: this.paletteError } : {}),
-      ...(this.mskills !== undefined ? { mskills: this.mskills } : {}),
+      ...(this.modelsError ? { modelsError: this.modelsError } : {}),
       ...(error ? { storageError: error } : {}),
       ...(unsaved ? { unsaved } : {}),
     };
@@ -473,14 +566,7 @@ class ChainsEditor {
       }
       case "run": {
         const chain = [...TEMPLATES, ...this.store.chains].find((c) => c.id === message.id);
-        if (!chain) return;
-        // The webview disables Run on its own, but its state is not trusted.
-        const reason = runReason(chain, { running: this.ctx.slot.busy(), ...(this.mskills !== undefined ? { mskills: this.mskills } : {}), ...(this.palette ? { palette: this.palette } : {}) });
-        if (reason) {
-          await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${reason}`);
-          return;
-        }
-        await runChainCommand(structuredClone(chain), this.ctx);
+        if (chain) await this.run(chain);
         return;
       }
       case "refreshPalette":
@@ -512,6 +598,8 @@ class ChainsEditor {
     const cwd = openFolder();
     this.palette = undefined;
     this.paletteError = undefined;
+    this.models = undefined;
+    this.modelsError = undefined;
     if (cwd === undefined) {
       this.paletteError = "open a folder first; skills are listed for the open folder.";
       this.post();
@@ -525,11 +613,23 @@ class ChainsEditor {
     if (result.ok) {
       this.palette = palette(result.commands);
       this.mskills = mskillsPresent(result.commands);
+      if (result.models) this.models = modelOptions(result.models);
+      if (result.modelsError) this.modelsError = plain(result.modelsError);
     } else {
       this.paletteError = plain(result.error);
     }
     this.post();
   }
+}
+
+async function startCommand(editor: ChainsEditor): Promise<void> {
+  const { templates, chains } = await editor.startable();
+  const items = startItems(templates, chains).map((i): vscode.QuickPickItem & { id?: string } =>
+    "separator" in i ? { label: i.separator, kind: vscode.QuickPickItemKind.Separator } : i,
+  );
+  const picked = await vscode.window.showQuickPick(items, { title: "Start", placeHolder: "A template, a single skill, or one of your chains" });
+  const chain = pickedChain(picked?.id, templates, chains);
+  if (chain) await editor.run(chain);
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -538,7 +638,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const view = vscode.window.createTreeView("coordiner.run", { treeDataProvider: provider });
   const state: RunState = {};
   // Reveal without stealing focus; a hidden view just rejects, which is fine.
-  const reveal = (step: StepView) => void view.reveal(step, { focus: false, select: false }).then(undefined, () => undefined);
+  const reveal = (step: RunItem) => void view.reveal(step, { focus: false, select: false }).then(undefined, () => undefined);
   let editor: ChainsEditor | undefined;
   const ctx: RunContext = {
     state,
@@ -559,7 +659,13 @@ export function activate(context: vscode.ExtensionContext): void {
     view,
     vscode.commands.registerCommand("coordiner.checkEnvironment", () => checkEnvironmentCommand(output)),
     vscode.commands.registerCommand("coordiner.runStory", () => runChainCommand(story, ctx)),
+    vscode.commands.registerCommand("coordiner.start", () => startCommand(editor)),
     vscode.commands.registerCommand("coordiner.openChains", () => editor.open()),
+    // The argument is the tree item the button sits on.
+    vscode.commands.registerCommand("coordiner.stopProcess", async (item: unknown) => {
+      const process = liveProcess(provider.processes, (item as { id?: unknown } | undefined)?.id);
+      if (process && state.stopProcess) await state.stopProcess(process);
+    }),
     vscode.commands.registerCommand("coordiner.stopRun", async () => {
       if (state.abort) state.abort.abort();
       else await vscode.window.showInformationMessage("Coordiner: no run is active.");

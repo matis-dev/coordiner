@@ -52,6 +52,11 @@
         "title": "Coordiner: Run Story…"
       },
       {
+        "command": "coordiner.start",
+        "title": "Coordiner: Start…",
+        "icon": "$(play)"
+      },
+      {
         "command": "coordiner.openChains",
         "title": "Coordiner: Open Chains",
         "icon": "$(list-ordered)"
@@ -59,14 +64,42 @@
       {
         "command": "coordiner.stopRun",
         "title": "Coordiner: Stop Run"
+      },
+      {
+        "command": "coordiner.stopProcess",
+        "title": "Stop Process",
+        "icon": "$(debug-stop)"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "coordiner.stopProcess",
+          "when": "false"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "coordiner.stopProcess",
+          "when": "view == coordiner.run && viewItem == process",
+          "group": "inline"
+        },
+        {
+          "command": "coordiner.stopProcess",
+          "when": "view == coordiner.run && viewItem == process",
+          "group": "navigation"
+        }
+      ],
       "view/title": [
+        {
+          "command": "coordiner.start",
+          "when": "view == coordiner.run",
+          "group": "navigation@1"
+        },
         {
           "command": "coordiner.openChains",
           "when": "view == coordiner.run",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ]
     },
@@ -125,7 +158,7 @@
     "viewsWelcome": [
       {
         "view": "coordiner.run",
-        "contents": "No run yet.\n[Open Chains](command:coordiner.openChains)\n[Run Story…](command:coordiner.runStory)"
+        "contents": "No run yet.\n[Start…](command:coordiner.start)\n[Open Chains](command:coordiner.openChains)\n[Run Story…](command:coordiner.runStory)"
       }
     ]
   },

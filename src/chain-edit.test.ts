@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addCard, addSession, duplicate, moveCard, removeCard, removeSession, rename, setArgs } from "./chain-edit.ts";
+import { addCard, addSession, duplicate, moveCard, removeCard, removeSession, rename, setArgs, setEffort, setModel } from "./chain-edit.ts";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
 
 const chain: Chain = { id: "c", name: "C", sessions: [{ cards: [defaultCard("a"), defaultCard("b"), defaultCard("c")] }, { cards: [defaultCard("d")] }] };
@@ -39,6 +39,38 @@ describe("cards", () => {
 
   it("sets a card's args", () => {
     assert.equal(setArgs(chain, 0, 2, "--fast").sessions[0]!.cards[2]!.args, "--fast");
+  });
+});
+
+describe("model and effort", () => {
+  const pinned = setModel(chain, 0, 1, "claude-haiku-5-5", "low");
+
+  it("pins a card's model and effort, leaving the other cards alone", () => {
+    assert.deepEqual(pinned.sessions[0]!.cards[1], { ...defaultCard("b"), model: "claude-haiku-5-5", effort: "low" });
+    assert.deepEqual(pinned.sessions[0]!.cards[0], defaultCard("a"));
+  });
+
+  it("removes both fields when the card goes back to its tier and the default effort", () => {
+    assert.deepEqual(setModel(pinned, 0, 1).sessions[0]!.cards[1], defaultCard("b"));
+    assert.equal(Object.hasOwn(setModel(pinned, 0, 1).sessions[0]!.cards[1]!, "model"), false);
+  });
+
+  it("drops the effort when a new model comes without one", () => {
+    assert.deepEqual(setModel(pinned, 0, 1, "claude-opus-5-5").sessions[0]!.cards[1], { ...defaultCard("b"), model: "claude-opus-5-5" });
+  });
+
+  it("sets and clears the effort without touching the model", () => {
+    assert.deepEqual(setEffort(pinned, 0, 1, "max").sessions[0]!.cards[1], { ...defaultCard("b"), model: "claude-haiku-5-5", effort: "max" });
+    assert.deepEqual(setEffort(pinned, 0, 1).sessions[0]!.cards[1], { ...defaultCard("b"), model: "claude-haiku-5-5" });
+  });
+
+  it("leaves the chain as it was out of range", () => {
+    assert.equal(setModel(chain, 4, 0, "x"), chain);
+    assert.deepEqual(setEffort(chain, 0, 9, "low"), chain);
+  });
+
+  it("copies both fields into a duplicate", () => {
+    assert.deepEqual(duplicate(pinned, "d", "D").sessions[0]!.cards[1], pinned.sessions[0]!.cards[1]);
   });
 });
 

@@ -1,4 +1,4 @@
-import { cardPrompt, inputOf, INPUTS, MAX_INPUT_CHARS, REVIEW, skillDefault, type Chain, type ChainSession } from "./chains.ts";
+import { cardPrompt, inputOf, INPUTS, MAX_INPUT_CHARS, REVIEW, skillDefault, type Chain, type ChainSession, type Effort } from "./chains.ts";
 import type { Models, Tier } from "./environment.ts";
 import { parseStatus, tierOf, withoutStatus, type Status } from "./protocol.ts";
 import type { TurnRequest, TurnResult } from "./session.ts";
@@ -10,7 +10,7 @@ export const MAX_TURNS = 20;
 
 export type StepStatus = "done" | "failed" | "halted" | "stopped";
 export type RunEvent =
-  | { type: "step-started"; index: number; label: string; tier: Tier; model: string }
+  | { type: "step-started"; index: number; label: string; tier: Tier; model: string; effort?: Effort }
   | { type: "step-finished"; index: number; status: StepStatus; detail: string; sessionId?: string };
 
 // Where a run stopped: the session and the card within it.
@@ -25,7 +25,7 @@ export type Outcome =
   | { status: "refused"; reason: string };
 
 // A turn the user is present for (`interactive`) gets the interactive note and their answers to its questions.
-export type TurnAsk = Pick<TurnRequest, "prompt" | "model" | "resume"> & { interactive: boolean };
+export type TurnAsk = Pick<TurnRequest, "prompt" | "model" | "effort" | "resume"> & { interactive: boolean };
 
 export type RunDeps = {
   runTurn(request: TurnAsk): Promise<TurnResult>;
@@ -48,6 +48,9 @@ const NUDGE = "End your reply with your COORDINER status line.";
 // A card that pauses, or one the user paused, talks with the user: after each turn it waits, each message is another turn, and
 // Continue applies the latest status line the card gave (a pausing card that gave none is done). Only unattended turns count
 // toward MAX_TURNS. Messages the user queued go in front of the next turn's prompt.
+//
+// A card with its own model runs every turn on it, loop turns and the reminder included: NEXT <tier> then only picks the tier the
+// card after it starts on.
 async function runSessionAt(session: ChainSession, deps: RunDeps, place: SessionPlace = { session: 0 }): Promise<{ outcome: Outcome; card: number }> {
   const { cards } = session;
   if (cards.length === 0) return { outcome: { status: "refused", reason: "This session has no skills." }, card: 0 };
@@ -115,8 +118,10 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     deps.talk.at({ card: cards[card]!.label, index: card, session: place.session, attended, ...(card === cards.length - 1 && place.nextSession ? { nextSession: place.nextSession } : {}) });
     const queued = deps.talk.takeQueued(cards[card]!.label);
     const shown = chat ? `${label} · chat` : label;
-    deps.emit({ type: "step-started", index, label: shown, tier, model: deps.models[tier] });
-    const result = await deps.runTurn({ prompt: queued ? `${queued}\n\n${prompt}` : prompt, model: deps.models[tier], interactive: attended, ...(resume ? { resume } : {}) });
+    const { model = deps.models[tier], effort } = cards[card]!;
+    const effortSet = effort ? { effort } : {};
+    deps.emit({ type: "step-started", index, label: shown, tier, model, ...effortSet });
+    const result = await deps.runTurn({ prompt: queued ? `${queued}\n\n${prompt}` : prompt, model, ...effortSet, interactive: attended, ...(resume ? { resume } : {}) });
     const sessionId = result.sessionId;
     const finish = ([status, detail]: [StepStatus, string]) => deps.emit({ type: "step-finished", index, status, detail, ...(sessionId ? { sessionId } : {}) });
 

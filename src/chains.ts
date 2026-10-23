@@ -2,7 +2,9 @@ import type { Tier } from "./environment.ts";
 
 // No runtime imports: the editor webview loads this module from dist/ as well.
 
-export type Card = { skill: string; args: string; label: string; pause: boolean; next?: string };
+// `model` pins the card to one model instead of its tier's; `effort` sets the session's effort. Absent means the tier's model and
+// the model's default effort.
+export type Card = { skill: string; args: string; label: string; pause: boolean; next?: string; model?: string; effort?: Effort };
 export type ChainSession = { cards: Card[] };
 export type Chain = { id: string; name: string; sessions: ChainSession[]; builtIn?: true };
 
@@ -28,6 +30,11 @@ export const SKILL_DEFAULTS: Readonly<Record<string, SkillDefault>> = {
   [`${MSKILLS}brainstorming-planner`]: { kind: "once", tier: "strong", label: "Brainstorm", pause: true },
   [`${MSKILLS}debugging-architect`]: { kind: "once", tier: "strong", label: "Debug", pause: true },
   [`${MSKILLS}kickoff`]: { kind: "once", tier: "strong", label: "Kickoff", pause: true },
+  [`${MSKILLS}onboard`]: { kind: "once", tier: "medium", label: "Onboard", pause: true },
+  [`${MSKILLS}security-audit`]: { kind: "once", tier: "strong", label: "Security audit" },
+  [`${MSKILLS}ui-audit`]: { kind: "once", tier: "medium", label: "UI audit" },
+  [`${MSKILLS}a11y-audit`]: { kind: "once", tier: "medium", label: "Accessibility audit" },
+  [`${MSKILLS}docs-audit`]: { kind: "once", tier: "medium", label: "Docs audit" },
 };
 
 // What a stored chain may hold; the editor stops at the same limits, so an edit it shows is one the extension can save.
@@ -36,6 +43,12 @@ export const MAX_CARDS = 30;
 export const MAX_ARGS = 20_000;
 export const MAX_LABEL = 60;
 export const MAX_NAME = 100;
+
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = (typeof EFFORTS)[number];
+export const isEffort = (v: unknown): v is Effort => EFFORTS.includes(v as Effort);
+// A model id reaches the SDK only as an option value, never a shell; the pattern still keeps it to one plain token.
+export const MODEL = /^[A-Za-z0-9._:[\]-]{1,100}$/;
 
 const GENERIC: SkillDefault = { kind: "once", tier: "medium", label: "" };
 // A skill name ending in ":" has no last part to show, so its label is the whole name.
@@ -103,7 +116,16 @@ export const TEMPLATES: readonly Chain[] = [
     builtIn: true,
     sessions: [authorSession([card(`${MSKILLS}kickoff`, INPUTS.idea.placeholder), card(PLAN, "Plan the first slice decided above.")]), reviewSession],
   },
+  // One skill on its own, named after the skill. Kickoff picks the next skill itself, so nothing follows it here.
+  ...(["kickoff", "onboard", "security-audit", "ui-audit", "a11y-audit", "docs-audit"] as const).map((id): Chain => {
+    const only = card(`${MSKILLS}${id}`);
+    return { id, name: only.label, builtIn: true, sessions: [{ cards: [only] }] };
+  }),
 ];
+
+export const singleSkill = (chain: Chain): boolean => chain.sessions.length === 1 && chain.sessions[0]!.cards.length === 1;
+// Only rolling-history writes a commit brief; any other last card's final message is the run's result.
+export const briefHeading = (chain: Chain): string => (chain.sessions.at(-1)?.cards.at(-1)?.skill === HISTORY ? "Commit brief" : "Result");
 
 export const cardPrompt = (c: Card): string => (c.args === "" ? `/${c.skill}` : `/${c.skill} ${c.args}`);
 export const requiredSkills = (chain: Chain): string[] => [...new Set(chain.sessions.flatMap((s) => s.cards.map((c) => c.skill)))];
@@ -141,7 +163,17 @@ function parseCard(v: unknown): Card | string {
   if (!text(v.skill, 100) || !SKILL.test(v.skill)) return "a card has an invalid skill name";
   if (!text(v.args, MAX_ARGS) || !text(v.label, MAX_LABEL, 1) || typeof v.pause !== "boolean") return `card ${v.skill} has invalid fields`;
   if (v.next !== undefined && !text(v.next, 500, 1)) return `card ${v.skill} has an invalid next prompt`;
-  return { skill: v.skill, args: v.args, label: v.label, pause: v.pause, ...(v.next !== undefined ? { next: v.next } : {}) };
+  if (v.model !== undefined && !(typeof v.model === "string" && MODEL.test(v.model))) return `card ${v.skill} has an invalid model`;
+  if (v.effort !== undefined && !isEffort(v.effort)) return `card ${v.skill} has an invalid effort`;
+  return {
+    skill: v.skill,
+    args: v.args,
+    label: v.label,
+    pause: v.pause,
+    ...(v.next !== undefined ? { next: v.next } : {}),
+    ...(v.model !== undefined ? { model: v.model } : {}),
+    ...(v.effort !== undefined ? { effort: v.effort } : {}),
+  };
 }
 
 export function parseChain(v: unknown): Chain | string {

@@ -1,4 +1,17 @@
-import { query as sdkQuery, type CanUseTool, type Options, type SDKAssistantMessage, type SDKMessage, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query as sdkQuery,
+  type CanUseTool,
+  type ModelInfo,
+  type Options,
+  type Query,
+  type SDKAssistantMessage,
+  type SDKBackgroundTasksChangedMessage,
+  type SDKMessage,
+  type SDKTaskProgressMessage,
+  type SDKUserMessage,
+  type SlashCommand,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { Effort } from "./chains.ts";
 import { guardHook } from "./guard.ts";
 
 // The m-skills commands the shipped templates use; all present means m-skills is installed.
@@ -9,7 +22,10 @@ export const REQUIRED_COMMANDS = [
   "m-skills:rolling-history",
 ];
 
-export type QueryFn = (params: { prompt: string; options: Options }) => AsyncIterable<SDKMessage>;
+export type QueryFn = (params: { prompt: string; options: Options }) => AsyncIterable<SDKMessage> & Pick<Query, "stopTask">;
+// What the Run view needs to list a turn's background processes: the live set, and each one's latest progress line.
+export type TaskMessage = SDKTaskProgressMessage | SDKBackgroundTasksChangedMessage;
+export type TurnControl = { stopTask(taskId: string): Promise<void> };
 
 export type TurnResult =
   | { ok: true; sessionId: string; model: string; resultText: string; commands: string[] }
@@ -19,6 +35,8 @@ export type TurnRequest = {
   prompt: string;
   cwd: string;
   model: string;
+  // Absent: the model's own default.
+  effort?: Effort;
   // The slash commands this turn needs; the session refuses to work without them.
   requiredCommands: readonly string[];
   canUseTool: CanUseTool;
@@ -33,16 +51,23 @@ export type TurnRequest = {
   onGuard?: (line: string) => void;
   // Told each assistant message of the conversation itself, not of a subagent inside it, as it arrives.
   onMessage?: (message: SDKAssistantMessage) => void;
+  // Told once the session exists, with what can act on it while the turn runs.
+  onStarted?: (control: TurnControl) => void;
+  onTask?: (message: TaskMessage) => void;
   query?: QueryFn;
 };
 
 type InitMessage = Extract<SDKMessage, { type: "system"; subtype: "init" }>;
 
-export type ListQueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => { supportedCommands(): Promise<SlashCommand[]> };
-export type CommandList = { ok: true; commands: string[] } | { ok: false; error: string };
+export type ListQueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => { supportedCommands(): Promise<SlashCommand[]>; supportedModels(): Promise<ModelInfo[]> };
+// The models are a bonus: a session that lists its skills but not its models still lists its skills. Each error is the bare reason;
+// the editor says what could not be listed.
+export type CommandList = { ok: true; commands: string[]; models?: ModelInfo[]; modelsError?: string } | { ok: false; error: string };
 export const LIST_TIMEOUT_MS = 60_000;
 
-// Lists the slash commands a session in `cwd` offers without running a model turn: the prompt stream never sends a message,
+const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+// Lists the slash commands and models a session in `cwd` offers without running a model turn: the prompt stream never sends a message,
 // the commands come from the session's initialize answer, and the session is aborted once they arrive.
 export async function listCommands({ cwd, env, claudePath, timeoutMs = LIST_TIMEOUT_MS, query = sdkQuery as unknown as ListQueryFn }: { cwd: string; env: Record<string, string | undefined>; claudePath?: string; timeoutMs?: number; query?: ListQueryFn }): Promise<CommandList> {
   const abortController = new AbortController();
@@ -56,10 +81,14 @@ export async function listCommands({ cwd, env, claudePath, timeoutMs = LIST_TIME
   let result: CommandList;
   try {
     const session = query({ prompt: silent, options: { cwd, env, abortController, settingSources: ["user", "project"], ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}) } });
-    const commands = await Promise.race([session.supportedCommands(), timeout]);
-    result = { ok: true, commands: commands.map((c) => c.name) };
+    const models = Promise.race([session.supportedModels(), timeout]).then(
+      (list) => ({ models: list }),
+      (error: unknown) => ({ modelsError: reason(error) }),
+    );
+    const [commands, listed] = await Promise.all([Promise.race([session.supportedCommands(), timeout]), models]);
+    result = { ok: true, commands: commands.map((c) => c.name), ...listed };
   } catch (error) {
-    result = { ok: false, error: `the skills could not be listed: ${error instanceof Error ? error.message : String(error)}` };
+    result = { ok: false, error: reason(error) };
   }
   clearTimeout(timer);
   abortController.abort();
@@ -77,7 +106,7 @@ export function pluginProblem(init: InitMessage, required: readonly string[]): s
 }
 
 // One turn = one SDK query. A later turn continues the same conversation through `resume`, optionally on another model.
-export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool, env, claudePath, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
+export async function runTurn({ prompt, cwd, model, effort, requiredCommands, canUseTool, env, claudePath, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, onStarted, onTask, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
   let sessionId: string | undefined;
@@ -96,10 +125,12 @@ export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool
         // coordiner's own guard: no git writes or GitHub publishing, whichever skills the chain uses.
         hooks: { PreToolUse: [{ matcher: "Bash", hooks: [guardHook(onGuard)] }] },
         ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
+        ...(effort ? { effort } : {}),
         ...(resume ? { resume } : {}),
         ...(maxTurns ? { maxTurns } : {}),
       },
     });
+    onStarted?.({ stopTask: (taskId) => messages.stopTask(taskId) });
     let reportedModel = model;
     let commands: string[] = [];
     for await (const message of messages) {
@@ -118,6 +149,7 @@ export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool
         }
       }
       if (message.type === "assistant" && message.parent_tool_use_id === null) onMessage?.(message);
+      if (message.type === "system" && (message.subtype === "task_progress" || message.subtype === "background_tasks_changed")) onTask?.(message);
       if (message.type === "result") {
         sessionId = message.session_id;
         // Returning here also avoids the throw query() raises after an error result.
@@ -127,6 +159,6 @@ export async function runTurn({ prompt, cwd, model, requiredCommands, canUseTool
     }
     return { ok: false, sessionId, error: "the session ended without a result." };
   } catch (error) {
-    return { ok: false, sessionId, error: `the Claude Agent SDK raised: ${error instanceof Error ? error.message : String(error)}` };
+    return { ok: false, sessionId, error: `the Claude Agent SDK raised: ${reason(error)}` };
   }
 }

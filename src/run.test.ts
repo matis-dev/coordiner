@@ -446,6 +446,25 @@ describe("runChain: other chains", () => {
     assert.deepEqual(h.events.filter((e) => e.type === "step-started").map((e) => e.index), [0, 1, 2]);
   });
 
+  it("runs a pinned card on its own model and effort for every turn, loop turns and the reminder included", async () => {
+    const h = harness([reply("COORDINER: NEXT Heavy", 1), reply("COORDINER: NEXT Light", 2), reply("no marker", 3), reply("COORDINER: DONE", 4), reply("COORDINER: DONE", 5)]);
+    const pinned = { ...defaultCard("m-skills:implementing-architect"), model: "m-pinned", effort: "low" as const };
+    const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a"), pinned, defaultCard("b")] }] };
+    assert.equal((await runChain(own, deps(h).deps)).status, "done");
+    assert.deepEqual(h.requests.map((r) => [r.model, r.effort]), [["m-medium", undefined], ["m-pinned", "low"], ["m-pinned", "low"], ["m-pinned", "low"], ["m-medium", undefined]]);
+    assert.equal(h.requests[3]!.prompt, "End your reply with your COORDINER status line.");
+    assert.equal(Object.hasOwn(h.requests[0]!, "effort"), false);
+    const started = h.events.filter((e) => e.type === "step-started");
+    assert.deepEqual(started.map((e) => [e.tier, e.model, e.effort]), [["medium", "m-medium", undefined], ["strong", "m-pinned", "low"], ["weak", "m-pinned", "low"], ["weak", "m-pinned", "low"], ["medium", "m-medium", undefined]]);
+  });
+
+  it("sets only the effort when the card keeps its tier's model", async () => {
+    const h = harness([reply("COORDINER: DONE", 1)]);
+    const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [{ ...defaultCard("acme:lint"), effort: "max" }] }] };
+    await runChain(own, deps(h).deps);
+    assert.deepEqual(h.requests, [{ prompt: "/acme:lint", model: "m-medium", effort: "max", interactive: false }]);
+  });
+
   it("refuses an empty session and a chain without sessions", async () => {
     const h = harness([]);
     assert.deepEqual(await runChain({ id: "e", name: "E", sessions: [{ cards: [] }] }, deps(h).deps), { status: "refused", reason: "This session has no skills." });

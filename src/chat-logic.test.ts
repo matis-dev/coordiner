@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import { announcement, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, destination, entriesAnnouncement, firstUnanswered, heightForKey, heightFromPointer, savedHeight, statusLine } from "./chat-logic.ts";
+import { announcement, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, destination, entriesAnnouncement, firstUnanswered, heightForKey, heightFromPointer, savedHeight, statusLine, cacheLabel } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -118,6 +118,30 @@ describe("entriesAnnouncement", () => {
   it("names the card of the latest reply, and stays quiet for tool calls and the user's own words", () => {
     assert.equal(entriesAnnouncement([{ kind: "assistant", card: "Plan", text: "a" }, { kind: "assistant", card: "Implement", text: "b" }, { kind: "tool", card: "Implement", name: "Read", input: "{}" }]), "Implement replied");
     assert.equal(entriesAnnouncement([{ kind: "tool", card: "Implement", name: "Read", input: "{}" }, { kind: "you", card: "Implement", text: "hi" }]), undefined);
+  });
+});
+
+describe("cacheLabel", () => {
+  const cache = (ttlMs: number, assumed = false) => ({ since: 1000, ttlMs, assumed });
+
+  it("shows minutes and seconds left, rounding a part second up", () => {
+    assert.deepEqual(cacheLabel(cache(300_000), 1000), { text: "Prompt cache warm for 5:00", expired: false });
+    assert.deepEqual(cacheLabel(cache(300_000), 1000 + 299_500), { text: "Prompt cache warm for 0:01", expired: false });
+  });
+
+  it("shows hours from one hour left", () => {
+    assert.equal(cacheLabel(cache(3_600_000), 1000).text, "Prompt cache warm for 1:00:00");
+    assert.equal(cacheLabel(cache(3_600_000), 2000).text, "Prompt cache warm for 59:59");
+  });
+
+  it("is expired at the end of the lifetime and after it, also after the computer slept", () => {
+    assert.equal(cacheLabel(cache(300_000), 301_000).expired, true);
+    assert.equal(cacheLabel(cache(300_000), 10_000_000).text, "Prompt cache expired: your next message re-reads the whole conversation without the cache discount.");
+  });
+
+  it("says when five minutes is assumed", () => {
+    assert.equal(cacheLabel(cache(300_000, true), 1000).text, "Prompt cache warm for 5:00 (assumed 5-minute cache)");
+    assert.match(cacheLabel(cache(300_000, true), 400_000).text, /\(assumed 5-minute cache\)$/);
   });
 });
 

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cardPrompt, defaultCard, parseChain, parseChains, inputKinds, inputOf, requiredSkills, runnable, serializeChains, skillDefault, TEMPLATES, usesMskills, type Chain } from "./chains.ts";
+import { briefHeading, cardPrompt, defaultCard, parseChain, parseChains, inputKinds, inputOf, requiredSkills, runnable, serializeChains, singleSkill, skillDefault, TEMPLATES, usesMskills, type Chain } from "./chains.ts";
 
 const story = TEMPLATES.find((t) => t.id === "story")!;
 const mine = (sessions: Chain["sessions"], id = "mine"): Chain => ({ id, name: "Mine", sessions });
@@ -18,14 +18,55 @@ describe("templates", () => {
     assert.deepEqual(story.sessions[1]!.cards.map((c) => c.next), [undefined, "Continue with the next fix.", undefined]);
   });
 
-  it("ships four built-in templates, named after what you bring, that all use m-skills", () => {
-    assert.deepEqual(TEMPLATES.map((t) => [t.id, t.name]), [["story", "Story"], ["idea", "Idea"], ["bug", "Bug"], ["new-project", "New project"]]);
+  it("ships four flows named after what you bring, then six single skills, all using m-skills", () => {
+    assert.deepEqual(TEMPLATES.map((t) => [t.id, t.name]), [
+      ["story", "Story"],
+      ["idea", "Idea"],
+      ["bug", "Bug"],
+      ["new-project", "New project"],
+      ["kickoff", "Kickoff"],
+      ["onboard", "Onboard"],
+      ["security-audit", "Security audit"],
+      ["ui-audit", "UI audit"],
+      ["a11y-audit", "Accessibility audit"],
+      ["docs-audit", "Docs audit"],
+    ]);
     assert.ok(TEMPLATES.every((t) => t.builtIn && usesMskills(t)));
   });
 
-  it("starts each interactive template from the input its first skill expects", () => {
+  it("runs each single skill alone, with no arguments, so Run asks only for a name", () => {
+    const singles = TEMPLATES.filter(singleSkill);
+    assert.deepEqual(singles.map((t) => cardPrompt(t.sessions[0]!.cards[0]!)), [
+      "/m-skills:kickoff",
+      "/m-skills:onboard",
+      "/m-skills:security-audit",
+      "/m-skills:ui-audit",
+      "/m-skills:a11y-audit",
+      "/m-skills:docs-audit",
+    ]);
+    assert.ok(singles.every((t) => inputOf(t) === undefined && runnable(t, requiredSkills(t)).ok));
+  });
+
+  it("tells a single skill from a flow", () => {
+    assert.deepEqual(TEMPLATES.map(singleSkill), [false, false, false, false, true, true, true, true, true, true]);
+    assert.equal(singleSkill(mine([{ cards: [defaultCard("a"), defaultCard("b")] }])), false);
+    assert.equal(singleSkill(mine([{ cards: [defaultCard("a")] }, { cards: [defaultCard("b")] }])), false);
+  });
+
+  it("calls the final message a commit brief only after rolling-history", () => {
+    assert.equal(briefHeading(story), "Commit brief");
+    assert.equal(briefHeading(TEMPLATES.find((t) => t.id === "security-audit")!), "Result");
+    assert.equal(briefHeading(mine([TEMPLATES.find((t) => t.id === "bug")!.sessions[0]!])), "Result");
+    assert.equal(briefHeading(mine([])), "Result");
+  });
+
+  it("reserves the single-skill template ids", () => {
+    assert.equal(parseChain({ id: "security-audit", name: "Mine", sessions: [] }), "chain id security-audit belongs to a built-in template");
+  });
+
+  it("starts each interactive flow from the input its first skill expects", () => {
     assert.deepEqual(
-      TEMPLATES.slice(1).map((t) => t.sessions[0]!.cards.map(cardPrompt)),
+      TEMPLATES.slice(1, 4).map((t) => t.sessions[0]!.cards.map(cardPrompt)),
       [
         ["/m-skills:brainstorming-planner {{idea}}", "/m-skills:planning-architect Plan the Deep-Dive Execution Prompt above.", "/m-skills:implementing-architect Implement the approved plan above."],
         // debugging-architect writes the fix itself, so its session ends there.
@@ -35,8 +76,8 @@ describe("templates", () => {
     );
   });
 
-  it("marks the interactive first card of the other templates as pausing", () => {
-    assert.deepEqual(TEMPLATES.map((t) => t.sessions[0]!.cards[0]!.pause), [false, true, true, true]);
+  it("marks the conversations as pausing and lets the audits run unattended", () => {
+    assert.deepEqual(TEMPLATES.map((t) => t.sessions[0]!.cards[0]!.pause), [false, true, true, true, true, true, false, false, false, false]);
   });
 });
 
@@ -79,7 +120,8 @@ describe("requiredSkills and usesMskills", () => {
 });
 
 describe("inputOf", () => {
-  it("asks Story for a story, Idea and New project for an idea, and Bug for a bug", () => assert.deepEqual(TEMPLATES.map(inputOf), ["story", "idea", "bug", "idea"]));
+  it("asks Story for a story, Idea and New project for an idea, Bug for a bug, and a single skill for nothing", () =>
+    assert.deepEqual(TEMPLATES.map(inputOf), ["story", "idea", "bug", "idea", undefined, undefined, undefined, undefined, undefined, undefined]));
   it("is undefined for a chain without a placeholder, which needs only a name", () => assert.equal(inputOf(mine([{ cards: [defaultCard("acme:x")] }])), undefined));
   it("finds a placeholder in any session", () => assert.equal(inputOf(mine([{ cards: [defaultCard("a")] }, { cards: [{ ...defaultCard("b"), args: "fix {{bug}} now" }] }])), "bug"));
   it("lists every kind a chain uses", () => {
@@ -164,6 +206,33 @@ describe("parseChain", () => {
     assert.equal(parseChain(withCard({ ...ok, label: "" })), "chain a: card x has invalid fields");
     assert.equal(parseChain(withCard({ ...ok, args: 3 })), "chain a: card x has invalid fields");
     assert.equal(parseChain(withCard({ ...ok, next: "" })), "chain a: card x has an invalid next prompt");
+  });
+
+  it("keeps a pinned model and effort, and a card without them parses as before", () => {
+    const pinned = parseChain(withCard({ ...ok, model: "claude-opus-5-5[1m]", effort: "xhigh" }));
+    assert.deepEqual(typeof pinned !== "string" && pinned.sessions[0]!.cards[0], { ...ok, model: "claude-opus-5-5[1m]", effort: "xhigh" });
+    const plain = parseChain(withCard(ok));
+    assert.deepEqual(typeof plain !== "string" && plain.sessions[0]!.cards[0], ok);
+  });
+
+  it("round-trips a pinned card through serializeChains", () => {
+    const chain = { id: "a", name: "A", sessions: [{ cards: [{ ...ok, model: "claude-haiku-5-5", effort: "low" as const }] }] };
+    assert.deepEqual(parseChains(serializeChains([chain])), { chains: [chain] });
+  });
+
+  it("takes a model of 100 characters and refuses one of 101", () => {
+    assert.notEqual(typeof parseChain(withCard({ ...ok, model: "m".repeat(100) })), "string");
+    assert.equal(parseChain(withCard({ ...ok, model: "m".repeat(101) })), "chain a: card x has an invalid model");
+  });
+
+  it("rejects a model that would carry a newline, a space or a shell separator to the session", () => {
+    for (const model of ["opus\n--dangerously-skip-permissions", "opus --x", "opus;rm", "", 7]) {
+      assert.equal(parseChain(withCard({ ...ok, model })), "chain a: card x has an invalid model");
+    }
+  });
+
+  it("rejects an effort the SDK does not know", () => {
+    for (const effort of ["turbo", "", 3, "LOW"]) assert.equal(parseChain(withCard({ ...ok, effort })), "chain a: card x has an invalid effort");
   });
 
   it("keeps a valid next prompt", () => {

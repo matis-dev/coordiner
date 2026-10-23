@@ -1,4 +1,4 @@
-import { afterEach, describe, it } from "node:test";
+import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import { MAX_INPUT_CHARS, TEMPLATES } from "./chains.ts";
@@ -370,6 +370,69 @@ describe("run chat: answering a question", () => {
     assert.equal(page.doc.querySelector('fieldset input[type="text"]')!.getAttribute("aria-label"), "Other answer to: Which themes?");
     page.doc.querySelector<HTMLButtonElement>("form.question button[type=submit]")!.click();
     assert.deepEqual(page.posted.at(-1), { type: "chatAnswer", id: "q2", picks: [{ picked: ["Light", "Dark"] }] });
+  });
+});
+
+describe("run chat: the prompt cache", () => {
+  const cacheLine = (page: Awaited<ReturnType<typeof open>>) => page.doc.querySelector<HTMLElement>(".chat-cache")!;
+  const waiting = (card: string, ttlMs: number, assumed = false) => view({ phase: "waiting", card, attended: true, cache: { since: 0, ttlMs, assumed } });
+  afterEach(() => mock.timers.reset());
+
+  it("counts down each second while a card waits, then says once that it expired", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.update(waiting("Brainstorm", 3000));
+    assert.equal(cacheLine(page).hidden, false);
+    assert.equal(cacheLine(page).textContent, "Prompt cache warm for 0:03");
+    mock.timers.tick(1000);
+    assert.equal(cacheLine(page).textContent, "Prompt cache warm for 0:02");
+    mock.timers.tick(2000);
+    assert.match(cacheLine(page).textContent!, /^Prompt cache expired/);
+    assert.equal(page.status(), "Prompt cache expired for Brainstorm");
+    page.doc.getElementById("status")!.textContent = "";
+    mock.timers.tick(10_000);
+    assert.equal(page.status(), "", "the expiry is announced once");
+  });
+
+  it("says when the lifetime is assumed", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.update(waiting("Brainstorm", 300_000, true));
+    assert.equal(cacheLine(page).textContent, "Prompt cache warm for 5:00 (assumed 5-minute cache)");
+  });
+
+  it("shows nothing while a card runs, and stops counting when the card runs again", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.update(view({ cache: { since: 0, ttlMs: 3000, assumed: false } }));
+    assert.equal(cacheLine(page).hidden, true);
+    page.update(waiting("Brainstorm", 3000));
+    page.update(view({ phase: "running", card: "Brainstorm" }));
+    assert.equal(cacheLine(page).hidden, true);
+    page.doc.getElementById("status")!.textContent = "";
+    mock.timers.tick(5000);
+    assert.equal(page.status(), "");
+  });
+
+  it("keeps one timer when another update arrives while the card waits", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.update(waiting("Brainstorm", 3000));
+    page.update(waiting("Debug", 10_000));
+    page.doc.getElementById("status")!.textContent = "";
+    mock.timers.tick(3000);
+    assert.equal(page.status(), "", "the first update's timer is gone");
+    assert.equal(cacheLine(page).textContent, "Prompt cache warm for 0:07");
+  });
+
+  it("does not announce a cache that had already expired when the card started waiting", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 10_000 });
+    page.update(waiting("Brainstorm", 3000));
+    assert.match(cacheLine(page).textContent!, /^Prompt cache expired/);
+    page.doc.getElementById("status")!.textContent = "";
+    mock.timers.tick(5000);
+    assert.equal(page.status(), "");
   });
 });
 

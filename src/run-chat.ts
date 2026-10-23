@@ -1,4 +1,5 @@
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { CacheClock } from "./chat-logic.ts";
 import type { ChatMessage, ChatView, EditorMessage } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
 import { INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
@@ -21,7 +22,21 @@ export type RunChatDeps = {
   // A card started waiting for the user, or asked them something.
   needsYou(card: string): void;
   log(line: string): void;
+  now?: () => number;
 };
+
+const FIVE_MINUTES = 5 * 60_000;
+const ONE_HOUR = 60 * 60_000;
+type Usage = { cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } | null } | undefined;
+
+// Every response refreshes the cache. Its lifetime shows in what the response wrote to the cache; a response that wrote nothing
+// keeps the lifetime seen before, and before any is seen five minutes is assumed.
+export function cacheFrom(usage: Usage, now: number, previous?: CacheClock): CacheClock {
+  const written = usage?.cache_creation;
+  if ((written?.ephemeral_1h_input_tokens ?? 0) > 0) return { since: now, ttlMs: ONE_HOUR, assumed: false };
+  if ((written?.ephemeral_5m_input_tokens ?? 0) > 0) return { since: now, ttlMs: FIVE_MINUTES, assumed: false };
+  return { since: now, ttlMs: previous?.ttlMs ?? FIVE_MINUTES, assumed: previous?.assumed ?? true };
+}
 
 // What one turn of the session gets: the note, how its tools are decided, and where its messages go.
 export type TurnSetup = { canUseTool: CanUseTool; systemPromptAppend: string; onMessage(message: SDKAssistantMessage): void };
@@ -33,7 +48,7 @@ export type RunChat = {
   forTurn(interactive: boolean): TurnSetup;
 };
 
-export function createRunChat({ title, post, record, moved, needsYou, log }: RunChatDeps): RunChat {
+export function createRunChat({ title, post, record, moved, needsYou, log, now = Date.now }: RunChatDeps): RunChat {
   const transcript = new Transcript();
   const add = (entries: Entry[]) => {
     if (entries.length === 0) return;
@@ -41,12 +56,14 @@ export function createRunChat({ title, post, record, moved, needsYou, log }: Run
     post({ type: "chatAppend", entries });
   };
   let shown: TalkSnapshot | undefined;
+  let cache: CacheClock | undefined;
+  const viewOf = (snapshot: TalkSnapshot): ChatView => ({ ...snapshot, title, ...(snapshot.phase === "waiting" && cache ? { cache } : {}) });
   const talk = new Talk({
     changed: (snapshot) => {
       const before = shown;
       shown = snapshot;
       if (snapshot.session !== undefined && snapshot.session !== (before?.session ?? 0)) add([{ kind: "divider", session: snapshot.session }]);
-      post({ type: "chatUpdate", chat: { ...snapshot, title } });
+      post({ type: "chatUpdate", chat: viewOf(snapshot) });
       if (snapshot.index !== before?.index || snapshot.session !== before?.session) moved();
       const asked = snapshot.question !== undefined && snapshot.question.id !== before?.question?.id;
       if (snapshot.card && (asked || (snapshot.phase === "waiting" && before?.phase !== "waiting"))) needsYou(snapshot.card);
@@ -60,7 +77,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log }: Run
       record({ type: "answer", card, question, answer });
     },
   });
-  const view = (): ChatView => ({ ...talk.snapshot(), title });
+  const view = (): ChatView => viewOf(talk.snapshot());
   post({ type: "chat", chat: view(), entries: [] });
   return {
     talk,
@@ -69,7 +86,10 @@ export function createRunChat({ title, post, record, moved, needsYou, log }: Run
     forTurn: (interactive) => ({
       canUseTool: interactive ? interactiveCanUseTool((questions, signal) => talk.ask(questions, signal), log) : unattendedCanUseTool(log),
       systemPromptAppend: interactive ? INTERACTIVE_NOTE : UNATTENDED_NOTE,
-      onMessage: (message) => add(entriesFrom(message, talk.snapshot().card ?? "")),
+      onMessage: (message) => {
+        cache = cacheFrom(message.message.usage, now(), cache);
+        add(entriesFrom(message, talk.snapshot().card ?? ""));
+      },
     }),
   };
 }

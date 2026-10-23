@@ -1,6 +1,6 @@
-import { MAX_INPUT_CHARS, parseChain, type Chain } from "./chains.ts";
-import type { Pick } from "./chat-logic.ts";
-import type { PaletteEntry } from "./skills.ts";
+import { MAX_INPUT_CHARS, parseChain, type Chain, type Effort } from "./chains.ts";
+import type { CacheClock, Pick } from "./chat-logic.ts";
+import type { ModelOption, PaletteEntry } from "./skills.ts";
 import type { TalkSnapshot } from "./talk.ts";
 import type { Entry } from "./transcript.ts";
 
@@ -29,6 +29,11 @@ export type EditorState = {
   palette?: PaletteEntry[];
   paletteError?: string;
   mskills?: boolean;
+  // Listed with the skills; undefined while discovery runs or when the session would not list them.
+  models?: ModelOption[];
+  modelsError?: string;
+  // What a card on its tier may ask for: the efforts every tier model takes.
+  tierEfforts?: Effort[];
   running: boolean;
   // The chain running, and where in it (the card's index in its session): the lanes mark that card.
   runningAt?: { chainId: string; session: number; index: number };
@@ -38,7 +43,8 @@ export type EditorState = {
 };
 
 // The run's chat, kept apart from the chains state so a new message never re-renders the chain being edited.
-export type ChatView = TalkSnapshot & { title?: string };
+// `cache` only while a card waits for the user: that is when the time it stays warm is the user's to spend.
+export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock };
 export type ChatMessage =
   // Everything: on "ready", and when a run starts.
   | { type: "chat"; chat: ChatView; entries: Entry[] }

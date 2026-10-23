@@ -1,7 +1,31 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { defaultCard, MAX_CARDS, MAX_SESSIONS, TEMPLATES, type Chain } from "./chains.ts";
-import { addCardReason, addKey, addSessionReason, afterMove, afterRemove, argParts, copyName, isMissing, moveDelta, moveKey, newChainId, PLACEHOLDER_NOTE, removeKey, runningCard, runReason, startsFrom } from "./editor-logic.ts";
+import { defaultCard, MAX_CARDS, MAX_SESSIONS, TEMPLATES, type Card, type Chain, type Effort } from "./chains.ts";
+import {
+  addCardReason,
+  addKey,
+  addSessionReason,
+  afterMove,
+  afterRemove,
+  argParts,
+  copyName,
+  effortAfterModel,
+  effortChoices,
+  effortKey,
+  effortReason,
+  isMissing,
+  modelKey,
+  modelOffered,
+  moveDelta,
+  moveKey,
+  newChainId,
+  pinNote,
+  PLACEHOLDER_NOTE,
+  removeKey,
+  runningCard,
+  runReason,
+  startsFrom,
+} from "./editor-logic.ts";
 import { REQUIRED_COMMANDS } from "./session.ts";
 
 const story = TEMPLATES[0]!;
@@ -15,6 +39,71 @@ describe("runReason", () => {
   it("blocks an m-skills chain when m-skills is missing", () => assert.equal(runReason(story, { running: false, mskills: false }), "Needs m-skills, which is not installed."));
   it("lets your own skills run without m-skills", () => assert.equal(runReason(own, { running: false, mskills: false, palette: palette(["acme:lint"]) }), undefined));
   it("passes on the chain's own reason", () => assert.match(runReason(own, { running: false, palette: [] })!, /Missing skills: acme:lint/));
+});
+
+describe("model and effort", () => {
+  const lint = defaultCard("acme:lint");
+  const view = {
+    running: false,
+    models: [
+      { id: "m-opus", label: "Opus", efforts: ["low", "high"] as Effort[] },
+      { id: "m-haiku", label: "Haiku", efforts: [] as Effort[] },
+    ],
+    tierEfforts: ["low"] as Effort[],
+  };
+  const chainOf = (card: Card): Chain => ({ id: "own", name: "Own", sessions: [{ cards: [card] }] });
+
+  it("offers a pinned model's efforts, the tier efforts on a tier, and nothing before the models are listed", () => {
+    assert.deepEqual(effortChoices({ ...lint, model: "m-opus" }, view), ["low", "high"]);
+    assert.deepEqual(effortChoices(lint, view), ["low"]);
+    assert.deepEqual(effortChoices(lint, { running: false, models: view.models }), []);
+    assert.deepEqual(effortChoices({ ...lint, model: "m-gone" }, view), []);
+    assert.deepEqual(effortChoices(lint, { running: false }), []);
+  });
+
+  it("keeps the effort across a model change only when the new model takes it", () => {
+    assert.equal(effortAfterModel({ ...lint, effort: "low" }, "m-opus", view), "low");
+    assert.equal(effortAfterModel({ ...lint, effort: "high" }, undefined, view), undefined);
+    assert.equal(effortAfterModel(lint, "m-opus", view), undefined);
+  });
+
+  it("knows a model is offered when it is listed, unset, or the list is not known yet", () => {
+    assert.equal(modelOffered({ ...lint, model: "m-opus" }, view), true);
+    assert.equal(modelOffered(lint, view), true);
+    assert.equal(modelOffered({ ...lint, model: "m-gone" }, { running: false }), true);
+    assert.equal(modelOffered({ ...lint, model: "m-gone" }, view), false);
+  });
+
+  it("says why Effort holds only the default", () => {
+    assert.equal(effortReason(lint, view), undefined);
+    assert.equal(effortReason(lint, { running: false }), "Effort can be set once the session's models are listed.");
+    assert.equal(effortReason({ ...lint, model: "m-haiku" }, view), "This model has no effort setting.");
+    assert.equal(effortReason(lint, { ...view, tierEfforts: [] }), "The tier models do not share an effort setting; pin a model to set one.");
+  });
+
+  it("notes a pinned loop card only", () => {
+    const implement = defaultCard("m-skills:implementing-architect");
+    assert.equal(pinNote({ ...implement, model: "m-opus" }), "Pinned: NEXT <tier> does not change this card's model.");
+    assert.equal(pinNote(implement), undefined);
+    assert.equal(pinNote({ ...lint, model: "m-opus" }), undefined);
+  });
+
+  it("refuses to run a card on a model the session does not offer, or an effort its model does not take", () => {
+    const palette = [{ skill: "acme:lint" }];
+    assert.equal(runReason(chainOf({ ...lint, model: "m-gone" }), { ...view, palette }), "lint: model m-gone is not offered by this session.");
+    assert.equal(runReason(chainOf({ ...lint, model: "m-haiku", effort: "low" }), { ...view, palette }), "lint: effort low is not available for m-haiku.");
+    assert.equal(runReason(chainOf({ ...lint, effort: "high" }), { ...view, palette }), "lint: effort high is not available for its tier's models.");
+    assert.equal(runReason(chainOf({ ...lint, model: "m-opus", effort: "high" }), { ...view, palette }), undefined);
+  });
+
+  it("refuses nothing about models before they are listed; the session's own check still guards the turn", () => {
+    assert.equal(runReason(chainOf({ ...lint, model: "m-gone", effort: "max" }), { running: false }), undefined);
+  });
+
+  it("names the selects' focus keys by session and card", () => {
+    assert.equal(modelKey(1, 2), "model-1-2");
+    assert.equal(effortKey(1, 2), "effort-1-2");
+  });
 });
 
 describe("runningCard", () => {
@@ -98,6 +187,7 @@ describe("startsFrom", () => {
     assert.match(startsFrom(story), /^Starts from a written story\. Run lets you pick one from a Markdown backlog file/);
     assert.match(startsFrom(TEMPLATES[1]!), /^Starts from a rough idea/);
     assert.match(startsFrom(TEMPLATES[2]!), /^Starts from a bug/);
+    assert.match(startsFrom(TEMPLATES.find((t) => t.id === "kickoff")!), /^Starts from a name only/);
   });
   it("says a chain without a placeholder needs only a name", () => assert.equal(startsFrom(own), "Starts from a name only. Run asks for one; it names the worktree and the branch."));
 });
