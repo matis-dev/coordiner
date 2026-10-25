@@ -4,26 +4,101 @@ import { plain } from "./text.ts";
 export type Exec = (file: string, args: string[], options: { cwd: string; env?: Record<string, string | undefined> }) => Promise<{ stdout: string; stderr: string }>;
 
 export type RepoInfo = { root: string; dirty: string[] };
+// A folder that is not a repository yet, or has no commits, is reported rather than thrown, so the caller can offer to set it up.
+// Any other failure (git missing, a repository git will not open under safe.directory) is not offered git init.
+export type RepoCheck = ({ kind: "ready" } & RepoInfo) | { kind: "no-repo" } | { kind: "no-commits"; root: string } | { kind: "failed"; detail: string };
 export type WorktreeResult = { ok: true; path: string; branch: string } | { ok: false; reason: string; detail?: string };
 
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
-export async function inspectRepo(dir: string, exec: Exec): Promise<RepoInfo> {
+const detailOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+export async function inspectRepo(dir: string, exec: Exec): Promise<RepoCheck> {
   let root;
   try {
-    root = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: dir })).stdout.trim();
-  } catch {
-    throw new Error(`${dir} is not a git repository, or git is unavailable. Run git init there and make a first commit, then start again.`);
+    // LC_ALL=C keeps git's message in English, so "not a git repository" can be told apart from every other failure.
+    root = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: dir, env: { ...process.env, LC_ALL: "C" } })).stdout.trim();
+  } catch (error) {
+    const detail = detailOf(error);
+    return detail.includes("not a git repository") ? { kind: "no-repo" } : { kind: "failed", detail };
   }
   // Every run's worktree starts from HEAD, which a fresh `git init` does not have yet.
   const hasCommit = await exec("git", ["rev-parse", "--verify", "--quiet", "HEAD"], { cwd: dir }).then(() => true, () => false);
-  if (!hasCommit) throw new Error(`${root} has no commits yet. Make a first commit, then start again; each run's worktree starts from it.`);
+  if (!hasCommit) return { kind: "no-commits", root };
   try {
     const status = (await exec("git", ["status", "--porcelain"], { cwd: dir })).stdout;
-    return { root, dirty: status.split("\n").filter((line) => line.trim() !== "") };
+    return { kind: "ready", root, dirty: status.split("\n").filter((line) => line.trim() !== "") };
   } catch {
     throw new Error(`${dir} is not a git repository, or git is unavailable.`);
   }
+}
+
+export type GitStep = { ok: true } | { ok: false; detail: string };
+
+const step = (run: Promise<unknown>): Promise<GitStep> => run.then(() => ({ ok: true }) as const, (error) => ({ ok: false, detail: detailOf(error) }));
+
+// Run only after the user agreed to it.
+export const initRepo = (dir: string, exec: Exec): Promise<GitStep> => step(exec("git", ["init"], { cwd: dir }));
+
+export type FileList = { kind: "files"; files: string[] } | { kind: "too-many" } | { kind: "failed"; detail: string };
+
+// Every file a first commit would take, by name: what is staged, and each untracked file .gitignore lets through.
+// A listing too big for exec's output buffer is far past MAX_NEW_FILES, so it is reported as too many rather than as git's error.
+export async function uncommitted(root: string, exec: Exec): Promise<FileList> {
+  let stdout;
+  try {
+    ({ stdout } = await exec("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: root }));
+  } catch (error) {
+    return (error as { code?: unknown }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? { kind: "too-many" } : { kind: "failed", detail: detailOf(error) };
+  }
+  const files = stdout.split("\0").filter((file) => file !== "");
+  return files.length > MAX_NEW_FILES ? { kind: "too-many" } : { kind: "files", files };
+}
+
+// Run only after the user agreed to it. With no files it is an empty commit, which is all a run's worktree needs to start from.
+export const firstCommit = (root: string, withFiles: boolean, exec: Exec): Promise<GitStep> =>
+  step(
+    (async () => {
+      if (withFiles) await exec("git", ["add", "--all"], { cwd: root });
+      await exec("git", ["commit", "--allow-empty", "-m", "Initial commit"], { cwd: root });
+    })(),
+  );
+
+export type SetupPrompt = { kind: "init"; folder: string } | { kind: "empty-commit"; root: string } | { kind: "commit-files"; root: string; files: string[] };
+export type RepoSetup = { kind: "ready"; repo: RepoInfo } | { kind: "cancelled" } | { kind: "failed"; reason: string; detail?: string };
+
+// Every run's worktree starts from a commit. A folder without one is offered git init and a first commit, each made only once `ask` agrees, and the run carries on.
+export async function setUpRepo(folder: string, deps: { exec: Exec; ask(prompt: SetupPrompt): Promise<boolean>; log(line: string): void }): Promise<RepoSetup> {
+  let check = await inspectRepo(folder, deps.exec);
+  let agreed = false;
+  if (check.kind === "no-repo") {
+    if (!(await deps.ask({ kind: "init", folder }))) return { kind: "cancelled" };
+    const init = await initRepo(folder, deps.exec);
+    if (!init.ok) return { kind: "failed", reason: "git init failed. Is git installed?", detail: init.detail };
+    deps.log(`Initialized a git repository in ${folder}`);
+    agreed = true;
+    check = await inspectRepo(folder, deps.exec);
+  }
+  if (check.kind === "no-commits") {
+    const listed = await uncommitted(check.root, deps.exec);
+    if (listed.kind === "too-many") {
+      return { kind: "failed", reason: `More than ${MAX_NEW_FILES} files are not committed yet, which usually means a dependency folder is missing from .gitignore. Add it, or make the first commit yourself, then start again.` };
+    }
+    if (listed.kind === "failed") return { kind: "failed", reason: "Git could not list the files for the first commit.", detail: listed.detail };
+    const { files } = listed;
+    // Agreeing to git init covers an empty first commit; files are always shown before they are committed.
+    if (files.length > 0 || !agreed) {
+      const prompt: SetupPrompt = files.length > 0 ? { kind: "commit-files", root: check.root, files } : { kind: "empty-commit", root: check.root };
+      if (!(await deps.ask(prompt))) return { kind: "cancelled" };
+    }
+    const commit = await firstCommit(check.root, files.length > 0, deps.exec);
+    if (!commit.ok) return { kind: "failed", reason: "The first commit failed. If git asks who you are, set user.name and user.email, then start again.", detail: commit.detail };
+    deps.log(`Made the first commit in ${check.root}`);
+    check = await inspectRepo(folder, deps.exec);
+  }
+  if (check.kind === "failed") return { kind: "failed", reason: `Git could not open ${plain(folder)} as a repository. Is git installed?`, detail: check.detail };
+  if (check.kind !== "ready") return { kind: "failed", reason: `${plain(folder)} still has no commit to start from.` };
+  return { kind: "ready", repo: check };
 }
 
 // Undefined when git could not say, so the caller never offers to remove a worktree it is unsure about.

@@ -126,7 +126,7 @@ Single skills run one m-skills command on its own, in one session, and Run asks 
 | **Accessibility audit** | reads the interface against WCAG 2.2 AA and says what was not tested; writes nothing | a11y-audit |
 | **Docs audit** | reads the docs against the code, a friction log with `path:line`; writes nothing | docs-audit |
 
-Like every run, a single skill runs in its own worktree, made from your last commit: an audit reads what is committed, not your uncommitted changes. A run in a repository with no commits yet is refused; make a first commit, then start again. Kickoff on an existing project may carry on into brainstorming, planning and implementing in the same card when you pick that from its question; no review session follows it there, so run the **Story** or **Idea** template when you want one.
+Like every run, a single skill runs in its own worktree, made from your last commit: an audit reads what is committed, not your uncommitted changes. In a folder that is not a git repository yet, or has no commits, Coordiner offers to run `git init` and make a first commit, then carries on with the run. If the folder has files, the dialog lists them and commits them all (.gitignore respected); to choose which go in, cancel and commit them yourself. Kickoff on an existing project may carry on into brainstorming, planning and implementing in the same card when you pick that from its question; no review session follows it there, so run the **Story** or **Idea** template when you want one.
 
 For a typed answer, Run then suggests a run name made from it, which you can change. The name becomes the worktree folder and the `coordiner/<name>` branch.
 

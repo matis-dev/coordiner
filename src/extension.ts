@@ -23,7 +23,7 @@ import { commonEfforts, modelOptions, mskillsPresent, palette, type ModelOption,
 import { plain } from "./text.ts";
 import { applyTask, liveProcess, stopLine, type Process } from "./processes.ts";
 import { finishedMessage, nothingToReviewMessage, pickedChain, processItem, startItems, stepItem, type StepView } from "./view.ts";
-import { addWorktree, inspectRepo, prepareReview, removalNote, type Exec, type Worktree } from "./worktree.ts";
+import { addWorktree, prepareReview, removalNote, setUpRepo, type Exec, type RepoInfo, type SetupPrompt, type Worktree } from "./worktree.ts";
 
 const run = promisify(execFile);
 const exec: Exec = (file, args, options) => run(file, args, options);
@@ -258,6 +258,36 @@ async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
   if (!(await ctx.slot.run(() => startRun(chain, ctx)))) await vscode.window.showWarningMessage("Coordiner: a run is already in progress. Stop it first.");
 }
 
+// setUpRepo's questions, each a modal that agrees only through its button.
+async function askSetup(prompt: SetupPrompt): Promise<boolean> {
+  const ask = async (message: string, detail: string, button: string) => (await vscode.window.showWarningMessage(message, { modal: true, detail }, button)) === button;
+  switch (prompt.kind) {
+    case "init":
+      return ask(`${plain(prompt.folder)} is not a git repository yet.`, "Every run works in its own git worktree, made from your last commit. Coordiner can run git init here and make a first commit, then carry on with this run.", "Initialize git");
+    case "empty-commit":
+      return ask(`${plain(prompt.root)} has no commits yet.`, "Every run works in its own git worktree, made from your last commit. Coordiner can make an empty first commit, then carry on with this run.", "Make first commit");
+    case "commit-files": {
+      const { files } = prompt;
+      const shown = files.slice(0, 10).map(plain).join("\n") + (files.length > 10 ? `\n… and ${files.length - 10} more` : "");
+      const detail = `The run's worktree starts from the first commit, so it has only the files that commit takes. Coordiner can commit all of them, .gitignore respected, as "Initial commit". To choose which go in, cancel, commit them yourself and start again.\n\n${shown}`;
+      return ask(`${plain(prompt.root)} has no commits yet.`, detail, `Commit ${files.length} file${files.length === 1 ? "" : "s"}`);
+    }
+  }
+}
+
+async function readyRepo(folder: string, output: vscode.OutputChannel): Promise<RepoInfo | undefined> {
+  const setup = await setUpRepo(folder, { exec, ask: askSetup, log: (line) => output.appendLine(line) });
+  if (setup.kind === "ready") return setup.repo;
+  if (setup.kind === "failed") {
+    if (setup.detail) {
+      output.appendLine(setup.detail);
+      output.show(true);
+    }
+    await vscode.window.showErrorMessage(`Coordiner: ${setup.reason}${setup.detail ? " See the Coordiner output." : ""}`);
+  }
+  return undefined;
+}
+
 async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
   const { state, provider, reveal, output, storage } = ctx;
   const check = runnable(chain);
@@ -272,11 +302,12 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
   }
   let repo;
   try {
-    repo = await inspectRepo(folder, exec);
+    repo = await readyRepo(folder, output);
   } catch (error) {
     await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
     return;
   }
+  if (!repo) return;
   const config = vscode.workspace.getConfiguration("coordiner");
   const env = sessionEnvFor(config);
   const claude = await claudeFor(config, env);

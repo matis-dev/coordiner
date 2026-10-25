@@ -1,47 +1,228 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addWorktree, inspectRepo, MAX_NEW_FILES, prepareReview, removalCommands, removalNote, worktreeClean, type Exec } from "./worktree.ts";
+import { addWorktree, firstCommit, initRepo, inspectRepo, MAX_NEW_FILES, prepareReview, removalCommands, removalNote, setUpRepo, uncommitted, worktreeClean, type Exec, type SetupPrompt } from "./worktree.ts";
 
 type Call = { file: string; args: string[]; cwd: string };
 
-// `fail` lists argv prefixes (space-joined) that should reject, like a non-zero git exit.
-function fakeExec(stdout: Record<string, string> = {}, fail: string[] = []) {
+// `fail` lists argv prefixes (space-joined) that should reject, like a non-zero git exit; `thrown` rejects a prefix with that exact value.
+function fakeExec(stdout: Record<string, string> = {}, fail: string[] = [], thrown: Record<string, unknown> = {}) {
   const calls: Call[] = [];
   const exec: Exec = async (file, args, options) => {
     calls.push({ file, args, cwd: options.cwd });
     const key = args.join(" ");
+    const match = Object.keys(thrown).find((prefix) => key.startsWith(prefix));
+    if (match !== undefined) throw thrown[match];
     if (fail.some((prefix) => key.startsWith(prefix))) throw new Error(`git ${key} failed`);
     return { stdout: stdout[args[0]!] ?? "", stderr: "" };
   };
   return { exec, calls };
 }
 
+const notARepo = new Error("Command failed: git rev-parse --show-toplevel\nfatal: not a git repository (or any of the parent directories): .git\n");
+
 describe("inspectRepo", () => {
   it("returns the top level and the dirty lines, without blank ones", async () => {
     const { exec, calls } = fakeExec({ "rev-parse": "/home/u/app\n", status: " M a.ts\n?? b.ts\n\n" });
-    assert.deepEqual(await inspectRepo("/home/u/app/sub", exec), { root: "/home/u/app", dirty: [" M a.ts", "?? b.ts"] });
+    assert.deepEqual(await inspectRepo("/home/u/app/sub", exec), { kind: "ready", root: "/home/u/app", dirty: [" M a.ts", "?? b.ts"] });
     assert.deepEqual(calls.map((c) => c.args), [["rev-parse", "--show-toplevel"], ["rev-parse", "--verify", "--quiet", "HEAD"], ["status", "--porcelain"]]);
   });
 
   it("reports a clean tree as no dirty lines", async () => {
     const { exec } = fakeExec({ "rev-parse": "/r\n", status: "" });
-    assert.deepEqual((await inspectRepo("/r", exec)).dirty, []);
+    assert.deepEqual(await inspectRepo("/r", exec), { kind: "ready", root: "/r", dirty: [] });
   });
 
-  it("explains when the folder is not a repository, and how to make it one", async () => {
-    const { exec } = fakeExec({}, ["rev-parse"]);
-    await assert.rejects(inspectRepo("/tmp/x", exec), /^Error: \/tmp\/x is not a git repository, or git is unavailable\. Run git init there and make a first commit/);
+  it("reports a folder that is not a repository, so the caller can offer git init", async () => {
+    const { exec } = fakeExec({}, [], { rev: notARepo });
+    assert.deepEqual(await inspectRepo("/tmp/x", exec), { kind: "no-repo" });
   });
 
-  it("refuses a repository with no commits, since a worktree starts from HEAD", async () => {
+  it("asks git in the C locale, so its message is the English one matched above", async () => {
+    let env: Record<string, string | undefined> | undefined;
+    const exec: Exec = async (_file, _args, options) => {
+      env ??= options.env;
+      throw notARepo;
+    };
+    await inspectRepo("/tmp/x", exec);
+    assert.equal(env?.LC_ALL, "C");
+  });
+
+  it("does not take any other failure for a missing repository, so git init is never offered over one git will not open", async () => {
+    const dubious = new Error("Command failed: git rev-parse --show-toplevel\nfatal: detected dubious ownership in repository at '/r'\n");
+    assert.deepEqual(await inspectRepo("/r", fakeExec({}, [], { rev: dubious }).exec), { kind: "failed", detail: dubious.message });
+    assert.deepEqual(await inspectRepo("/r", fakeExec({}, [], { rev: new Error("spawn git ENOENT") }).exec), { kind: "failed", detail: "spawn git ENOENT" });
+  });
+
+  it("reports a repository with no commits, since a worktree starts from HEAD", async () => {
     const { exec, calls } = fakeExec({ "rev-parse": "/r\n" }, ["rev-parse --verify"]);
-    await assert.rejects(inspectRepo("/r", exec), /^Error: \/r has no commits yet\. Make a first commit, then start again/);
+    assert.deepEqual(await inspectRepo("/r", exec), { kind: "no-commits", root: "/r" });
     assert.equal(calls.some((c) => c.args[0] === "status"), false);
   });
 
   it("explains when git fails after finding the repository", async () => {
     const { exec } = fakeExec({ "rev-parse": "/r\n" }, ["status"]);
     await assert.rejects(inspectRepo("/r", exec), /^Error: \/r is not a git repository, or git is unavailable\.$/);
+  });
+});
+
+describe("initRepo", () => {
+  it("runs git init in the folder", async () => {
+    const { exec, calls } = fakeExec();
+    assert.deepEqual(await initRepo("/r", exec), { ok: true });
+    assert.deepEqual(calls, [{ file: "git", args: ["init"], cwd: "/r" }]);
+  });
+
+  it("returns git's error rather than throwing", async () => assert.deepEqual(await initRepo("/r", fakeExec({}, ["init"]).exec), { ok: false, detail: "git init failed" }));
+
+  it("keeps a non-Error failure as the detail", async () => assert.deepEqual(await initRepo("/r", fakeExec({}, [], { init: "boom" }).exec), { ok: false, detail: "boom" }));
+});
+
+describe("uncommitted", () => {
+  it("names every file the first commit would take, staged and untracked, as git wrote them", async () => {
+    const { exec, calls } = fakeExec({ "ls-files": "a.ts\0src/b.ts\0é.md\0" });
+    assert.deepEqual(await uncommitted("/r", exec), { kind: "files", files: ["a.ts", "src/b.ts", "é.md"] });
+    assert.deepEqual(calls.map((c) => c.args), [["ls-files", "--cached", "--others", "--exclude-standard", "-z"]]);
+  });
+
+  it("reports more than MAX_NEW_FILES as too many", async () => {
+    const many = Array.from({ length: MAX_NEW_FILES + 1 }, (_, i) => `f${i}\0`).join("");
+    assert.deepEqual(await uncommitted("/r", fakeExec({ "ls-files": many }).exec), { kind: "too-many" });
+  });
+
+  it("reports a listing that overflows exec's output buffer as too many, not as git's error", async () => {
+    const overflow = Object.assign(new RangeError("stdout maxBuffer length exceeded"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+    assert.deepEqual(await uncommitted("/r", fakeExec({}, [], { "ls-files": overflow }).exec), { kind: "too-many" });
+  });
+
+  it("returns any other git error rather than throwing", async () => {
+    assert.deepEqual(await uncommitted("/r", fakeExec({}, ["ls-files"]).exec), { kind: "failed", detail: "git ls-files --cached --others --exclude-standard -z failed" });
+  });
+});
+
+describe("firstCommit", () => {
+  it("makes an empty commit without staging anything", async () => {
+    const { exec, calls } = fakeExec();
+    assert.deepEqual(await firstCommit("/r", false, exec), { ok: true });
+    assert.deepEqual(calls.map((c) => c.args), [["commit", "--allow-empty", "-m", "Initial commit"]]);
+  });
+
+  it("stages every file first when asked to take them", async () => {
+    const { exec, calls } = fakeExec();
+    assert.deepEqual(await firstCommit("/r", true, exec), { ok: true });
+    assert.deepEqual(calls.map((c) => c.args), [["add", "--all"], ["commit", "--allow-empty", "-m", "Initial commit"]]);
+  });
+
+  it("returns git's error rather than throwing", async () => {
+    const { exec } = fakeExec({}, ["commit"]);
+    assert.deepEqual(await firstCommit("/r", false, exec), { ok: false, detail: "git commit --allow-empty -m Initial commit failed" });
+  });
+});
+
+// A folder git sees through `repo` and `commit`, which git init and git commit turn on; `answers` are the user's replies, in order.
+function fakeSetup(start: { repo: boolean; commit: boolean; files?: string[]; fail?: string }, answers: boolean[] = []) {
+  const git = { ...start };
+  const writes: string[][] = [];
+  const asked: SetupPrompt[] = [];
+  const logged: string[] = [];
+  const exec: Exec = async (_file, args) => {
+    const key = args.join(" ");
+    if (git.fail !== undefined && key.startsWith(git.fail)) throw new Error(`git ${key} failed`);
+    if (key === "rev-parse --show-toplevel") {
+      if (!git.repo) throw notARepo;
+      return { stdout: "/r\n", stderr: "" };
+    }
+    if (key.startsWith("rev-parse --verify")) {
+      if (!git.commit) throw new Error("no HEAD");
+      return { stdout: "", stderr: "" };
+    }
+    if (args[0] === "ls-files") return { stdout: (git.files ?? []).map((f) => `${f}\0`).join(""), stderr: "" };
+    if (args[0] === "status") return { stdout: "", stderr: "" };
+    writes.push(args);
+    if (args[0] === "init") git.repo = true;
+    if (args[0] === "commit") git.commit = true;
+    return { stdout: "", stderr: "" };
+  };
+  const ask = async (prompt: SetupPrompt) => {
+    asked.push(prompt);
+    return answers.shift() ?? false;
+  };
+  return { deps: { exec, ask, log: (line: string) => logged.push(line) }, writes, asked, logged };
+}
+
+describe("setUpRepo", () => {
+  const ready = { kind: "ready", repo: { kind: "ready", root: "/r", dirty: [] } };
+  const emptyCommit = ["commit", "--allow-empty", "-m", "Initial commit"];
+
+  it("asks nothing and writes nothing in a repository that has a commit", async () => {
+    const { deps, writes, asked } = fakeSetup({ repo: true, commit: true });
+    assert.deepEqual(await setUpRepo("/r", deps), ready);
+    assert.deepEqual([asked, writes], [[], []]);
+  });
+
+  it("asks once for an empty folder: agreeing to git init covers the empty first commit", async () => {
+    const { deps, writes, asked, logged } = fakeSetup({ repo: false, commit: false }, [true]);
+    assert.deepEqual(await setUpRepo("/r", deps), ready);
+    assert.deepEqual(asked, [{ kind: "init", folder: "/r" }]);
+    assert.deepEqual(writes, [["init"], emptyCommit]);
+    assert.deepEqual(logged, ["Initialized a git repository in /r", "Made the first commit in /r"]);
+  });
+
+  it("shows the files before committing them, even after git init was agreed", async () => {
+    const { deps, writes, asked } = fakeSetup({ repo: false, commit: false, files: ["a.ts", "b.ts"] }, [true, true]);
+    assert.deepEqual(await setUpRepo("/r", deps), ready);
+    assert.deepEqual(asked, [{ kind: "init", folder: "/r" }, { kind: "commit-files", root: "/r", files: ["a.ts", "b.ts"] }]);
+    assert.deepEqual(writes, [["init"], ["add", "--all"], emptyCommit]);
+  });
+
+  it("asks before an empty first commit in a repository git init made earlier", async () => {
+    const { deps, writes, asked } = fakeSetup({ repo: true, commit: false }, [true]);
+    assert.deepEqual(await setUpRepo("/r", deps), ready);
+    assert.deepEqual(asked, [{ kind: "empty-commit", root: "/r" }]);
+    assert.deepEqual(writes, [emptyCommit]);
+  });
+
+  it("writes nothing when git init is declined", async () => {
+    const { deps, writes } = fakeSetup({ repo: false, commit: false }, [false]);
+    assert.deepEqual(await setUpRepo("/r", deps), { kind: "cancelled" });
+    assert.deepEqual(writes, []);
+  });
+
+  it("stages and commits nothing when the files are declined", async () => {
+    const { deps, writes } = fakeSetup({ repo: true, commit: false, files: ["a.ts"] }, [false]);
+    assert.deepEqual(await setUpRepo("/r", deps), { kind: "cancelled" });
+    assert.deepEqual(writes, []);
+  });
+
+  it("refuses more than MAX_NEW_FILES files without asking to commit them", async () => {
+    const files = Array.from({ length: MAX_NEW_FILES + 1 }, (_, i) => `f${i}`);
+    const { deps, writes, asked } = fakeSetup({ repo: true, commit: false, files });
+    const result = await setUpRepo("/r", deps);
+    assert.equal(result.kind, "failed");
+    assert.match(result.kind === "failed" ? result.reason : "", new RegExp(`^More than ${MAX_NEW_FILES} files are not committed yet`));
+    assert.deepEqual([asked, writes], [[], []]);
+  });
+
+  it("asks nothing and commits nothing when the files cannot be listed", async () => {
+    const { deps, writes, asked } = fakeSetup({ repo: true, commit: false, fail: "ls-files" });
+    assert.deepEqual(await setUpRepo("/r", deps), { kind: "failed", reason: "Git could not list the files for the first commit.", detail: "git ls-files --cached --others --exclude-standard -z failed" });
+    assert.deepEqual([asked, writes], [[], []]);
+  });
+
+  it("does not hand on a repository that still has no commit after the first one was made", async () => {
+    const { exec } = fakeExec({ "rev-parse": "/r\n" }, ["rev-parse --verify"]);
+    assert.deepEqual(await setUpRepo("/r", { exec, ask: async () => true, log: () => {} }), { kind: "failed", reason: "/r still has no commit to start from." });
+  });
+
+  it("offers no git init over a folder git could not open, and passes git's message on", async () => {
+    const { deps, asked } = fakeSetup({ repo: true, commit: true, fail: "rev-parse --show-toplevel" });
+    assert.deepEqual(await setUpRepo("/r", deps), { kind: "failed", reason: "Git could not open /r as a repository. Is git installed?", detail: "git rev-parse --show-toplevel failed" });
+    assert.deepEqual(asked, []);
+  });
+
+  it("reports a failed git init or first commit with git's message", async () => {
+    assert.deepEqual(await setUpRepo("/r", fakeSetup({ repo: false, commit: false, fail: "init" }, [true]).deps), { kind: "failed", reason: "git init failed. Is git installed?", detail: "git init failed" });
+    const commit = await setUpRepo("/r", fakeSetup({ repo: true, commit: false, fail: "commit" }, [true]).deps);
+    assert.deepEqual(commit, { kind: "failed", reason: "The first commit failed. If git asks who you are, set user.name and user.email, then start again.", detail: "git commit --allow-empty -m Initial commit failed" });
   });
 });
 
