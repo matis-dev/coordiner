@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
-import { checkEnvironment, findClaude, sessionEnv, type CheckDeps, type Models } from "./environment.ts";
+import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type CheckDeps, type Models } from "./environment.ts";
 import { REQUIRED_COMMANDS, type TurnRequest, type TurnResult } from "./session.ts";
 
 const models: Models = { strong: "m-strong", medium: "m-medium", weak: "m-weak" };
@@ -18,6 +18,20 @@ describe("sessionEnv", () => {
 
   it("sets PATH to the extra folder when the process has none", () => {
     assert.deepEqual(sessionEnv({}, "/nvm/bin"), { PATH: "/nvm/bin" });
+  });
+});
+
+describe("bundledClaudePath", () => {
+  it("points at the native binary inside the Claude Code extension's folder", () => {
+    assert.equal(bundledClaudePath("/ext/anthropic.claude-code-2.1.306", "linux"), "/ext/anthropic.claude-code-2.1.306/resources/native-binary/claude");
+  });
+
+  it("names the Windows binary claude.exe", () => {
+    assert.equal(bundledClaudePath("/ext", "win32"), "/ext/resources/native-binary/claude.exe");
+  });
+
+  it("has no path when the Claude Code extension is not installed", () => {
+    assert.equal(bundledClaudePath(undefined, "linux"), undefined);
   });
 });
 
@@ -45,10 +59,21 @@ describe("findClaude", () => {
     assert.deepEqual(await findClaude("", {}, "/h", only("/h/.local/bin/claude")), { ok: true, path: "/h/.local/bin/claude" });
   });
 
+  it("falls back to the Claude Code extension's bundled binary last, as when a ~/.local/bin link dangles after an update", async () => {
+    const bundled = "/ext/anthropic.claude-code-2.1.306/resources/native-binary/claude";
+    assert.deepEqual(await findClaude("", { PATH: "/usr/bin" }, "/h", only(bundled), bundled), { ok: true, path: bundled });
+    assert.deepEqual(await findClaude("", { PATH: "/usr/bin" }, "/h", only("/h/.local/bin/claude", bundled), bundled), { ok: true, path: "/h/.local/bin/claude" });
+  });
+
+  it("does not use the bundled binary over a configured path that is not executable", async () => {
+    const bundled = "/ext/claude";
+    assert.equal((await findClaude("/opt/claude", {}, "/h", only(bundled), bundled)).ok, false);
+  });
+
   it("names the places searched and the setting when claude is nowhere", async () => {
-    assert.deepEqual(await findClaude("", { PATH: "/usr/bin" }, "/h", only()), {
+    assert.deepEqual(await findClaude("", { PATH: "/usr/bin" }, "/h", only(), "/ext/claude"), {
       ok: false,
-      error: "Claude Code was not found on PATH or in ~/.local/bin. Fix: coordiner.claudePath (the full path to claude).",
+      error: "Claude Code was not found on PATH, in ~/.local/bin, or in the Claude Code extension. Fix: install Claude Code, or set coordiner.claudePath to the full path of claude.",
     });
   });
 });

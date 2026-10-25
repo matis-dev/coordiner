@@ -27,17 +27,25 @@ export function sessionEnv(processEnv: NodeJS.ProcessEnv, extraPath: string): Re
 
 export type ClaudeLookup = { ok: true; path: string } | { ok: false; error: string };
 
+export function bundledClaudePath(extensionPath: string | undefined, platform: NodeJS.Platform): string | undefined {
+  return extensionPath && join(extensionPath, "resources", "native-binary", platform === "win32" ? "claude.exe" : "claude");
+}
+
 // The packaged extension does not ship the SDK's platform binary, so sessions run the Claude Code the user installed:
-// the configured path, else the first `claude` on the sessions' PATH, else the native installer's ~/.local/bin.
+// the configured path, else the first `claude` on the sessions' PATH, else the native installer's ~/.local/bin,
+// else the binary the Claude Code editor extension bundles. The editor resolves that extension's current folder,
+// so it survives the extension's updates, unlike a ~/.local/bin link into an older version's folder.
 // Without one the SDK would fall back to the binary it lacks, so callers stop on a failed lookup.
-export async function findClaude(configured: string, env: Record<string, string | undefined>, home: string, isExecutable: (path: string) => Promise<boolean>): Promise<ClaudeLookup> {
-  const candidates = configured !== "" ? [configured] : [...(env.PATH ?? "").split(delimiter).filter(Boolean).map((dir) => join(dir, "claude")), join(home, ".local", "bin", "claude")];
+export async function findClaude(configured: string, env: Record<string, string | undefined>, home: string, isExecutable: (path: string) => Promise<boolean>, bundled?: string): Promise<ClaudeLookup> {
+  const candidates = configured !== ""
+    ? [configured]
+    : [...(env.PATH ?? "").split(delimiter).filter(Boolean).map((dir) => join(dir, "claude")), join(home, ".local", "bin", "claude"), ...(bundled ? [bundled] : [])];
   for (const candidate of candidates) if (await isExecutable(candidate)) return { ok: true, path: candidate };
   return {
     ok: false,
     error: configured !== ""
       ? `coordiner.claudePath is ${configured}, which is not an executable file. Fix: set coordiner.claudePath to the full path of claude.`
-      : "Claude Code was not found on PATH or in ~/.local/bin. Fix: coordiner.claudePath (the full path to claude).",
+      : "Claude Code was not found on PATH, in ~/.local/bin, or in the Claude Code extension. Fix: install Claude Code, or set coordiner.claudePath to the full path of claude.",
   };
 }
 

@@ -128,7 +128,7 @@
           "type": "string",
           "default": "",
           "scope": "application",
-          "description": "Full path to the Claude Code executable sessions run. Empty: the first claude on PATH, else ~/.local/bin/claude."
+          "description": "Full path to the Claude Code executable sessions run. Empty: the first claude on PATH, else ~/.local/bin/claude, else the one the Claude Code extension bundles."
         },
         "coordiner.extraPath": {
           "type": "string",

@@ -12,7 +12,7 @@ import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSk
 import { editorHtml } from "./editor-html.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
-import { checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
+import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
 import { createJournal, journalFileName } from "./journal.ts";
 import { fillInput, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
@@ -84,7 +84,8 @@ function readModels(config: vscode.WorkspaceConfiguration): Models {
 
 const sessionEnvFor = (config: vscode.WorkspaceConfiguration) => sessionEnv(process.env, config.get<string>("extraPath", ""));
 const isExecutable = (path: string) => access(path, constants.X_OK).then(() => true, () => false);
-const claudeFor = (config: vscode.WorkspaceConfiguration, env: Record<string, string | undefined>) => findClaude(config.get<string>("claudePath", ""), env, homedir(), isExecutable);
+const bundledClaude = () => bundledClaudePath(vscode.extensions.getExtension("anthropic.claude-code")?.extensionPath, process.platform);
+const claudeFor = (config: vscode.WorkspaceConfiguration, env: Record<string, string | undefined>) => findClaude(config.get<string>("claudePath", ""), env, homedir(), isExecutable, bundledClaude());
 const openFolder = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 const noTools = async () => ({ behavior: "deny" as const, message: "This check uses no tools." });
 
