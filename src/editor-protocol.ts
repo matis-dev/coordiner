@@ -1,5 +1,6 @@
 import { MAX_INPUT_CHARS, parseChain, type Chain, type Effort } from "./chains.ts";
 import type { CacheClock, Pick } from "./chat-logic.ts";
+import type { Outcome } from "./run.ts";
 import type { ModelOption, PaletteEntry } from "./skills.ts";
 import type { TalkSnapshot } from "./talk.ts";
 import type { Entry } from "./transcript.ts";
@@ -19,7 +20,10 @@ export type EditorMessage =
   | { type: "chatPause" }
   | { type: "chatContinue" }
   | { type: "chatAnswer"; id: string; picks: Pick[] }
-  | { type: "chatStop" };
+  | { type: "chatStop" }
+  // After the run: the clipboard text and the worktree are the extension's own, never taken from the page.
+  | { type: "chatCopyResume" }
+  | { type: "chatNextChain" };
 
 export type EditorState = {
   type: "state";
@@ -43,8 +47,10 @@ export type EditorState = {
 };
 
 // The run's chat, kept apart from the chains state so a new message never re-renders the chain being edited.
-// `cache` only while a card waits for the user: that is when the time it stays warm is the user's to spend.
-export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock };
+// `cache` only while a card waits for the user: that is when the time it stays warm is the user's to spend. `ending` once the run
+// has ended: how it ended, with the reason a halt or failure gave.
+export type Ending = { status: Outcome["status"]; reason?: string };
+export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock; ending?: Ending };
 export type ChatMessage =
   // Everything: on "ready", and when a run starts.
   | { type: "chat"; chat: ChatView; entries: Entry[] }
@@ -66,6 +72,8 @@ const KEYS: Record<EditorMessage["type"], readonly string[]> = {
   chatContinue: [],
   chatAnswer: ["id", "picks"],
   chatStop: [],
+  chatCopyResume: [],
+  chatNextChain: [],
 };
 
 const MAX_QUESTIONS = 4;

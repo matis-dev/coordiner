@@ -12,6 +12,19 @@ Coordiner is a personal tool. Run it from source in an Extension Development Hos
 - **Claude Code, installed and signed in on this machine.** Sessions run your installed `claude` with your existing login: the one set in `coordiner.claudePath`, else the first `claude` on PATH, else `~/.local/bin/claude`, else the one bundled with the Claude Code editor extension.
 - **Recommended: the [m-skills](https://github.com/matis-dev/m-skills) plugin**, enabled in your Claude Code settings. Coordiner is built around it, and every shipped template uses its skills. Chains made only of your own skills run without it. A chain refuses to start when a skill it uses is not available in the session.
 
+## How sessions run, and who pays for them
+
+Coordiner does not call the Anthropic API itself. Each session goes through the Claude Agent SDK, which starts your `claude` as a child process (the one **Coordiner: Check Environment** reports) and exchanges JSON messages with it over stdin and stdout. That process is an ordinary Claude Code session: it loads your user and project settings, skills, plugins and hooks, and writes its transcript to `~/.claude/projects/` like any other session.
+
+The session signs in as `claude` does in your terminal:
+
+- **An API credential is set** in the environment sessions get (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, an `apiKeyHelper`, or a Bedrock, Vertex or Foundry provider variable): usage is billed to that credential's account, whatever account you are logged in with. A session never asks before using an `ANTHROPIC_API_KEY`, as an interactive `claude` does.
+- **Otherwise**: your Claude Code login (`~/.claude/.credentials.json`), so usage counts against your subscription's limits, as `claude -p` does.
+
+Sessions get the editor's full environment, plus `coordiner.extraPath`. A key exported in your shell profile therefore switches every run to API billing. To check which applies, run `claude` in a terminal and type `/status`. The full order is in [Authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence).
+
+Because the sessions run your `claude`, its version decides which models they can use. If a model needs a newer Claude Code, the run fails with a message such as `the session failed: API Error: 400 Claude Code 2.1.251 does not support this model; version 2.1.280 or newer is required`. Run `claude update`, or point `coordiner.claudePath` at a newer `claude`.
+
 ## Run the extension from source
 
 1. Install the dependencies and build:

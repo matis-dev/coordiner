@@ -2,9 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { storyText } from "./backlog.ts";
 import { defaultCard, MAX_INPUT_CHARS, TEMPLATES, type Chain } from "./chains.ts";
-import { fillInput, MAX_TURNS, remainingCommands, runChain, runSession, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
+import { fillInput, MAX_TURNS, remainingCommands, runChain, runSession, talkOn, type AfterAsk, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
 import type { TurnResult } from "./session.ts";
-import { Talk, type WaitRequest } from "./talk.ts";
+import { Talk, type Move, type WaitRequest } from "./talk.ts";
 import type { ReviewPrep } from "./worktree.ts";
 
 const models = { strong: "m-strong", medium: "m-medium", weak: "m-weak" };
@@ -176,11 +176,10 @@ describe("runSession: session two", () => {
     assert.deepEqual(events.filter((e) => e.type === "step-started").map((e) => e.type === "step-started" && e.label), ["Review", "History"]);
   });
 
-  it("treats NEXT in the history turn as a missing status line: one reminder, then a halt", async () => {
-    const { deps, requests } = harness([reply("COORDINER: DONE", 1), reply("brief\nCOORDINER: NEXT Light", 2), reply("COORDINER: NEXT Light", 3)]);
-    const outcome = await runSession(REVIEW_SESSION, deps);
-    assert.equal(outcome.status, "halted");
-    assert.deepEqual(requests.map((r) => [r.prompt, r.model]).slice(1), [["/m-skills:rolling-history", "m-medium"], ["End your reply with your COORDINER status line.", "m-medium"]]);
+  it("ends the session as done on NEXT in the history turn, the last card: no reminder", async () => {
+    const { deps, requests } = harness([reply("COORDINER: DONE", 1), reply("brief\nCOORDINER: NEXT Light", 2)]);
+    assert.deepEqual(await runSession(REVIEW_SESSION, deps), { status: "done", text: "brief" });
+    assert.equal(requests.length, 2);
   });
 
   it("finishes after a reminder in the history turn", async () => {
@@ -429,6 +428,21 @@ describe("runChain: other chains", () => {
     assert.deepEqual(h.requests, [{ prompt: "/acme:lint", model: "m-medium", interactive: false }]);
   });
 
+  // The first real Kickoff run: the card named the planning after it, and was halted as if it had given no status line.
+  it("ends a one-card Kickoff as done when it ends on NEXT and the user continues: no reminder, no halt", async () => {
+    const h = harness([reply("profile written\nCOORDINER: NEXT Standard", 1)], undefined, [(t) => t.continue()]);
+    const kickoff = TEMPLATES.find((t) => t.id === "kickoff")!;
+    assert.deepEqual(await runChain(kickoff, deps(h).deps), { status: "done", text: "profile written" });
+    assert.equal(h.requests.length, 1);
+  });
+
+  it("crosses into the next session when the last card of a session ends on NEXT", async () => {
+    const h = harness([reply("COORDINER: NEXT Heavy", 1), reply("COORDINER: DONE", 2)]);
+    const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a")] }, { cards: [defaultCard("b")] }] };
+    assert.deepEqual(await runChain(own, deps(h).deps), { status: "done", text: "" });
+    assert.deepEqual(h.requests.map((r) => [r.prompt, r.model, r.resume]), [["/a", "m-medium", undefined], ["/b", "m-medium", undefined]]);
+  });
+
   it("moves between generic cards on NEXT, on the tier it names", async () => {
     const h = harness([reply("COORDINER: NEXT Heavy", 1), reply("COORDINER: DONE", 2)]);
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a"), defaultCard("b")] }] };
@@ -520,5 +534,71 @@ describe("remainingCommands", () => {
   it("lists nothing for a run that finished or was stopped by the user", () => {
     assert.deepEqual(remainingCommands(chain, { status: "done", text: "" }), []);
     assert.deepEqual(remainingCommands(chain, { status: "stopped" }), []);
+  });
+});
+
+describe("talkOn", () => {
+  // Hands out `moves` in order, one per wait; a wait with none left is a stop.
+  function after(moves: Move[], results: TurnResult[]) {
+    const requests: AfterAsk[] = [];
+    const waits: WaitRequest[] = [];
+    const run = talkOn({
+      runTurn: async (request) => {
+        requests.push(request);
+        return results.shift()!;
+      },
+      talk: { waitForYou: async (request) => (waits.push(request), moves.shift() ?? { kind: "stopped" }) },
+      signal: new AbortController().signal,
+      card: "Kickoff",
+      sessionId: "sess-1",
+      model: "m-pinned",
+      effort: "high",
+    });
+    return { run, requests, waits };
+  }
+  const message = (text: string): Move => ({ kind: "message", text });
+
+  it("resumes the run's session with each message, on its model and effort, and follows the session it reports", async () => {
+    const { run, requests, waits } = after([message("why?"), message("and then?")], [reply("because", 2), reply("then this", 2)]);
+    await run;
+    assert.deepEqual(requests, [
+      { prompt: "why?", model: "m-pinned", effort: "high", resume: "sess-1" },
+      { prompt: "and then?", model: "m-pinned", effort: "high", resume: "sess-2" },
+    ]);
+    assert.deepEqual(waits.map((w) => [w.card, w.ready, w.nextCard]), [["Kickoff", false, undefined], ["Kickoff", false, undefined], ["Kickoff", false, undefined]]);
+  });
+
+  it("keeps going after a failed turn, on the session it had", async () => {
+    const { run, requests } = after([message("one"), message("two")], [{ ok: false, error: "the session failed: API Error: 400" }, reply("fine", 1)]);
+    await run;
+    assert.deepEqual(requests.map((r) => r.resume), ["sess-1", "sess-1"]);
+  });
+
+  it("ignores status lines and Continue: only a stop ends it", async () => {
+    const { run, requests } = after([message("one"), { kind: "continue" }, message("two")], [reply("COORDINER: HALT nope", 1), reply("COORDINER: DONE", 1)]);
+    await run;
+    assert.equal(requests.length, 2);
+  });
+
+  it("sends no effort when the run had none, and stops when the run's chat is aborted", async () => {
+    const talk = new Talk({ changed: () => undefined, delivered: () => undefined, answered: () => undefined });
+    talk.end({ after: { card: "Kickoff" } });
+    const abort = new AbortController();
+    const requests: AfterAsk[] = [];
+    const run = talkOn({
+      runTurn: async (request) => {
+        requests.push(request);
+        abort.abort();
+        return reply("ok", 1);
+      },
+      talk,
+      signal: abort.signal,
+      card: "Kickoff",
+      sessionId: "sess-1",
+      model: "m-medium",
+    });
+    talk.send("hello");
+    await run;
+    assert.deepEqual(requests, [{ prompt: "hello", model: "m-medium", resume: "sess-1" }]);
   });
 });

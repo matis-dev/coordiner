@@ -43,7 +43,7 @@ const NUDGE = "End your reply with your COORDINER status line.";
 // One session runs its cards in order, resuming one conversation. A "once" card takes one turn; NEXT moves to the next card on the
 // tier it names, DONE moves to the next card on its own tier. A review's DONE skips the loop cards after it (nothing to fix goes
 // straight to history); any other skill's DONE does not. A "loop" card continues on each NEXT and moves on at DONE. NEXT on a last
-// "once" card has no step to name, so it counts as a missing status line.
+// "once" card names a step this session does not have (a kickoff naming the planning after it), so it ends the card as DONE does.
 //
 // A card that pauses, or one the user paused, talks with the user: after each turn it waits, each message is another turn, and
 // Continue applies the latest status line the card gave (a pausing card that gave none is done). Only unattended turns count
@@ -81,7 +81,7 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     const kind = skillDefault(cards[card]!.skill).kind;
     chat = false;
     if (status.kind === "halt") return { end: { status: "halted", reason: status.reason, sessionId }, step: ["halted", status.reason] };
-    if (status.kind === "none" || (status.kind === "next" && kind === "once" && card === cards.length - 1)) {
+    if (status.kind === "none") {
       if (nudged) {
         const reason = "the session did not report a COORDINER status line, even after a reminder";
         return { end: { status: "halted", reason, sessionId }, step: ["halted", "no COORDINER status line after a reminder"] };
@@ -93,7 +93,7 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
       return { step: ["done", "no status line; reminding"] };
     }
     nudged = false;
-    if (status.kind === "done") {
+    if (status.kind === "done" || (kind === "once" && card === cards.length - 1)) {
       let next = card + 1;
       if (skillDefault(cards[card]!.skill).doneSkipsLoops) while (next < cards.length && skillDefault(cards[next]!.skill).kind === "loop") next++;
       if (next >= cards.length) return { end: { status: "done", text: withoutStatus(text) }, step: ["done", "done"] };
@@ -161,6 +161,33 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     const { end, step } = advance(status, result.resultText, result.sessionId);
     finish(step);
     if (end) return stop(end);
+  }
+}
+
+// A turn after the run ends. The caller gives it AFTER_NOTE and the interactive tool rules, as for a card the user is present for.
+export type AfterAsk = Pick<TurnRequest, "prompt" | "model" | "effort" | "resume">;
+
+export type TalkOnDeps = {
+  runTurn(request: AfterAsk): Promise<TurnResult>;
+  talk: Pick<Talk, "waitForYou">;
+  signal: AbortSignal;
+  // The run's last card, and the session, model and effort its last turn ran on.
+  card: string;
+  sessionId: string;
+  model: string;
+  effort?: Effort;
+};
+
+// After the run, the chat stays on its last session until the signal aborts: each message is a turn that resumes it. A failed
+// turn leaves the chat open (the caller shows the failure), and a status line in a reply steers nothing.
+export async function talkOn({ runTurn, talk, signal, card, sessionId, model, effort }: TalkOnDeps): Promise<void> {
+  let resume = sessionId;
+  for (;;) {
+    const move = await talk.waitForYou({ card, ready: false, signal });
+    if (move.kind === "stopped") return;
+    if (move.kind !== "message") continue;
+    const result = await runTurn({ prompt: move.text, model, ...(effort ? { effort } : {}), resume });
+    if (result.ok) resume = result.sessionId;
   }
 }
 

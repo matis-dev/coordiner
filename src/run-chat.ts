@@ -1,11 +1,12 @@
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { CacheClock } from "./chat-logic.ts";
-import type { ChatMessage, ChatView, EditorMessage } from "./editor-protocol.ts";
+import type { ChatMessage, ChatView, EditorMessage, Ending } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
-import { INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
+import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
+import type { Outcome } from "./run.ts";
 import { Talk, type TalkSnapshot } from "./talk.ts";
 import { plain } from "./text.ts";
-import { entriesFrom, Transcript, type Entry } from "./transcript.ts";
+import { endEntry, entriesFrom, Transcript, type Entry } from "./transcript.ts";
 import { interactiveCanUseTool, unattendedCanUseTool } from "./unattended.ts";
 
 // One run's chat, wired to the outside: the chains editor (through `post`), the journal, and the editor's attention. Kept out of
@@ -40,12 +41,18 @@ export function cacheFrom(usage: Usage, now: number, previous?: CacheClock): Cac
 
 // What one turn of the session gets: the note, how its tools are decided, and where its messages go.
 export type TurnSetup = { canUseTool: CanUseTool; systemPromptAppend: string; onMessage(message: SDKAssistantMessage): void };
+// A turn nobody is present for, one the user is present for, or one after the run has ended (the user is present).
+export type TurnMode = "unattended" | "interactive" | "after";
 
 export type RunChat = {
   talk: Talk;
   view(): ChatView;
   entries(): Entry[];
-  forTurn(interactive: boolean): TurnSetup;
+  forTurn(mode: TurnMode): TurnSetup;
+  // The run is over: the transcript says how it ended. With `after`, the chat stays open on the run's last session.
+  ended(outcome: Outcome, after?: { card: string }): void;
+  // A turn of the chat after the run failed.
+  failed(card: string, error: string): void;
 };
 
 export function createRunChat({ title, post, record, moved, needsYou, log, now = Date.now }: RunChatDeps): RunChat {
@@ -57,7 +64,8 @@ export function createRunChat({ title, post, record, moved, needsYou, log, now =
   };
   let shown: TalkSnapshot | undefined;
   let cache: CacheClock | undefined;
-  const viewOf = (snapshot: TalkSnapshot): ChatView => ({ ...snapshot, title, ...(snapshot.phase === "waiting" && cache ? { cache } : {}) });
+  let ending: Ending | undefined;
+  const viewOf = (snapshot: TalkSnapshot): ChatView => ({ ...snapshot, title, ...(snapshot.phase === "waiting" && cache ? { cache } : {}), ...(ending ? { ending } : {}) });
   const talk = new Talk({
     changed: (snapshot) => {
       const before = shown;
@@ -66,7 +74,9 @@ export function createRunChat({ title, post, record, moved, needsYou, log, now =
       post({ type: "chatUpdate", chat: viewOf(snapshot) });
       if (snapshot.index !== before?.index || snapshot.session !== before?.session) moved();
       const asked = snapshot.question !== undefined && snapshot.question.id !== before?.question?.id;
-      if (snapshot.card && (asked || (snapshot.phase === "waiting" && before?.phase !== "waiting"))) needsYou(snapshot.card);
+      // After the run the chat waits after every reply, and the run's own announcement already says it ended.
+      const waits = snapshot.phase === "waiting" && before?.phase !== "waiting" && !snapshot.afterRun;
+      if (snapshot.card && (asked || waits)) needsYou(snapshot.card);
     },
     delivered: (card, text) => {
       add([{ kind: "you", card, text }]);
@@ -83,21 +93,34 @@ export function createRunChat({ title, post, record, moved, needsYou, log, now =
     talk,
     view,
     entries: () => transcript.entries(),
-    forTurn: (interactive) => ({
-      canUseTool: interactive ? interactiveCanUseTool((questions, signal) => talk.ask(questions, signal), log) : unattendedCanUseTool(log),
-      systemPromptAppend: interactive ? INTERACTIVE_NOTE : UNATTENDED_NOTE,
+    forTurn: (mode) => ({
+      canUseTool: mode === "unattended" ? unattendedCanUseTool(log) : interactiveCanUseTool((questions, signal) => talk.ask(questions, signal), log),
+      systemPromptAppend: NOTES[mode],
       onMessage: (message) => {
         cache = cacheFrom(message.message.usage, now(), cache);
         add(entriesFrom(message, talk.snapshot().card ?? ""));
       },
     }),
+    ended: (outcome, after) => {
+      const entry = endEntry(outcome);
+      add([entry]);
+      const { kind: _end, ...how } = entry;
+      ending = how;
+      talk.end(after ? { after } : {});
+    },
+    failed: (card, error) => add([{ kind: "failed", card, error: plain(error) }]),
   };
 }
 
+const NOTES: Record<TurnMode, string> = { unattended: UNATTENDED_NOTE, interactive: INTERACTIVE_NOTE, after: AFTER_NOTE };
+
 export type ChatAction = Extract<EditorMessage, { type: `chat${string}` }>;
 
+// What the extension does for the chat: stop the run (or end the chat after it), and the actions once the run has ended.
+export type ChatActions = { stop(): void; copyResume(): void; nextChain(): void };
+
 // Acts on a message from the chat. False when the run's chat refused it (a stale question, an empty message); Talk decides.
-export function actOnChat(talk: Talk, stop: () => void, message: ChatAction): boolean {
+export function actOnChat(talk: Talk, { stop, copyResume, nextChain }: ChatActions, message: ChatAction): boolean {
   switch (message.type) {
     case "chatSend":
       return talk.send(message.text);
@@ -114,6 +137,12 @@ export function actOnChat(talk: Talk, stop: () => void, message: ChatAction): bo
       return talk.answer(message.id, message.picks);
     case "chatStop":
       stop();
+      return true;
+    case "chatCopyResume":
+      copyResume();
+      return true;
+    case "chatNextChain":
+      nextChain();
       return true;
   }
 }

@@ -20,6 +20,9 @@ export function parseStatus(text: string): Status {
 
 export const withoutStatus = (text: string): string => text.trimEnd().split("\n").slice(0, -1).join("\n").trimEnd();
 
+// A reply as the user reads it: without its status line, when it ends with one.
+export const replyOf = (text: string): string => (parseStatus(text).kind === "none" ? text.trim() : withoutStatus(text));
+
 export const UNATTENDED_NOTE = [
   "This session is driven by coordiner, an unattended pipeline running a chain of skills. Nobody is at the keyboard.",
   "Finish the skill's work, then end your turn. Do not offer a next-step picker or start another skill.",
@@ -41,4 +44,12 @@ export const INTERACTIVE_NOTE = [
   "Do not offer a next-step picker or start another skill: the user moves the chain on with coordiner's Continue button.",
   "When this skill's work is done, end your final message with the status line the skill would give in an unattended run: `COORDINER: NEXT <tier>` (Light, Standard or Heavy) for the next step's tier, `COORDINER: DONE` when the skill is finished, or `COORDINER: HALT <one-line reason>`.",
   "Until the work is done, end your turn without a status line; the user replies in the chat.",
+].join(" ");
+
+// For a turn after the chain has ended: the user talks to the run's last session in coordiner's chat. No status line steers it.
+export const AFTER_NOTE = [
+  "This session was driven by coordiner, which ran a chain of skills. The chain has ended; the user is now talking to you in coordiner's chat.",
+  "Answer them directly. No COORDINER status line is needed: nothing follows in the chain, and one would steer nothing.",
+  "Ask what you need through AskUserQuestion; the user answers each question in the chat.",
+  "Do not offer a next-step picker. Start another skill only when the user asks for one.",
 ].join(" ");

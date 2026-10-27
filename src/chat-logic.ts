@@ -1,5 +1,5 @@
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import type { ChatView } from "./editor-protocol.ts";
+import type { ChatView, Ending } from "./editor-protocol.ts";
 import type { Entry } from "./transcript.ts";
 import type { Question } from "./unattended.ts";
 
@@ -57,6 +57,18 @@ export const firstUnanswered = (questions: readonly Question[], picks: readonly 
 export const canSend = (chat: ChatView): boolean => chat.phase === "running" || chat.phase === "waiting";
 export const canPause = (chat: ChatView): boolean => chat.phase === "running" && !chat.attended && !chat.pausePending;
 
+const ENDED: Record<Ending["status"], string> = {
+  done: "The run is done",
+  "no-changes": "The run found nothing to review",
+  halted: "The run halted",
+  failed: "The run failed",
+  stopped: "The run was stopped",
+  refused: "The run was refused",
+};
+
+// How the run ended, as one sentence: the end entry, and the start of the status line after the run.
+export const endedLine = ({ status, reason }: Ending): string => `${ENDED[status]}${reason ? `: ${reason.replace(/[.\s]+$/, "")}` : ""}.`;
+
 export function statusLine(chat: ChatView): string {
   switch (chat.phase) {
     case "idle":
@@ -64,9 +76,10 @@ export function statusLine(chat: ChatView): string {
     case "running":
       return chat.attended ? `${chat.card} is working on your message…` : `${chat.card} is working…`;
     case "waiting":
+      if (chat.afterRun) return `${chat.ending ? endedLine(chat.ending) : "The run has ended."} You can keep talking to ${chat.card}.`;
       return chat.continueReady ? `${chat.card} is waiting for you. It gave its status line, so Continue moves the chain on.` : `${chat.card} is waiting for you.`;
     case "ended":
-      return "The run has ended.";
+      return chat.ending ? endedLine(chat.ending) : "The run has ended.";
   }
 }
 
@@ -85,6 +98,7 @@ export function announcement(prev: ChatView | undefined, next: ChatView): string
     const first = q.questions[0]!;
     return q.questions.length > 1 ? `${q.card} asks ${q.questions.length} questions` : `${q.card} asks: ${first.header || first.question}`;
   }
+  if (next.afterRun && !prev?.afterRun) return `${statusLine(next)}${next.returned ? " Your queued message is back in the message box." : ""}`;
   if (next.phase === "waiting" && prev?.phase !== "waiting") return next.continueReady ? `${next.card} is waiting for you; Continue is ready` : `${next.card} is waiting for you`;
   if (next.returned && !prev?.returned) return "The run ended before your message was sent; it is back in the message box.";
   if (next.phase === "ended" && prev?.phase !== "ended") return "The run has ended.";

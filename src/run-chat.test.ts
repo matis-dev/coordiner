@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatMessage } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
-import { INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
+import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
 import { actOnChat, cacheFrom, createRunChat, IDLE_CHAT } from "./run-chat.ts";
 
 const question = { question: "Which \u001b[31mstore?", options: [{ label: "SQLite" }, { label: "Files (Recommended)" }] };
@@ -94,7 +94,7 @@ describe("createRunChat", () => {
     const { chat, updates } = setup(() => clock);
     chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });
     const message = { ...said("hi"), message: { content: [], usage: { cache_creation: { ephemeral_1h_input_tokens: 5, ephemeral_5m_input_tokens: 0 } } } } as unknown as SDKAssistantMessage;
-    chat.forTurn(true).onMessage(message);
+    chat.forTurn("interactive").onMessage(message);
     clock = 90;
     chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });
     assert.equal(chat.view().cache, undefined);
@@ -140,7 +140,7 @@ describe("createRunChat", () => {
 describe("createRunChat: forTurn", () => {
   it("gives an unattended turn the unattended note and Recommended answers", async () => {
     const { chat, logs, waiting } = setup();
-    const setupTurn = chat.forTurn(false);
+    const setupTurn = chat.forTurn("unattended");
     assert.equal(setupTurn.systemPromptAppend, UNATTENDED_NOTE);
     const result = await setupTurn.canUseTool("AskUserQuestion", { questions: [question] }, toolOptions());
     assert.deepEqual(result?.behavior === "allow" && result.updatedInput?.answers, { "Which \u001b[31mstore?": "Files (Recommended)" });
@@ -151,7 +151,7 @@ describe("createRunChat: forTurn", () => {
   it("gives an interactive turn the interactive note, and asks the user", async () => {
     const { chat } = setup();
     chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });
-    const setupTurn = chat.forTurn(true);
+    const setupTurn = chat.forTurn("interactive");
     assert.equal(setupTurn.systemPromptAppend, INTERACTIVE_NOTE);
     const pending = setupTurn.canUseTool("AskUserQuestion", { questions: [question] }, toolOptions());
     chat.talk.answer(chat.view().question!.id, [{ picked: [], other: "Postgres" }]);
@@ -161,10 +161,10 @@ describe("createRunChat: forTurn", () => {
 
   it("puts the turn's messages in the transcript under the card that is running, or none before any turn", () => {
     const { chat, appended } = setup();
-    chat.forTurn(false).onMessage(said("early"));
+    chat.forTurn("unattended").onMessage(said("early"));
     chat.talk.at({ card: "Plan", index: 0, session: 0, attended: false });
-    chat.forTurn(false).onMessage(said("Reading the code."));
-    chat.forTurn(false).onMessage({ type: "assistant", parent_tool_use_id: null, message: { content: [] } } as unknown as SDKAssistantMessage);
+    chat.forTurn("unattended").onMessage(said("Reading the code."));
+    chat.forTurn("unattended").onMessage({ type: "assistant", parent_tool_use_id: null, message: { content: [] } } as unknown as SDKAssistantMessage);
     assert.deepEqual(appended(), [
       { kind: "assistant", card: "", text: "early" },
       { kind: "assistant", card: "Plan", text: "Reading the code." },
@@ -176,7 +176,7 @@ describe("actOnChat", () => {
   it("passes each chat message to the run's chat, and stops the run on chatStop", async () => {
     const { chat } = setup();
     let stopped = 0;
-    const stop = () => void stopped++;
+    const stop = { stop: () => void stopped++, copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked") };
     chat.talk.at({ card: "Implement", index: 0, session: 0, attended: false });
     assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "one" }), true);
     assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "  " }), false);
@@ -191,5 +191,50 @@ describe("actOnChat", () => {
     assert.equal(actOnChat(chat.talk, stop, { type: "chatAnswer", id: "q9", picks: [{ picked: ["SQLite"] }] }), false);
     assert.equal(actOnChat(chat.talk, stop, { type: "chatStop" }), true);
     assert.equal(stopped, 1);
+  });
+
+  it("hands the actions after the run to the extension", () => {
+    const { chat } = setup();
+    const asked: string[] = [];
+    const actions = { stop: () => void asked.push("stop"), copyResume: () => void asked.push("copy"), nextChain: () => void asked.push("next") };
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatCopyResume" }), true);
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatNextChain" }), true);
+    assert.deepEqual(asked, ["copy", "next"]);
+  });
+});
+
+describe("createRunChat: the end of the run", () => {
+  it("shows how the run ended, and keeps the chat open on the last card", () => {
+    const { chat, appended, waiting } = setup();
+    chat.talk.at({ card: "Kickoff", index: 0, session: 0, attended: true });
+    chat.ended({ status: "halted", reason: "needs a \u001b[31mdecision" }, { card: "Kickoff" });
+    assert.deepEqual(appended(), [{ kind: "end", status: "halted", reason: "needs a [31mdecision" }]);
+    assert.deepEqual(chat.view().ending, { status: "halted", reason: "needs a [31mdecision" });
+    assert.deepEqual([chat.view().phase, chat.view().afterRun, chat.view().card], ["waiting", true, "Kickoff"]);
+    assert.deepEqual(waiting, [], "the run's own announcement says it ended");
+    assert.deepEqual(chat.entries(), appended());
+  });
+
+  it("closes the chat when there is no session to keep talking to", () => {
+    const { chat } = setup();
+    chat.ended({ status: "done", text: "brief" });
+    assert.deepEqual([chat.view().phase, chat.view().afterRun, chat.view().ending], ["ended", undefined, { status: "done" }]);
+  });
+
+  it("gives a turn after the run the after note, and asks the user its questions", async () => {
+    const { chat } = setup();
+    chat.ended({ status: "done", text: "" }, { card: "Kickoff" });
+    const setupTurn = chat.forTurn("after");
+    assert.equal(setupTurn.systemPromptAppend, AFTER_NOTE);
+    const pending = setupTurn.canUseTool("AskUserQuestion", { questions: [question] }, toolOptions());
+    chat.talk.answer(chat.view().question!.id, [{ picked: ["SQLite"] }]);
+    const result = await pending;
+    assert.deepEqual(result?.behavior === "allow" && result.updatedInput?.answers, { "Which \u001b[31mstore?": "SQLite" });
+  });
+
+  it("puts a failed turn after the run in the transcript, control characters stripped", () => {
+    const { chat, appended } = setup();
+    chat.failed("Kickoff", "the session failed: \u001b[31mAPI Error");
+    assert.deepEqual(appended(), [{ kind: "failed", card: "Kickoff", error: "the session failed: [31mAPI Error" }]);
   });
 });

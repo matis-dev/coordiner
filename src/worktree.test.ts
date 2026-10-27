@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addWorktree, firstCommit, initRepo, inspectRepo, MAX_NEW_FILES, prepareReview, removalCommands, removalNote, setUpRepo, uncommitted, worktreeClean, type Exec, type SetupPrompt } from "./worktree.ts";
+import { addWorktree, firstCommit, initRepo, inspectRepo, MAX_NEW_FILES, prepareReview, removalCommands, removalNote, resumeCommand, setUpRepo, uncommitted, worktreeClean, type Exec, type SetupPrompt } from "./worktree.ts";
 
 type Call = { file: string; args: string[]; cwd: string };
 
@@ -291,6 +291,20 @@ describe("removalCommands", () => {
   it("prints no command for a path with a control character", () => {
     assert.equal(removalCommands("/home/u/a\nrm -rf ~", "/home/u/a.coordiner/x", "coordiner/x"), undefined);
     assert.equal(removalCommands("/home/u/a", "/home/u/a.coordiner/x\u001b[2K", "coordiner/x"), undefined);
+  });
+});
+
+describe("resumeCommand", () => {
+  it("goes to the worktree, quoted as one argument, and resumes the session", () => {
+    const command = resumeCommand("/home/u/my app's.coordiner/a", "0c5fcc13-3a18-4d74-a6b4-e97c15b9323a")!;
+    assert.equal(command, "cd '/home/u/my app'\\''s.coordiner/a' && claude --resume 0c5fcc13-3a18-4d74-a6b4-e97c15b9323a");
+    assert.deepEqual(shellWords(command.split(" && ")[0]!), ["cd", "/home/u/my app's.coordiner/a"]);
+  });
+
+  it("prints no command for a path with a control character or a session id that is not a plain id", () => {
+    assert.equal(resumeCommand("/home/u/a\nrm -rf ~", "abc-1"), undefined);
+    assert.equal(resumeCommand("/home/u/a", "abc; rm -rf ~"), undefined);
+    assert.equal(resumeCommand("/home/u/a", ""), undefined);
   });
 });
 

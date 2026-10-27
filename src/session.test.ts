@@ -215,12 +215,12 @@ describe("runTurn", () => {
     assert.deepEqual(result, { ok: false, sessionId: "sess-1", error: "the session ended with error_max_turns." });
   });
 
-  it("treats a success result flagged is_error as a failure", async () => {
+  it("treats a success result flagged is_error as a failure and reports its text", async () => {
     const { query } = fakeQuery(async function* () {
       yield init();
-      yield msg({ type: "result", subtype: "success", is_error: true, session_id: "sess-1", result: "boom" });
+      yield msg({ type: "result", subtype: "success", is_error: true, session_id: "sess-1", result: "API Error: 400 boom" });
     });
-    assert.equal((await runTurn({ ...base, query })).ok, false);
+    assert.deepEqual(await runTurn({ ...base, query }), { ok: false, sessionId: "sess-1", error: "the session failed: API Error: 400 boom" });
   });
 
   it("reports a stream that ends without a result", async () => {

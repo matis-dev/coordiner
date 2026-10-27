@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { MAX_ENTRIES } from "./chat-logic.ts";
-import { entriesFrom, Transcript, type Entry } from "./transcript.ts";
+import { endEntry, entriesFrom, Transcript, type Entry } from "./transcript.ts";
 
 // Fixtures carry only the fields entriesFrom reads.
 const assistant = (...content: object[]) => ({ type: "assistant", parent_tool_use_id: null, message: { content } }) as unknown as SDKAssistantMessage;
@@ -68,5 +68,19 @@ describe("Transcript", () => {
     transcript.add([said(1)]);
     transcript.entries().push(said(2));
     assert.deepEqual(transcript.entries(), [said(1)]);
+  });
+});
+
+describe("endEntry", () => {
+  it("carries the outcome and its reason, with control characters stripped", () => {
+    assert.deepEqual(endEntry({ status: "halted", reason: "needs a\u001b[31m decision" }), { kind: "end", status: "halted", reason: "needs a[31m decision" });
+    assert.deepEqual(endEntry({ status: "refused", reason: "no skills" }), { kind: "end", status: "refused", reason: "no skills" });
+    assert.deepEqual(endEntry({ status: "failed", error: "the session failed: API Error: 400" }), { kind: "end", status: "failed", reason: "the session failed: API Error: 400" });
+  });
+
+  it("has no reason for an outcome without one", () => {
+    assert.deepEqual(endEntry({ status: "done", text: "brief" }), { kind: "end", status: "done" });
+    assert.deepEqual(endEntry({ status: "stopped" }), { kind: "end", status: "stopped" });
+    assert.deepEqual(endEntry({ status: "no-changes" }), { kind: "end", status: "no-changes" });
   });
 });

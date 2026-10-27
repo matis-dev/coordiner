@@ -154,6 +154,8 @@ export async function runTurn({ prompt, cwd, model, effort, requiredCommands, ca
         sessionId = message.session_id;
         // Returning here also avoids the throw query() raises after an error result.
         if (message.subtype === "success" && !message.is_error) return { ok: true, sessionId, model: reportedModel, resultText: message.result, commands };
+        // A "success" flagged is_error carries the reason (an API error, an outdated claude) in its result text.
+        if (message.subtype === "success" && message.result) return { ok: false, sessionId, error: `the session failed: ${message.result}` };
         return { ok: false, sessionId, error: `the session ended with ${message.subtype}.` };
       }
     }

@@ -278,6 +278,77 @@ describe("run chat: pause, continue and stop", () => {
   });
 });
 
+describe("run chat: after the run", () => {
+  const after = (patch: Partial<ChatView> = {}) => view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "halted", reason: "needs you" }, ...patch });
+
+  it("shows how the run ended and a failed turn in the transcript, not as the dropped note", async () => {
+    const page = await open();
+    page.reset(view());
+    page.append([{ kind: "end", status: "halted", reason: "needs you" }, { kind: "failed", card: "Kickoff", error: "the session failed: API Error: 400" }]);
+    const [end, failed] = page.entries();
+    assert.equal(end!.textContent, "The run halted: needs you.");
+    assert.equal(end!.dataset.dropped, undefined);
+    assert.equal(failed!.textContent, "Kickoff could not answer: the session failed: API Error: 400");
+  });
+
+  it("swaps Pause and Continue for the actions after the run, and says the chat stays open", async () => {
+    const page = await open();
+    page.reset(view({ card: "Kickoff" }));
+    assert.equal(page.button("Copy resume command").hidden, true);
+    assert.equal(page.button("Start the next chain here").hidden, true);
+    page.update(after());
+    assert.equal(page.button("Pause after this turn").hidden, true);
+    assert.equal(page.button("Continue the chain").hidden, true);
+    assert.equal(page.button("Copy resume command").hidden, false);
+    assert.equal(page.button("Start the next chain here").hidden, false);
+    assert.equal(page.line(), "The run halted: needs you. You can keep talking to Kickoff.");
+    assert.equal(page.status(), "The run halted: needs you. You can keep talking to Kickoff.");
+  });
+
+  it("sends a message to the last session, and ends the chat with End chat", async () => {
+    const page = await open();
+    page.reset(after());
+    page.input().value = "why that tier?";
+    page.button("Send").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "why that tier?" });
+    page.button("End chat").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatStop" });
+  });
+
+  it("asks the extension to copy the resume command, keeping focus and saying it was copied", async () => {
+    const page = await open();
+    page.reset(after());
+    const copy = page.button("Copy resume command");
+    copy.focus();
+    copy.click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatCopyResume" });
+    assert.equal(page.doc.activeElement, copy);
+    assert.equal(page.status(), "Resume command copied");
+  });
+
+  it("asks for the next chain here, and puts focus in the message box for when the pick closes", async () => {
+    const page = await open();
+    page.reset(after());
+    page.button("Start the next chain here").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatNextChain" });
+    assert.equal(page.doc.activeElement, page.input());
+  });
+
+  it("moves focus to the message box when the run ends while focus was on a control that goes away, and not from outside", async () => {
+    const page = await open();
+    page.reset(view({ card: "Kickoff" }));
+    page.button("Pause after this turn").focus();
+    page.update(after());
+    assert.equal(page.doc.activeElement, page.input());
+
+    const outside = await open();
+    outside.reset(view({ card: "Kickoff" }));
+    outside.doc.body.focus();
+    outside.update(after());
+    assert.notEqual(outside.doc.activeElement, outside.input());
+  });
+});
+
 describe("run chat: answering a question", () => {
   const waiting = (patch: Partial<ChatView> = {}) => view({ phase: "waiting", card: "Brainstorm", attended: true, question, ...patch });
 

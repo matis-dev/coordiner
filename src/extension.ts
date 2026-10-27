@@ -8,22 +8,23 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { parseStories, slugify, storyText, type Story } from "./backlog.ts";
 import { ChainStore, type StoreFs } from "./chain-store.ts";
-import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
+import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type Effort, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
 import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
-import { createJournal, journalFileName } from "./journal.ts";
-import { fillInput, remainingCommands, runChain, type Outcome, type RunEvent } from "./run.ts";
+import { createJournal, journalFileName, type JournalRecord } from "./journal.ts";
+import { replyOf } from "./protocol.ts";
+import { fillInput, remainingCommands, runChain, talkOn, type AfterAsk, type Outcome, type RunEvent } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
-import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type RunChat } from "./run-chat.ts";
-import { listCommands, runTurn, type TurnControl } from "./session.ts";
+import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type RunChat, type TurnMode } from "./run-chat.ts";
+import { listCommands, runTurn, type TurnControl, type TurnResult } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
 import { commonEfforts, modelOptions, mskillsPresent, palette, type ModelOption, type PaletteEntry } from "./skills.ts";
 import { plain } from "./text.ts";
 import { applyTask, liveProcess, stopLine, type Process } from "./processes.ts";
 import { finishedMessage, nothingToReviewMessage, pickedChain, processItem, startItems, stepItem, type StepView } from "./view.ts";
-import { addWorktree, prepareReview, removalNote, setUpRepo, type Exec, type RepoInfo, type SetupPrompt, type Worktree } from "./worktree.ts";
+import { addWorktree, prepareReview, removalNote, resumeCommand, setUpRepo, type Exec, type RepoInfo, type SetupPrompt, type Worktree } from "./worktree.ts";
 
 const run = promisify(execFile);
 const exec: Exec = (file, args, options) => run(file, args, options);
@@ -87,6 +88,7 @@ const isExecutable = (path: string) => access(path, constants.X_OK).then(() => t
 const bundledClaude = () => bundledClaudePath(vscode.extensions.getExtension("anthropic.claude-code")?.extensionPath, process.platform);
 const claudeFor = (config: vscode.WorkspaceConfiguration, env: Record<string, string | undefined>) => findClaude(config.get<string>("claudePath", ""), env, homedir(), isExecutable, bundledClaude());
 const openFolder = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+const exists = (path: string) => access(path).then(() => true, () => false);
 const noTools = async () => ({ behavior: "deny" as const, message: "This check uses no tools." });
 
 async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<void> {
@@ -237,12 +239,27 @@ async function announce(outcome: Outcome, heading: string, worktree: Worktree, c
 }
 
 // The run's chat outlives the run, so the editor still shows the last transcript after it ends, until the next run starts.
-// `stopProcess` exists while a run is going; it acts on the turn running at the time.
-type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat; stopProcess?: (process: Process) => Promise<void> };
+// `stopProcess` exists while a turn can run; it acts on the turn running at the time. `after` is the chat after the run.
+type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat; stopProcess?: (process: Process) => Promise<void>; after?: After };
+
+// Where a next chain runs: the worktree of the run before, that run's name, and its last reply, which becomes the input.
+type Here = { worktree: Worktree; name: string; slug: string; card: string; input: string };
+
+// The run's last session, which the user keeps talking to after the run until they end the chat or confirm a new run.
+type After = { abort: AbortController; chat: RunChat; here: Here; sessionId: string };
+
+// The session the run's last turn ran in, on its model and effort, and the latest reply it gave.
+type LastTurn = { sessionId: string; model: string; effort?: Effort; card: string; reply: string };
+
+type Journal = (record: JournalRecord) => Promise<void>;
+
+// A run the user confirmed: the filled chain, its name, and a worktree whose setup is done.
+type Place = { chain: Chain; name: string; slug: string; worktree: Worktree; env: Record<string, string | undefined>; claudePath: string; models: Models; journal: Journal };
 
 type RunContext = {
   state: RunState;
-  // Held from the moment Run is pressed until the run ends; `state.abort` only exists once the sessions start.
+  // Held from the moment Run is pressed until the run ends, and by each turn of the chat after it; `state.abort` only exists
+  // once the sessions start.
   slot: OneRun;
   provider: StepsProvider;
   reveal: (step: RunItem) => void;
@@ -255,8 +272,24 @@ type RunContext = {
   needsYou: (card: string) => void;
 };
 
-async function runChainCommand(chain: Chain, ctx: RunContext): Promise<void> {
-  if (!(await ctx.slot.run(() => startRun(chain, ctx)))) await vscode.window.showWarningMessage("Coordiner: a run is already in progress. Stop it first.");
+// The run's announcement waits on a notification, so it comes after the slot is given back: the chat after the run needs the slot.
+async function runChainCommand(chain: Chain, ctx: RunContext, here?: Here): Promise<void> {
+  let announce: (() => Promise<void>) | undefined;
+  if (!(await ctx.slot.run(async () => void (announce = await startRun(chain, ctx, here))))) {
+    await vscode.window.showWarningMessage("Coordiner: a run is already in progress. Stop it first.");
+    return;
+  }
+  await announce?.();
+}
+
+// Ends the chat after the last run, if one is open: its session gets no more turns.
+function endAfter(state: RunState): void {
+  const { after } = state;
+  if (!after) return;
+  state.after = undefined;
+  state.stopProcess = undefined;
+  after.abort.abort();
+  after.chat.talk.end();
 }
 
 // setUpRepo's questions, each a modal that agrees only through its button.
@@ -289,72 +322,34 @@ async function readyRepo(folder: string, output: vscode.OutputChannel): Promise<
   return undefined;
 }
 
-async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
-  const { state, provider, reveal, output, storage } = ctx;
-  const check = runnable(chain);
-  if (!check.ok) {
-    await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${check.reason}`);
-    return;
-  }
-  const folder = openFolder();
-  if (folder === undefined) {
-    await vscode.window.showErrorMessage("Coordiner: open a folder first. Sessions run in the open folder.");
-    return;
-  }
-  let repo;
-  try {
-    repo = await readyRepo(folder, output);
-  } catch (error) {
-    await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
-    return;
-  }
-  if (!repo) return;
+// What the sessions run with: the editor's environment and the claude to start.
+async function sessionTools(): Promise<{ env: Record<string, string | undefined>; claudePath: string; models: Models } | undefined> {
   const config = vscode.workspace.getConfiguration("coordiner");
   const env = sessionEnvFor(config);
   const claude = await claudeFor(config, env);
   if (!claude.ok) {
     await vscode.window.showErrorMessage(`Coordiner: ${claude.error}`);
-    return;
+    return undefined;
   }
-  const input = await askInput(inputOf(chain));
-  if (!input) return;
-  const filled = fillInput(chain, input.text);
-  if (!filled.ok) {
-    await vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
-    return;
-  }
-  let slug;
-  try {
-    slug = slugify(input.name);
-  } catch (error) {
-    await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
-    return;
-  }
+  return { env, claudePath: claude.path, models: readModels(config) };
+}
 
-  // The setup command comes from the lockfile, never from the repo's own files; it is shown on every run.
-  const setup = proposeSetup(await readdir(repo.root));
+// What every run's confirm modal says about how the chain runs.
+function runNotes(chain: Chain): string[] {
   const sessions = chain.sessions.map((s, i) => `${i + 1}. ${s.cards.map((c) => plain(c.label)).join(" → ")}`).join("\n");
-  const detail = [
+  return [
     chain.sessions.some((s) => s.cards.some((c) => c.pause))
       ? "Cards that pause wait for you in the chat under the chains editor. Every other card runs unattended: its questions are answered with the Recommended option and logged."
       : "The chain runs unattended: questions are answered with the Recommended option and logged.",
     "In the chat you can message any card (it gets your message with its next turn) or pause it after its turn. Anything auto mode will not approve is denied, and so is any git write or GitHub publish.",
     `Each session starts a fresh conversation:\n${sessions}`,
     "Keep this computer awake: the run stops if VS Code closes.",
-    repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
-    setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
-  ].filter(Boolean).join("\n\n");
-  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, { modal: true, detail }, "Run");
-  if (choice !== "Run") return;
+  ];
+}
 
-  const added = await addWorktree(repo.root, slug, { exec, exists: (path) => access(path).then(() => true, () => false) });
-  if (!added.ok) {
-    if (added.detail) output.appendLine(added.detail);
-    await vscode.window.showErrorMessage(`Coordiner: ${added.reason}`);
-    return;
-  }
-  output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
-  const models = readModels(config);
+// A new run's journal file, which begins with where the run happens.
+function startJournal(ctx: RunContext, slug: string, start: Extract<JournalRecord, { type: "run-started" }>): Journal {
+  const { storage, output } = ctx;
   const journalDir = join(storage.fsPath, "journal");
   const journalFile = join(journalDir, journalFileName(slug, new Date()));
   const journal = createJournal(
@@ -365,25 +360,129 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
     () => new Date(),
     (error) => output.appendLine(`Journal not written to ${journalFile}: ${error instanceof Error ? error.message : String(error)}`),
   );
-  void journal({ type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models });
+  void journal(start);
   output.appendLine(`Journal: ${journalFile}`);
+  return journal;
+}
+
+// Returns the run's announcement, for after the slot is given back; nothing when the run never started.
+async function startRun(chain: Chain, ctx: RunContext, here?: Here): Promise<(() => Promise<void>) | undefined> {
+  const check = runnable(chain);
+  if (!check.ok) {
+    await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${check.reason}`);
+    return undefined;
+  }
+  const place = here ? await confirmHere(chain, here, ctx) : await prepareWorktree(chain, ctx);
+  return place && runIn(place, ctx);
+}
+
+// A new worktree for the run: the repo, the chain's input, the confirm modal, then the worktree and its setup.
+async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | undefined> {
+  const { output } = ctx;
+  const folder = openFolder();
+  if (folder === undefined) {
+    await vscode.window.showErrorMessage("Coordiner: open a folder first. Sessions run in the open folder.");
+    return undefined;
+  }
+  let repo;
+  try {
+    repo = await readyRepo(folder, output);
+  } catch (error) {
+    await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
+    return undefined;
+  }
+  if (!repo) return undefined;
+  const tools = await sessionTools();
+  if (!tools) return undefined;
+  const input = await askInput(inputOf(chain));
+  if (!input) return undefined;
+  const filled = fillInput(chain, input.text);
+  if (!filled.ok) {
+    await vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
+    return undefined;
+  }
+  let slug;
+  try {
+    slug = slugify(input.name);
+  } catch (error) {
+    await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
+    return undefined;
+  }
+
+  // The setup command comes from the lockfile, never from the repo's own files; it is shown on every run.
+  const setup = proposeSetup(await readdir(repo.root));
+  const detail = [
+    ...runNotes(chain),
+    repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
+    setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
+  ].filter(Boolean).join("\n\n");
+  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, { modal: true, detail }, "Run");
+  if (choice !== "Run") return undefined;
+  endAfter(ctx.state);
+
+  const added = await addWorktree(repo.root, slug, { exec, exists });
+  if (!added.ok) {
+    if (added.detail) output.appendLine(added.detail);
+    await vscode.window.showErrorMessage(`Coordiner: ${added.reason}`);
+    return undefined;
+  }
+  output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
+  const worktree = { root: repo.root, path: added.path, branch: added.branch };
+  const journal = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models: tools.models });
   if (setup) {
-    const result = await runSetup(setup, added.path, env, exec);
+    const result = await runSetup(setup, added.path, tools.env, exec);
     if (!result.ok) {
       output.appendLine(result.detail);
       void journal({ type: "outcome", outcome: { status: "failed", error: result.message } });
       await vscode.window.showErrorMessage(`Coordiner: ${result.message}`);
-      return;
+      return undefined;
     }
   }
+  return { chain: filled.chain, name: input.name, slug, worktree, ...tools, journal };
+}
 
+// A next chain in the worktree of the run before: no new worktree and no setup, and its input is that run's last reply.
+async function confirmHere(chain: Chain, here: Here, ctx: RunContext): Promise<Place | undefined> {
+  const { worktree, card } = here;
+  if (!(await exists(worktree.path))) {
+    await vscode.window.showErrorMessage(`Coordiner: ${plain(worktree.path)} no longer exists, so ${plain(chain.name)} cannot run there.`);
+    return undefined;
+  }
+  const tools = await sessionTools();
+  if (!tools) return undefined;
+  const takesInput = inputOf(chain) !== undefined;
+  if (takesInput && here.input.trim() === "") {
+    await vscode.window.showErrorMessage(`Coordiner: ${plain(card)} gave no reply to start ${plain(chain.name)} from.`);
+    return undefined;
+  }
+  const filled = fillInput(chain, here.input);
+  if (!filled.ok) {
+    await vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
+    return undefined;
+  }
+  const detail = [
+    `In the same worktree, ${worktree.path}. It keeps the run before's changes, uncommitted, and its setup is already done.`,
+    takesInput ? `Input: ${plain(card)}'s last reply, ${here.input.length} characters.` : "This chain takes no input.",
+    ...runNotes(chain),
+  ].join("\n\n");
+  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} in the same worktree?`, { modal: true, detail }, "Run");
+  if (choice !== "Run") return undefined;
+  endAfter(ctx.state);
+  const journal = startJournal(ctx, here.slug, { type: "run-started", chain: chain.name, story: here.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models });
+  return { chain: filled.chain, name: here.name, slug: here.slug, worktree, ...tools, journal };
+}
+
+// Runs the chain in its place, then leaves the chat open on the last session. Returns the run's announcement.
+async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>> {
+  const { state, provider, reveal, output } = ctx;
+  const { chain, name, worktree, env, claudePath, models, journal } = place;
   const abort = new AbortController();
   const log = (line: string) => {
     output.appendLine(line);
     void journal({ type: "log", line });
   };
   const chat = createRunChat({
-    title: `${plain(chain.name)} · ${plain(input.name)}`,
+    title: `${plain(chain.name)} · ${plain(name)}`,
     post: ctx.postChat,
     record: (r) => void journal(r),
     moved: ctx.onRunChange,
@@ -405,7 +504,7 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
   const required = requiredSkills(chain);
   // What can act on the turn that is running; the turn's processes are listed only while it runs.
   let control: TurnControl | undefined;
-  state.stopProcess = async (process) => {
+  const stopProcess = async (process: Process) => {
     if (!control) return;
     try {
       await control.stopTask(process.id);
@@ -414,42 +513,80 @@ async function startRun(chain: Chain, ctx: RunContext): Promise<void> {
       output.appendLine("Coordiner: that process had already ended.");
     }
   };
-  let outcome: Outcome;
+  state.stopProcess = stopProcess;
+  let last: LastTurn | undefined;
+  const turn = async ({ mode, ...request }: AfterAsk & { mode: TurnMode }, signal: AbortSignal): Promise<TurnResult> => {
+    const card = chat.talk.snapshot().card ?? "";
+    let result: TurnResult;
+    try {
+      result = await runTurn({
+        ...request,
+        ...chat.forTurn(mode),
+        cwd: worktree.path,
+        env,
+        claudePath,
+        requiredCommands: required,
+        signal,
+        onGuard: log,
+        onStarted: (c) => (control = c),
+        onTask: (message) => provider.setProcesses(applyTask(provider.processes, message)),
+      });
+    } finally {
+      control = undefined;
+      provider.setProcesses([]);
+    }
+    if (result.sessionId) {
+      const reply = result.ok ? replyOf(result.resultText) : (last?.reply ?? "");
+      last = { sessionId: result.sessionId, model: request.model, ...(request.effort ? { effort: request.effort } : {}), card, reply };
+    }
+    return result;
+  };
+  let outcome: Outcome | undefined;
   try {
-    outcome = await runChain(filled.chain, {
-      runTurn: async ({ interactive, ...request }) => {
-        try {
-          return await runTurn({
-            ...request,
-            ...chat.forTurn(interactive),
-            cwd: added.path,
-            env,
-            claudePath: claude.path,
-            requiredCommands: required,
-            signal: abort.signal,
-            onGuard: log,
-            onStarted: (c) => (control = c),
-            onTask: (message) => provider.setProcesses(applyTask(provider.processes, message)),
-          });
-        } finally {
-          control = undefined;
-          provider.setProcesses([]);
-        }
-      },
+    outcome = await runChain(chain, {
+      runTurn: ({ interactive, ...request }) => turn({ ...request, mode: interactive ? "interactive" : "unattended" }, abort.signal),
       models,
       emit,
       signal: abort.signal,
       talk: chat.talk,
-      prepareReview: () => prepareReview(added.path, exec),
+      prepareReview: () => prepareReview(worktree.path, exec),
     });
   } finally {
-    chat.talk.end();
+    if (!outcome) chat.talk.end();
     state.abort = undefined;
     state.stopProcess = undefined;
     ctx.onRunChange();
   }
   void journal({ type: "outcome", outcome });
-  await announce(outcome, input.name, { root: repo.root, path: added.path, branch: added.branch }, filled.chain, output);
+  chat.ended(outcome, last && { card: last.card });
+  if (last) talkAfter(last, { chat, place, ctx, stopProcess, turn });
+  const ended = outcome;
+  return () => announce(ended, name, worktree, chain, output);
+}
+
+// The chat after the run: each message is a turn of the run's last session, and each turn holds the slot, so a new run waits
+// for it. A failed turn is shown in the transcript and the chat stays open.
+function talkAfter(
+  last: LastTurn,
+  { chat, place, ctx, stopProcess, turn }: { chat: RunChat; place: Place; ctx: RunContext; stopProcess: RunState["stopProcess"]; turn: (request: AfterAsk & { mode: TurnMode }, signal: AbortSignal) => Promise<TurnResult> },
+): void {
+  const abort = new AbortController();
+  const here: Here = { worktree: place.worktree, name: place.name, slug: place.slug, card: last.card, input: last.reply };
+  const after: After = { abort, chat, here, sessionId: last.sessionId };
+  Object.assign(ctx.state, { after, stopProcess });
+  const runAfterTurn = async (request: AfterAsk): Promise<TurnResult> => {
+    let ran: TurnResult | undefined;
+    await ctx.slot.run(async () => void (ran = await turn({ ...request, mode: "after" }, abort.signal)));
+    const result: TurnResult = ran ?? { ok: false, error: "a new run is starting, so the message was not sent." };
+    if (result.ok) {
+      after.sessionId = result.sessionId;
+      here.input = replyOf(result.resultText);
+    } else if (!abort.signal.aborted) {
+      chat.failed(last.card, result.error);
+    }
+    return result;
+  };
+  void talkOn({ runTurn: runAfterTurn, talk: chat.talk, signal: abort.signal, card: last.card, sessionId: last.sessionId, model: last.model, ...(last.effort ? { effort: last.effort } : {}) });
 }
 
 // ── Chains editor ─────────────────────────────────────────────────────────────
@@ -525,7 +662,7 @@ class ChainsEditor {
 
   // The same checks for Run in the editor and for Start…. Start… can come before the editor was ever opened, so the skills are
   // listed first: a missing one is caught here, not after the worktree and its setup. If listing fails, the session checks them.
-  async run(chain: Chain): Promise<void> {
+  async run(chain: Chain, here?: Here): Promise<void> {
     if (!this.palette) await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: "Coordiner: listing skills" }, () => this.discover());
     // The webview disables Run on its own, but its state is not trusted.
     const reason = runReason(chain, { running: this.ctx.slot.busy(), ...this.discovered() });
@@ -533,7 +670,7 @@ class ChainsEditor {
       await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${reason}`);
       return;
     }
-    await runChainCommand(structuredClone(chain), this.ctx);
+    await runChainCommand(structuredClone(chain), this.ctx, here);
   }
 
   // What discovery found, for the Run checks here and in the webview. The tier efforts follow the settings as they are now.
@@ -615,14 +752,28 @@ class ChainsEditor {
     }
   }
 
-  // The chat acts only on the run that is going; Talk itself refuses what does not fit the moment (a stale question, an empty message).
+  // The chat acts only on the run that is going, or on the chat after it; Talk itself refuses what does not fit the moment (a stale
+  // question, an empty message).
   private chat(message: ChatAction): void {
-    const { chat, abort } = this.ctx.state;
-    if (!chat || !abort) {
+    const { state } = this.ctx;
+    const { chat, abort, after } = state;
+    if (!chat || (!abort && !after)) {
       this.ctx.output.appendLine("Coordiner: ignored a chat message; no run is going.");
       return;
     }
-    if (!actOnChat(chat.talk, () => abort.abort(), message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);
+    const actions = {
+      stop: () => (abort ? abort.abort() : endAfter(state)),
+      copyResume: () => void (after && this.copyResume(after)),
+      nextChain: () => void (after && startCommand(this, after.here)),
+    };
+    if (!actOnChat(chat.talk, actions, message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);
+  }
+
+  // Built here from the worktree and the session id, never from the page.
+  private async copyResume({ here, sessionId }: After): Promise<void> {
+    const command = resumeCommand(here.worktree.path, sessionId);
+    if (command) await vscode.env.clipboard.writeText(command);
+    else await vscode.window.showWarningMessage(`Coordiner: no resume command for this session; its worktree path has a control character. Run claude --resume ${sessionId} in the worktree.`);
   }
 
   // Asks a session for its skills without running a model turn; once per window, or again on "Try again".
@@ -654,14 +805,15 @@ class ChainsEditor {
   }
 }
 
-async function startCommand(editor: ChainsEditor): Promise<void> {
+// With `here`, the picked chain runs in that worktree instead of a new one.
+async function startCommand(editor: ChainsEditor, here?: Here): Promise<void> {
   const { templates, chains } = await editor.startable();
   const items = startItems(templates, chains).map((i): vscode.QuickPickItem & { id?: string } =>
     "separator" in i ? { label: i.separator, kind: vscode.QuickPickItemKind.Separator } : i,
   );
   const picked = await vscode.window.showQuickPick(items, { title: "Start", placeHolder: "A template, a single skill, or one of your chains" });
   const chain = pickedChain(picked?.id, templates, chains);
-  if (chain) await editor.run(chain);
+  if (chain) await editor.run(chain, here);
 }
 
 export function activate(context: vscode.ExtensionContext): void {

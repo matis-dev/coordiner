@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { INTERACTIVE_NOTE, parseStatus, tierOf, UNATTENDED_NOTE, withoutStatus } from "./protocol.ts";
+import { AFTER_NOTE, INTERACTIVE_NOTE, parseStatus, replyOf, tierOf, UNATTENDED_NOTE, withoutStatus } from "./protocol.ts";
 
 describe("parseStatus", () => {
   it("reads NEXT, DONE and HALT from the last line", () => {
@@ -64,5 +64,19 @@ describe("withoutStatus", () => {
 
   it("returns empty text when there is only a status line", () => {
     assert.equal(withoutStatus("COORDINER: DONE"), "");
+  });
+});
+
+describe("replyOf", () => {
+  it("drops a status line, and keeps a reply without one whole", () => {
+    assert.equal(replyOf("Profile written.\nCOORDINER: NEXT Standard"), "Profile written.");
+    assert.equal(replyOf("Two questions first.\nWhich store?\n"), "Two questions first.\nWhich store?");
+  });
+});
+
+describe("AFTER_NOTE", () => {
+  it("says the chain has ended and no status line is needed", () => {
+    assert.match(AFTER_NOTE, /chain has ended/);
+    assert.match(AFTER_NOTE, /No COORDINER status line is needed/);
   });
 });

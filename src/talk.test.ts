@@ -231,3 +231,49 @@ describe("Talk: the end of the run", () => {
     assert.equal(talk.takeQueued("Implement"), "one");
   });
 });
+
+describe("Talk: the chat after the run", () => {
+  it("stays waiting on the last card, attended, and hands queued messages back as a plain end does", () => {
+    const { talk, last } = running("Kickoff");
+    talk.send("one");
+    talk.end({ after: { card: "Kickoff" } });
+    assert.deepEqual(last(), { phase: "waiting", card: "Kickoff", index: 0, session: 0, attended: true, afterRun: true, queued: [], continueReady: false, pausePending: false, returned: "one" });
+  });
+
+  it("sends each message as the next turn, and queues one sent while that turn runs", async () => {
+    const { talk, last, delivered } = running("Kickoff");
+    talk.end({ after: { card: "Kickoff" } });
+    const signal = new AbortController().signal;
+    const move = talk.waitForYou({ card: "Kickoff", ready: false, signal });
+    assert.equal(talk.send("why that tier?"), true);
+    assert.deepEqual(await move, { kind: "message", text: "why that tier?" });
+    assert.equal(last().phase, "running");
+    talk.send("and the risks?");
+    assert.deepEqual(await talk.waitForYou({ card: "Kickoff", ready: false, signal }), { kind: "message", text: "and the risks?" });
+    assert.deepEqual(delivered, [["Kickoff", "why that tier?"], ["Kickoff", "and the risks?"]]);
+  });
+
+  it("ignores Continue, since no chain follows", () => {
+    const { talk, snapshots } = running("Kickoff");
+    talk.end({ after: { card: "Kickoff" } });
+    let settled = false;
+    void talk.waitForYou({ card: "Kickoff", ready: false, signal: new AbortController().signal }).then(() => (settled = true));
+    const count = snapshots.length;
+    talk.continue();
+    assert.equal(snapshots.length, count);
+    return Promise.resolve().then(() => assert.equal(settled, false));
+  });
+
+  it("settles as stopped on abort, and a plain end then closes the chat", async () => {
+    const { talk, last } = running("Kickoff");
+    talk.end({ after: { card: "Kickoff" } });
+    const abort = new AbortController();
+    const move = talk.waitForYou({ card: "Kickoff", ready: false, signal: abort.signal });
+    abort.abort();
+    assert.deepEqual(await move, { kind: "stopped" });
+    talk.end();
+    assert.equal(last().phase, "ended");
+    assert.equal(last().afterRun, undefined);
+    assert.equal(talk.send("hello"), false);
+  });
+});

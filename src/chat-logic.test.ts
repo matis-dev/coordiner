@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import { announcement, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, destination, entriesAnnouncement, firstUnanswered, heightForKey, heightFromPointer, savedHeight, statusLine, cacheLabel } from "./chat-logic.ts";
+import { announcement, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, destination, endedLine, entriesAnnouncement, firstUnanswered, heightForKey, heightFromPointer, savedHeight, statusLine, cacheLabel } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -60,6 +60,38 @@ describe("what the chat allows", () => {
     assert.equal(canPause(view({ attended: true })), false);
     assert.equal(canPause(view({ pausePending: true })), false);
     assert.equal(canPause(view({ phase: "waiting" })), false);
+  });
+
+  it("sends to the chat after the run, and never pauses it", () => {
+    const after = view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true });
+    assert.equal(canSend(after), true);
+    assert.equal(canSend({ ...after, phase: "running" }), true);
+    assert.equal(canPause({ ...after, phase: "running" }), false);
+  });
+});
+
+describe("the end of the run", () => {
+  it("says how the run ended in one sentence, with the reason and without a doubled full stop", () => {
+    assert.equal(endedLine({ status: "done" }), "The run is done.");
+    assert.equal(endedLine({ status: "halted", reason: "the plan reserves the schema change." }), "The run halted: the plan reserves the schema change.");
+    assert.equal(endedLine({ status: "failed", reason: "the session ended with error_max_turns." }), "The run failed: the session ended with error_max_turns.");
+    assert.deepEqual((["no-changes", "stopped", "refused"] as const).map((status) => endedLine({ status })), ["The run found nothing to review.", "The run was stopped.", "The run was refused."]);
+  });
+
+  it("offers the chat after the run in the status line, and keeps how it ended once the chat closes", () => {
+    const after = view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "halted", reason: "needs you" } });
+    assert.equal(statusLine(after), "The run halted: needs you. You can keep talking to Kickoff.");
+    assert.equal(statusLine({ ...after, ending: undefined }), "The run has ended. You can keep talking to Kickoff.");
+    assert.equal(statusLine({ ...after, phase: "running" }), "Kickoff is working on your message…");
+    assert.equal(statusLine(view({ phase: "ended", ending: { status: "done" } })), "The run is done.");
+  });
+
+  it("announces the chat after the run once, then each wait as a pausing card does, and says when a queued message came back", () => {
+    const after = view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "done" } });
+    assert.equal(announcement(view(), after), "The run is done. You can keep talking to Kickoff.");
+    assert.equal(announcement(view(), { ...after, returned: "x" }), "The run is done. You can keep talking to Kickoff. Your queued message is back in the message box.");
+    assert.equal(announcement(after, after), undefined);
+    assert.equal(announcement({ ...after, phase: "running" }, after), "Kickoff is waiting for you");
   });
 });
 

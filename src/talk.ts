@@ -27,6 +27,8 @@ export type TalkSnapshot = {
   pausePending: boolean;
   // Messages still queued when the run ended, joined; they go back to the user.
   returned?: string;
+  // The run has ended and the chat stays on its last session: each message is a turn of it (talkOn).
+  afterRun?: boolean;
 };
 
 export type TalkHooks = {
@@ -126,13 +128,15 @@ export class Talk {
     });
   }
 
-  // The run is over: nothing more is sent, and what was still queued goes back to the user.
-  end(): void {
+  // The run is over, and what was still queued goes back to the user. With `after`, the chat stays open on the run's last session,
+  // waiting for the user as `after.card`; otherwise nothing more is sent.
+  end({ after }: { after?: { card: string } } = {}): void {
     const returned = this.state.queued.map((q) => q.text).join("\n\n");
     this.closeQuestion()?.reject(new Error("the run has stopped"));
-    const { nextCard: _gone, nextSession: _old, ...rest } = this.state;
-    this.update({ ...rest, phase: "ended", attended: false, queued: [], continueReady: false, pausePending: false, ...(returned ? { returned } : {}) });
     this.waiter?.settle({ kind: "stopped" });
+    const { nextCard: _gone, nextSession: _old, afterRun: _was, ...rest } = this.state;
+    const open = after ? ({ phase: "waiting", card: after.card, attended: true, afterRun: true } as const) : ({ phase: "ended", attended: false } as const);
+    this.update({ ...rest, ...open, queued: [], continueReady: false, pausePending: false, ...(returned ? { returned } : {}) });
   }
 
   // ── The user, through the chat ──────────────────────────────────────────────
@@ -161,7 +165,9 @@ export class Talk {
     this.update({ ...this.state, pausePending: true });
   }
 
+  // After the run there is no chain to continue.
   continue(): void {
+    if (this.state.afterRun) return;
     this.waiter?.settle({ kind: "continue" });
   }
 

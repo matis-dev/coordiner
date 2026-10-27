@@ -123,6 +123,13 @@ export function removalCommands(root: string, path: string, branch: string): str
   return [`git -C ${quote(root)} worktree remove ${quote(path)}`, `git -C ${quote(root)} branch -D ${quote(branch)}`];
 }
 
+// The line that takes over a session by hand, for the user to paste. None for a path with a control character, or a session id
+// that is not the plain id claude gives.
+export function resumeCommand(path: string, sessionId: string): string | undefined {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(path) || !/^[A-Za-z0-9-]{1,100}$/.test(sessionId)) return undefined;
+  return `cd ${quote(path)} && claude --resume ${sessionId}`;
+}
+
 // Git is called with argument arrays only, and the slug is re-checked here so a caller bug cannot reach git as an option or a path.
 export async function addWorktree(root: string, slug: string, deps: { exec: Exec; exists(path: string): Promise<boolean> }): Promise<WorktreeResult> {
   if (!SLUG.test(slug)) return { ok: false, reason: "The story name is not a safe branch name." };

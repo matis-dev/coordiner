@@ -41,6 +41,15 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     input.focus();
   } }, "Continue the chain");
   const stopButton = el("button", { type: "button", onclick: () => logic.canSend(chat) && vscode.postMessage({ type: "chatStop" }) }, "Stop run");
+  // After the run. The extension builds the command and knows the worktree; the page only asks.
+  const copyButton = el("button", { type: "button", hidden: true, onclick: () => {
+    vscode.postMessage({ type: "chatCopyResume" });
+    announce("Resume command copied");
+  } }, "Copy resume command");
+  const nextButton = el("button", { type: "button", hidden: true, onclick: () => {
+    vscode.postMessage({ type: "chatNextChain" });
+    input.focus();
+  } }, "Start the next chain here");
   const body = el(
     "div",
     { id: "chat-body" },
@@ -49,7 +58,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     transcript,
     queuedList,
     form,
-    el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, sendButton, pauseButton, continueButton, stopButton)),
+    el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, sendButton, pauseButton, continueButton, copyButton, nextButton, stopButton)),
   );
   root.replaceChildren(el("div", { class: "chat-head" }, title, toggle), body);
 
@@ -138,6 +147,10 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
         return el("li", { class: "entry you" }, el("span", { class: "who" }, `You answered ${e.card}`), el("p", { class: "text" }, `${e.question} → ${e.answer}`));
       case "divider":
         return el("li", { class: "handover" }, `fresh context: session ${e.session + 1}`);
+      case "end":
+        return el("li", { class: "handover" }, logic.endedLine(e));
+      case "failed":
+        return el("li", { class: "note" }, `${e.card} could not answer: ${e.error}`);
       default:
         return el("li", { class: "note", "data-dropped": "true" }, "Earlier messages were dropped to keep the chat short.");
     }
@@ -221,9 +234,13 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     inputLabel.textContent = next.card ? `Message to ${next.card}` : "Message";
     sendButton.setAttribute("aria-disabled", String(!logic.canSend(next)));
     stopButton.setAttribute("aria-disabled", String(!logic.canSend(next)));
+    stopButton.textContent = next.afterRun ? "End chat" : "Stop run";
+    pauseButton.hidden = Boolean(next.afterRun);
     pauseButton.setAttribute("aria-disabled", String(!logic.canPause(next)));
     pauseButton.textContent = next.pausePending ? "Pausing after this turn" : "Pause after this turn";
-    continueButton.hidden = next.phase !== "waiting";
+    continueButton.hidden = next.phase !== "waiting" || Boolean(next.afterRun);
+    copyButton.hidden = !next.afterRun;
+    nextButton.hidden = !next.afterRun;
     continueButton.textContent = logic.continueLabel(next);
     continueButton.classList.toggle("run", next.continueReady);
 
@@ -251,6 +268,9 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
       // only the first, so the count is still announced.
       readByFocus = next.question !== undefined && inside && next.question.questions.length === 1;
     }
+    // The run's controls go away when it ends; focus that was in the chat goes to the message box rather than to the page.
+    const runEnded = (next.afterRun && !prev?.afterRun) || (next.phase === "ended" && prev?.phase !== "ended");
+    if (prev && runEnded && root.contains(document.activeElement)) input.focus();
     if (next.returned && !prev?.returned) {
       input.value = input.value ? `${next.returned}\n\n${input.value}` : next.returned;
     }
