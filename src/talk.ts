@@ -21,7 +21,8 @@ export type TalkSnapshot = {
   // What Continue moves on to; undefined when nothing follows in this session.
   nextCard?: string;
   queued: Queued[];
-  question?: { id: string; card: string; questions: Question[] };
+  // `expiresAt`: when the Recommended option is taken instead, if the run does not wait for the user.
+  question?: { id: string; card: string; questions: Question[]; expiresAt?: number };
   // The latest reply carried a status line, so the card says where the chain goes next.
   continueReady: boolean;
   pausePending: boolean;
@@ -29,6 +30,8 @@ export type TalkSnapshot = {
   returned?: string;
   // The run has ended and the chat stays on its last session: each message is a turn of it (talkOn).
   afterRun?: boolean;
+  // Why the waiting card stopped (a halt, a failed turn, the turn cap): Continue retries it, a message is a turn of it.
+  parked?: string;
 };
 
 export type TalkHooks = {
@@ -37,7 +40,7 @@ export type TalkHooks = {
   answered(card: string, question: string, answer: string): void;
 };
 
-export type WaitRequest = { card: string; nextCard?: string; ready: boolean; signal: AbortSignal };
+export type WaitRequest = { card: string; nextCard?: string; ready: boolean; signal: AbortSignal; parked?: string };
 
 // Settles once: on the user's move, or with "stopped" when the run aborts.
 type Waiter = { card: string; settle(move: Move): void };
@@ -64,7 +67,7 @@ export class Talk {
 
   // A turn of `card` is about to run.
   at({ card, index, session, attended, nextSession }: { card: string; index: number; session: number; attended: boolean; nextSession?: string }): void {
-    const { nextCard: _gone, nextSession: _old, ...rest } = this.state;
+    const { nextCard: _gone, nextSession: _old, parked: _was, ...rest } = this.state;
     this.update({ ...rest, phase: "running", card, index, session, attended, continueReady: false, ...(nextSession ? { nextSession } : {}) });
   }
 
@@ -98,9 +101,9 @@ export class Talk {
   }
 
   // The card waits for the user. What they queued during the turn is their first message, so it is sent at once.
-  waitForYou({ card, nextCard, ready, signal }: WaitRequest): Promise<Move> {
-    const { nextCard: _gone, ...rest } = this.state;
-    this.update({ ...rest, phase: "waiting", card, attended: true, continueReady: ready, pausePending: false, ...(nextCard ? { nextCard } : {}) });
+  waitForYou({ card, nextCard, ready, signal, parked }: WaitRequest): Promise<Move> {
+    const { nextCard: _gone, parked: _was, ...rest } = this.state;
+    this.update({ ...rest, phase: "waiting", card, attended: true, continueReady: ready, pausePending: false, ...(nextCard ? { nextCard } : {}), ...(parked ? { parked } : {}) });
     if (signal.aborted) return Promise.resolve(this.resume({ kind: "stopped" }));
     const queued = this.takeQueued(card);
     if (queued !== undefined) return Promise.resolve(this.resume({ kind: "message", text: queued }));
@@ -119,7 +122,7 @@ export class Talk {
   }
 
   // A skill's question, answered by the user in the chat. One question is open at a time.
-  ask(questions: Question[], signal: AbortSignal): Promise<Record<string, string>> {
+  ask(questions: Question[], signal: AbortSignal, expiresAt?: number): Promise<Record<string, string>> {
     if (this.asking) return Promise.reject(new Error("another question is already open"));
     if (signal.aborted || this.state.phase === "ended") return Promise.reject(new Error("the run has stopped"));
     const id = this.nextId("q");
@@ -140,7 +143,7 @@ export class Talk {
         },
       };
       signal.addEventListener("abort", onAbort, { once: true });
-      this.update({ ...this.state, question: { id, card, questions } });
+      this.update({ ...this.state, question: { id, card, questions, ...(expiresAt !== undefined ? { expiresAt } : {}) } });
     });
   }
 
@@ -150,7 +153,7 @@ export class Talk {
     const returned = this.state.queued.map((q) => q.text).join("\n\n");
     this.closeQuestion()?.reject(new Error("the run has stopped"));
     this.waiter?.settle({ kind: "stopped" });
-    const { nextCard: _gone, nextSession: _old, afterRun: _was, ...rest } = this.state;
+    const { nextCard: _gone, nextSession: _old, afterRun: _was, parked: _left, ...rest } = this.state;
     const open = after ? ({ phase: "waiting", card: after.card, attended: true, afterRun: true } as const) : ({ phase: "ended", attended: false } as const);
     this.update({ ...rest, ...open, queued: [], continueReady: false, pausePending: false, ...(returned ? { returned } : {}) });
   }
@@ -206,7 +209,8 @@ export class Talk {
   // ── Internals ───────────────────────────────────────────────────────────────
 
   private resume(move: Move): Move {
-    this.update({ ...this.state, phase: this.state.phase === "ended" ? "ended" : "running", continueReady: false });
+    const { parked: _was, ...rest } = this.state;
+    this.update({ ...rest, phase: this.state.phase === "ended" ? "ended" : "running", continueReady: false });
     return move;
   }
 

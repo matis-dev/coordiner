@@ -7,7 +7,7 @@ import type { Outcome } from "./run.ts";
 import { Talk, type TalkSnapshot } from "./talk.ts";
 import { plain } from "./text.ts";
 import { endEntry, entriesFrom, Transcript, type Entry } from "./transcript.ts";
-import { interactiveCanUseTool, unattendedCanUseTool } from "./unattended.ts";
+import { interactiveCanUseTool, sleep as realSleep, unattendedCanUseTool, type DecidedAfter, type QuestionWait } from "./unattended.ts";
 
 // One run's chat, wired to the outside: the chains editor (through `post`), the journal, and the editor's attention. Kept out of
 // src/extension.ts so it can be tested; the extension only supplies these functions.
@@ -23,8 +23,14 @@ export type RunChatDeps = {
   // A card started waiting for the user, or asked them something.
   needsYou(card: string): void;
   log(line: string): void;
+  // Whether unattended questions wait for the user, as chosen for the run.
+  questions: QuestionWait;
   now?: () => number;
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 };
+
+// A question the run answered with its Recommended option, without the user.
+export type Decision = { card: string; question: string; answer: string; after: DecidedAfter };
 
 const FIVE_MINUTES = 5 * 60_000;
 const ONE_HOUR = 60 * 60_000;
@@ -53,9 +59,11 @@ export type RunChat = {
   ended(outcome: Outcome, after?: { card: string }): void;
   // A turn of the chat after the run failed.
   failed(card: string, error: string): void;
+  // The questions answered without the user so far, in order.
+  decided(): Decision[];
 };
 
-export function createRunChat({ title, post, record, moved, needsYou, log, now = Date.now }: RunChatDeps): RunChat {
+export function createRunChat({ title, post, record, moved, needsYou, log, questions, now = Date.now, sleep = realSleep }: RunChatDeps): RunChat {
   const transcript = new Transcript();
   const add = (entries: Entry[]) => {
     if (entries.length === 0) return;
@@ -101,13 +109,21 @@ export function createRunChat({ title, post, record, moved, needsYou, log, now =
     },
   });
   const view = (): ChatView => viewOf(talk.snapshot());
+  const decisions: Decision[] = [];
+  const decided = (question: string, answer: string, after: DecidedAfter) => {
+    const card = talk.snapshot().card ?? "";
+    decisions.push({ card, question, answer, after });
+    add([{ kind: "decided", card, question: plain(question), answer: plain(answer), after }]);
+    record({ type: "decided", card, question, answer, after });
+  };
+  const ask = (asked: Parameters<Talk["ask"]>[0], signal: AbortSignal, expiresAt?: number) => talk.ask(asked, signal, expiresAt);
   post({ type: "chat", chat: view(), entries: [] });
   return {
     talk,
     view,
     entries: () => transcript.entries(),
     forTurn: (mode) => ({
-      canUseTool: mode === "unattended" ? unattendedCanUseTool(log) : interactiveCanUseTool((questions, signal) => talk.ask(questions, signal), log),
+      canUseTool: mode === "unattended" ? unattendedCanUseTool({ wait: questions, ask, sleep, now, log, decided }) : interactiveCanUseTool(ask, log),
       systemPromptAppend: NOTES[mode],
       onMessage: (message) => {
         cache = cacheFrom(message.message.usage, now(), cache);
@@ -128,6 +144,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, now =
       talk.end(after ? { after } : {});
     },
     failed: (card, error) => add([{ kind: "failed", card, error: plain(error) }]),
+    decided: () => decisions.map((d) => ({ ...d })),
   };
 }
 
@@ -136,10 +153,10 @@ const NOTES: Record<TurnMode, string> = { unattended: UNATTENDED_NOTE, interacti
 export type ChatAction = Extract<EditorMessage, { type: `chat${string}` }>;
 
 // What the extension does for the chat: stop the run (or end the chat after it), and the actions once the run has ended.
-export type ChatActions = { stop(): void; copyResume(): void; nextChain(): void };
+export type ChatActions = { stop(): void; copyResume(): void; nextChain(): void; copyText(text: string): void };
 
 // Acts on a message from the chat. False when the run's chat refused it (a stale question, an empty message); Talk decides.
-export function actOnChat(talk: Talk, { stop, copyResume, nextChain }: ChatActions, message: ChatAction): boolean {
+export function actOnChat(talk: Talk, { stop, copyResume, nextChain, copyText }: ChatActions, message: ChatAction): boolean {
   switch (message.type) {
     case "chatSend":
       return talk.send(message.text);
@@ -156,6 +173,9 @@ export function actOnChat(talk: Talk, { stop, copyResume, nextChain }: ChatActio
       return talk.answer(message.id, message.picks);
     case "chatStop":
       stop();
+      return true;
+    case "chatCopyText":
+      copyText(message.text);
       return true;
     case "chatCopyResume":
       copyResume();

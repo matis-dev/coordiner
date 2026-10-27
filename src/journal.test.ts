@@ -49,6 +49,13 @@ describe("createJournal", () => {
     );
   });
 
+  it("records a question answered without the user, and when", async () => {
+    const lines: string[] = [];
+    const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);
+    await journal({ type: "decided", card: "Plan", question: "Which store?", answer: "SQLite (Recommended)", after: "after 5 minutes" });
+    assert.deepEqual(JSON.parse(lines[0]!), { at: "2026-10-10T19:51:03.123Z", type: "decided", card: "Plan", question: "Which store?", answer: "SQLite (Recommended)", after: "after 5 minutes" });
+  });
+
   it("keeps model text with quotes, newlines and control characters on one line", async () => {
     const lines: string[] = [];
     const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);

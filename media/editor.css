@@ -429,6 +429,20 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.entry .code { margin: 4px 0 0; }
+
+.entry .code pre {
+  margin: 0 0 2px;
+  padding: 4px 6px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--vscode-textCodeBlock-background, transparent);
+}
+
+.question .expiry { margin: 0 0 var(--gap); font-variant-numeric: tabular-nums; }
+
 .entry.you {
   padding-left: var(--gap);
   border-left: 2px solid var(--anchor);

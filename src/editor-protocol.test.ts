@@ -79,3 +79,20 @@ describe("parseEditorMessage", () => {
     assert.equal(parseEditorMessage({ type: "save", chain: { ...chain, sessions: [{ cards: [{ ...defaultCard("x"), skill: "x\ny" }] }] } }), undefined);
   });
 });
+
+describe("parseEditorMessage: copying a command", () => {
+  it("accepts text to copy", () => {
+    assert.deepEqual(parseEditorMessage({ type: "chatCopyText", text: "sudo usermod -aG docker $USER" }), { type: "chatCopyText", text: "sudo usermod -aG docker $USER" });
+  });
+
+  it("refuses text over the cap, empty text, a non-string, and extra keys", () => {
+    assert.equal(parseEditorMessage({ type: "chatCopyText", text: "x".repeat(MAX_INPUT_CHARS) })?.type, "chatCopyText");
+    for (const bad of [
+      { type: "chatCopyText", text: "x".repeat(MAX_INPUT_CHARS + 1) },
+      { type: "chatCopyText", text: "  " },
+      { type: "chatCopyText", text: ["rm -rf /"] },
+      { type: "chatCopyText", text: "ls", run: true },
+      { type: "chatCopyText" },
+    ]) assert.equal(parseEditorMessage(bad), undefined, JSON.stringify(bad).slice(0, 60));
+  });
+});

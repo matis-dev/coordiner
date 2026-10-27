@@ -95,12 +95,17 @@ A story says what should change and for whom. The **Story** template plans it, i
    For a one-off you can skip the file: choose **Type a story…** in the next step and write the story in one line.
 
 2. Run **Coordiner: Run Story…**, pick the file, then the story.
-3. Read the confirm dialog and choose **Run**. It shows the install command Coordiner will run in the new worktree (taken from the lockfile) and warns if your checkout has uncommitted changes, which the worktree will not contain.
+3. Read the confirm dialog and choose one of its **Run** buttons. It shows the install command Coordiner will run in the new worktree (taken from the lockfile) and warns if your checkout has uncommitted changes, which the worktree will not contain. The buttons decide what happens when a card that runs unattended asks a question:
+   - **Run, wait 5 min for answers**: the question shows in the chat for 5 minutes; if you do not answer, the Recommended option is taken.
+   - **Run, wait for my answers**: the question waits until you answer.
+   - **Run, never wait**: the Recommended option is taken at once.
+
+   A question with no Recommended option always waits for you, whichever button you chose. When the run ends, the **Coordiner** output lists every answer taken without you under **Decided without you**.
 4. Follow the steps in the **Run** view. Keep VS Code open and the computer awake: closing VS Code stops the run. The Stop button in the **Run** view's title bar, or **Coordiner: Stop Run**, stops it by hand; once the run has ended, it ends the chat after the run.
 
    While a turn runs, its background processes (a test run, a Monitor, a subagent) are listed under its step, with their latest progress line. **Stop Process**, the stop button on the row or in its context menu (**Shift+F10**), stops one. The list clears when the turn ends.
 
-The worktree is created next to your repository at `<repo>.coordiner/<story-slug>`, on branch `coordiner/<story-slug>`. When the run finishes, the commit brief is in the **Coordiner** output. If a run halts or fails, the output prints the `claude --resume` line for the session and the m-skills commands left to run by hand.
+The worktree is created next to your repository at `<repo>.coordiner/<story-slug>`, on branch `coordiner/<story-slug>`. When the run finishes, the commit brief is in the **Coordiner** output. A card that halts or fails does not end the run: it waits for you in the chat (see [Talk to a run in the chat](#talk-to-a-run-in-the-chat)). If you stop the run there, the output prints the `claude --resume` line for the session and the m-skills commands left to run by hand.
 
 To run the same story again, remove its worktree and branch first; Coordiner will not reuse them. From your repository:
 
@@ -177,12 +182,13 @@ The run's chat sits under the chains in the chains editor. It shows what the run
 - **Continue to …** moves the chain on. It is highlighted once the card has given its status line, and you can keep talking before you choose it. A pausing card that never gave a status line simply moves on to the next card.
 - **While a card works**, a line under the status shows how long its turn has run, how long since its last activity, and the last tool it used. A message you send then goes into the running turn: the card finishes the tool it is running, ends that step, and answers your message in the same turn, and the chat says your message reached it. If the turn fails or is stopped before it gets to your message, the message is queued again (or put back in the message box when the run ends). If the turn cannot take a message (it is ending, or your `claude` does not report what became of one), the message is queued and goes in front of the next turn; the queue says where it goes, including the next session (in a fresh context) when the card may finish first, and **Withdraw** takes a message back. Messages already queued keep their place: a new one queues behind them.
 - **Any other card** keeps running unattended. **Pause after this turn** makes the card wait for you once its current turn ends, as a pausing card does.
+- **A card that needs you** stops and waits in the chat when it cannot go on: it halted because you have to do something yourself (install a tool, log in, add a key), a turn failed, it gave no status line even after a reminder, or it reached the 20-turn cap. The status line says why. A halting card explains what happened and gives the commands to run, each in a block with a **Copy** button; read a command before you run it, since Coordiner only copies it and never runs it. A block that contains hidden characters (which can make a command read as something else) gets a warning instead of a **Copy** button. Reply in the message box to talk to the card, or fix the cause and choose **Continue …**: the card carries on in the same session, and the chain goes on to the end. Settings such as `coordiner.extraPath` are read again for every turn, so a fix you make there applies when you continue.
 - **Stop run** stops the run. A message still queued when the run ends goes back into the message box.
 - **When the run ends**, the transcript says how (done, halted with its reason, failed, stopped), and the chat stays open on the run's last session: each message you send is another turn of it, on the same model and effort, and needs no status line. **Copy resume command** copies `cd <worktree> && claude --resume <id>` to take the session over in a terminal. **Start the next chain here** opens **Start…** and runs the chain you pick in the same worktree, with the last card's reply as its input, after a confirm. **End chat** ends it, and so does confirming a new run.
-- A question waits for your answer for as long as it takes; nothing runs and nothing is spent while it waits.
+- A question from a card that runs unattended shows in the same form. With **wait 5 min**, the form counts down the time left, and the Recommended option is taken when it runs out; the transcript shows the answer taken. Otherwise the question waits for your answer for as long as it takes; nothing runs and nothing is spent while it waits.
 - While a card waits, a line under the status counts down how long the prompt cache stays warm. A message sent after that re-reads the whole conversation without the cache discount; the chat says once when the time is up. If the session has not shown how long its cache lasts, five minutes is assumed and the line says so.
 
-Only unattended turns count toward the 20-turn cap. Your messages and answers are written to the run journal.
+Only unattended turns count toward the 20-turn cap, and **Continue** on a card that reached it gives it 20 more. Your messages and answers, and the answers taken without you, are written to the run journal.
 
 The skill list comes from asking a Claude Code session in the open folder which skills it offers. No prompt is sent, so it costs no model turn. It runs once per window; **Refresh skills** re-lists after you install or change skills.
 

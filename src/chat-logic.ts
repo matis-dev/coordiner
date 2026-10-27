@@ -41,6 +41,38 @@ export function busyLabel(turn: TurnClock, now: number): string {
   return `Working ${elapsed(now - turn.since)} · last activity ${elapsed(now - turn.lastAt)} ago${turn.last ? ` · ${turn.last}` : ""}`;
 }
 
+// A question that takes its Recommended option when the time runs out says how long the user has, from the clock as cacheLabel does.
+export function expiryLabel(expiresAt: number, now: number): string {
+  const left = expiresAt - now;
+  return left > 0 ? `Takes the recommended answer in ${clock(left)} unless you answer.` : "Taking the recommended answer.";
+}
+
+// Model text in parts: closed ``` fences are code the user may copy, the rest is text. An unclosed fence stays text.
+export type TextPart = { code: boolean; text: string };
+const FENCE = /```[^\n`]*\n([\s\S]*?)```/g;
+
+export function textParts(text: string): TextPart[] {
+  const parts: TextPart[] = [];
+  let at = 0;
+  for (const match of text.matchAll(FENCE)) {
+    const before = text.slice(at, match.index).trim();
+    if (before) parts.push({ code: false, text: before });
+    parts.push({ code: true, text: match[1]!.replace(/\n$/, "") });
+    at = match.index + match[0].length;
+  }
+  const rest = text.slice(at).trim();
+  if (rest) parts.push({ code: false, text: rest });
+  return parts.length > 0 ? parts : [{ code: false, text }];
+}
+
+// Bidi controls and zero-width characters, which plain() keeps: with them a command can read differently from what it runs.
+const HIDDEN = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+export const hasHidden = (code: string): boolean => HIDDEN.test(code);
+
+// The extension refuses longer copies (src/editor-protocol.ts), so a longer block gets no Copy button; nor does one with hidden
+// characters, since the copy would not be the command shown.
+export const copyable = (code: string): boolean => code.length <= MAX_INPUT_CHARS && !hasHidden(code);
+
 // What the user chose for one question: offered labels, and their own text when they picked Other.
 export type Pick = { picked: string[]; other?: string };
 
@@ -89,6 +121,7 @@ export function statusLine(chat: ChatView): string {
       return chat.attended ? `${chat.card} is working on your message…` : `${chat.card} is working…`;
     case "waiting":
       if (chat.afterRun) return `${chat.ending ? endedLine(chat.ending) : "The run has ended."} You can keep talking to ${chat.card}.`;
+      if (chat.parked) return `${chat.card} needs you: ${chat.parked.replace(/[.\s]+$/, "")}. Reply to it, or fix the cause and choose Continue to try again.`;
       return chat.continueReady ? `${chat.card} is waiting for you. It gave its status line, so Continue moves the chain on.` : `${chat.card} is waiting for you.`;
     case "ended":
       return chat.ending ? endedLine(chat.ending) : "The run has ended.";
@@ -101,18 +134,23 @@ export function destination(chat: ChatView): string {
   return `the next turn of ${chat.card}`;
 }
 
-export const continueLabel = (chat: ChatView): string => (chat.nextCard ? `Continue to ${chat.nextCard}` : "Continue the chain");
+export function continueLabel(chat: ChatView): string {
+  if (chat.parked) return `Continue ${chat.card}`;
+  return chat.nextCard ? `Continue to ${chat.nextCard}` : "Continue the chain";
+}
 
 // The one line the status region speaks for a change, most important first; nothing for a change that needs no word.
 export function announcement(prev: ChatView | undefined, next: ChatView): string | undefined {
   const q = next.question;
   if (q && prev?.question?.id !== q.id) {
     const first = q.questions[0]!;
-    return q.questions.length > 1 ? `${q.card} asks ${q.questions.length} questions` : `${q.card} asks: ${first.header || first.question}`;
+    const asks = q.questions.length > 1 ? `${q.card} asks ${q.questions.length} questions` : `${q.card} asks: ${first.header || first.question}`;
+    return q.expiresAt === undefined ? asks : `${asks}. If you do not answer in time, it takes the recommended answer`;
   }
   // The form goes away the moment the answers are sent; this says where they went.
   if (prev?.question && !q && next.phase === "running") return `Answers sent; ${next.card} is working on them`;
   if (next.afterRun && !prev?.afterRun) return `${statusLine(next)}${next.returned ? " Your queued message is back in the message box." : ""}`;
+  if (next.phase === "waiting" && prev?.phase !== "waiting" && next.parked) return `${next.card} needs you: ${next.parked}`;
   if (next.phase === "waiting" && prev?.phase !== "waiting") return next.continueReady ? `${next.card} is waiting for you; Continue is ready` : `${next.card} is waiting for you`;
   if (next.returned && !prev?.returned) return "The run ended before your message was sent; it is back in the message box.";
   if (next.phase === "ended" && prev?.phase !== "ended") return "The run has ended.";
@@ -126,6 +164,8 @@ export function announcement(prev: ChatView | undefined, next: ChatView): string
 export function entriesAnnouncement(entries: readonly Entry[]): string | undefined {
   const reply = entries.findLast((e) => e.kind === "assistant");
   if (reply) return `${reply.card} replied`;
+  const decided = entries.findLast((e) => e.kind === "decided");
+  if (decided) return `${decided.card} took the recommended answer`;
   const sent = entries.findLast((e) => e.kind === "you");
   return sent ? `Your message reached ${sent.card}` : undefined;
 }

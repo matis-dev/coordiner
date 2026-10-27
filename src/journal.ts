@@ -1,13 +1,16 @@
 import type { Models } from "./environment.ts";
 import type { Outcome, RunEvent } from "./run.ts";
+import type { DecidedAfter, QuestionWait } from "./unattended.ts";
 
 export type JournalRecord =
-  | { type: "run-started"; chain: string; story: string; repo: string; worktree: string; branch: string; models: Models }
+  | { type: "run-started"; chain: string; story: string; repo: string; worktree: string; branch: string; models: Models; questions: QuestionWait }
   | RunEvent
   | { type: "log"; line: string }
   // What the user said in the run's chat, and how they answered a skill's question.
   | { type: "you"; card: string; text: string }
   | { type: "answer"; card: string; question: string; answer: string }
+  // A question answered with its Recommended option without the user.
+  | { type: "decided"; card: string; question: string; answer: string; after: DecidedAfter }
   | { type: "outcome"; outcome: Outcome };
 
 // One JSON line per record, written in call order. A failed write is reported once and the run goes on: the journal is a record, not a control.

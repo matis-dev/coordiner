@@ -21,6 +21,8 @@ export type EditorMessage =
   | { type: "chatContinue" }
   | { type: "chatAnswer"; id: string; picks: Pick[] }
   | { type: "chatStop" }
+  // A command shown in the transcript, copied for the user to run themselves; coordiner never runs it.
+  | { type: "chatCopyText"; text: string }
   // After the run: the clipboard text and the worktree are the extension's own, never taken from the page.
   | { type: "chatCopyResume" }
   | { type: "chatNextChain" };
@@ -72,6 +74,7 @@ const KEYS: Record<EditorMessage["type"], readonly string[]> = {
   chatContinue: [],
   chatAnswer: ["id", "picks"],
   chatStop: [],
+  chatCopyText: ["text"],
   chatCopyResume: [],
   chatNextChain: [],
 };
@@ -111,6 +114,7 @@ export function parseEditorMessage(v: unknown): EditorMessage | undefined {
     case "chatWithdraw":
       return typeof m.id === "string" && ID.test(m.id) ? { type, id: m.id } : undefined;
     case "chatSend":
+    case "chatCopyText":
       return isText(m.text, MAX_INPUT_CHARS) && m.text.trim() !== "" ? { type, text: m.text } : undefined;
     case "chatAnswer": {
       const picks = parsePicks(m.picks);

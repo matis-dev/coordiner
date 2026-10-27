@@ -42,6 +42,20 @@ describe("UNATTENDED_NOTE", () => {
     for (const phase of ["Reviewing:", "Fixing findings:", "Rolling history:", "Any other skill:"]) assert.ok(UNATTENDED_NOTE.includes(phase), phase);
   });
 
+  it("keeps HALT for an action the user takes outside the session, with the steps as fenced commands", () => {
+    assert.match(UNATTENDED_NOTE, /HALT <one-line reason>` only when the user must act outside this session/);
+    assert.match(UNATTENDED_NOTE, /fenced shell blocks, one command per block, saying which need sudo/);
+    assert.match(UNATTENDED_NOTE, /one-way door, is a question \(below\), not a halt/);
+  });
+
+  it("asks for command -v before relying on a system tool outside the project's dependencies", () => {
+    assert.match(UNATTENDED_NOTE, /check it with `command -v`; if it is missing, choose an approach that works without it, or HALT/);
+  });
+
+  it("says a question without a safe Recommended option waits for the user", () => {
+    assert.match(UNATTENDED_NOTE, /Leave the label out only when no option is safe without the user: that question waits for the user/);
+  });
+
   it("keeps the status line after a message the user sends while the card works", () => {
     assert.match(UNATTENDED_NOTE, /user may send a message while you work: .*still end your final message with the status line/);
   });

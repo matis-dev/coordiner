@@ -321,3 +321,48 @@ describe("Talk: the chat after the run", () => {
     assert.equal(talk.send("hello"), false);
   });
 });
+
+describe("Talk: a parked card", () => {
+  it("shows why the card stopped while it waits, and the next turn clears it", async () => {
+    const { talk, last } = running();
+    const move = talk.waitForYou({ card: "Implement", ready: false, signal: new AbortController().signal, parked: "docker is missing" });
+    assert.equal(last().parked, "docker is missing");
+    assert.equal(last().phase, "waiting");
+    talk.continue();
+    assert.deepEqual(await move, { kind: "continue" });
+    assert.equal(last().parked, undefined);
+    talk.waitForYou({ card: "Implement", ready: false, signal: new AbortController().signal, parked: "still missing" });
+    talk.at({ card: "Implement", index: 0, session: 0, attended: false });
+    assert.equal(last().parked, undefined);
+  });
+
+  it("takes a message as the parked card's next turn, and drops the reason when the run ends", async () => {
+    const { talk, last } = running();
+    const move = talk.waitForYou({ card: "Implement", ready: false, signal: new AbortController().signal, parked: "docker is missing" });
+    assert.equal(talk.send("installed it"), true);
+    assert.deepEqual(await move, { kind: "message", text: "installed it" });
+    talk.waitForYou({ card: "Implement", ready: false, signal: new AbortController().signal, parked: "again" });
+    talk.end();
+    assert.equal(last().parked, undefined);
+  });
+});
+
+describe("Talk: a question that waits for a while", () => {
+  it("shows when the Recommended option will be taken, and refuses an answer once the question is withdrawn", async () => {
+    const { talk, last } = running();
+    const timer = new AbortController();
+    const pending = talk.ask([question], timer.signal, 300_000);
+    const { id, expiresAt } = last().question!;
+    assert.equal(expiresAt, 300_000);
+    timer.abort();
+    await assert.rejects(pending, /stopped/);
+    assert.equal(last().question, undefined);
+    assert.equal(talk.answer(id, [{ picked: ["SQLite"] }]), false);
+  });
+
+  it("shows no expiry for a question that waits for the user", () => {
+    const { talk, last } = running();
+    void talk.ask([question], new AbortController().signal).catch(() => undefined);
+    assert.equal("expiresAt" in last().question!, false);
+  });
+});

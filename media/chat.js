@@ -26,6 +26,9 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   // The same for a running turn: how long it has run, and its last sign of life. Never announced.
   const busyLine = el("p", { class: "chat-busy", hidden: true });
   let busyTimer;
+  // A question the run answers itself when its time runs out shows the time left. Plain text: it changes every second.
+  const expiryLine = el("p", { class: "note expiry" });
+  let expiryTimer;
   const transcript = el("ol", { id: "transcript", "aria-label": "Run transcript" });
   const queuedList = el("ul", { class: "queued", "aria-label": "Queued messages" });
   const form = el("form", { class: "question", "aria-labelledby": "question-h", hidden: true, onsubmit: (e) => (e.preventDefault(), submitAnswers()) });
@@ -164,13 +167,15 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   function entry(e) {
     switch (e.kind) {
       case "assistant":
-        return el("li", { class: "entry assistant" }, el("span", { class: "who" }, e.card), el("p", { class: "text" }, e.text));
+        return el("li", { class: "entry assistant" }, el("span", { class: "who" }, e.card), parts(e.text));
       case "tool":
         return el("li", { class: "entry tool" }, el("span", { class: "visually-hidden" }, `${e.card} used `), el("code", {}, `${e.name} ${e.input}`));
       case "you":
         return el("li", { class: "entry you" }, el("span", { class: "who" }, `You to ${e.card}`), el("p", { class: "text" }, e.text));
       case "answer":
         return el("li", { class: "entry you" }, el("span", { class: "who" }, `You answered ${e.card}`), el("p", { class: "text" }, `${e.question} → ${e.answer}`));
+      case "decided":
+        return el("li", { class: "entry" }, el("span", { class: "who" }, `Recommended answer taken for ${e.card}, ${e.after}`), el("p", { class: "text" }, `${e.question} → ${e.answer}`));
       case "divider":
         return el("li", { class: "handover" }, `fresh context: session ${e.session + 1}`);
       case "end":
@@ -180,6 +185,27 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
       default:
         return el("li", { class: "note", "data-dropped": "true" }, "Earlier messages were dropped to keep the chat short.");
     }
+  }
+
+  // Fenced commands get a Copy button the user presses; the extension writes the clipboard, and nothing runs them. A block with
+  // hidden characters gets a warning instead, since selecting it by hand copies them too.
+  function parts(text) {
+    let n = 0;
+    return logic.textParts(text).map((part) => {
+      if (!part.code) return el("p", { class: "text" }, part.text);
+      n += 1;
+      const index = n;
+      let after;
+      if (logic.hasHidden(part.text)) {
+        after = el("p", { class: "note" }, "This command contains hidden characters, so it may not run as it reads. Do not run it.");
+      } else if (logic.copyable(part.text)) {
+        after = el("button", { type: "button", "aria-label": `Copy command ${index}`, onclick: () => {
+          vscode.postMessage({ type: "chatCopyText", text: part.text });
+          announce(`Copied command ${index}`);
+        } }, "Copy");
+      }
+      return el("div", { class: "code" }, el("pre", {}, el("code", {}, part.text)), after);
+    });
   }
 
   // The page keeps the newest entries, as the extension does, so a long run cannot grow it without end.
@@ -201,6 +227,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     form.hidden = !question;
     if (!question) return;
     form.append(el("h3", { id: "question-h" }, `${question.card} asks`));
+    if (question.expiresAt !== undefined) form.append(expiryLine);
     question.questions.forEach((q, i) => {
       const type = q.multiSelect ? "checkbox" : "radio";
       const name = `answer-${i}`;
@@ -268,7 +295,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     copyButton.hidden = !next.afterRun;
     nextButton.hidden = !next.afterRun;
     continueButton.textContent = logic.continueLabel(next);
-    continueButton.classList.toggle("run", next.continueReady);
+    continueButton.classList.toggle("run", next.continueReady || Boolean(next.parked));
 
     queuedList.replaceChildren(
       ...next.queued.map((q, i) =>
@@ -288,8 +315,11 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     let readByFocus = false;
     if (next.question?.id !== prev?.question?.id) {
       const inside = root.contains(document.activeElement);
+      // A question withdrawn while the user was in its form leaves focus in the message box, not on the page.
+      const inForm = form.contains(document.activeElement);
       renderQuestion(next.question);
       if (next.question && inside) form.querySelector("input").focus();
+      else if (inForm) input.focus();
       // Focus landing on a lone question reads it out already, so announcing it would say it twice. With several, focus reads
       // only the first, so the count is still announced.
       readByFocus = next.question !== undefined && inside && next.question.questions.length === 1;
@@ -304,6 +334,18 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     if (said) announce(said);
     showCache(next);
     showBusy(next);
+    showExpiry(next);
+  }
+
+  // One timer at most, running only while a question with a time limit is open.
+  function showExpiry(next) {
+    clearInterval(expiryTimer);
+    expiryTimer = undefined;
+    const expiresAt = next.question?.expiresAt;
+    if (expiresAt === undefined) return;
+    const tick = () => (expiryLine.textContent = logic.expiryLabel(expiresAt, Date.now()));
+    tick();
+    expiryTimer = setInterval(tick, 1000);
   }
 
   // One timer at most, running only while a turn runs; it reads the turn's clock, so a computer that slept shows the right time.

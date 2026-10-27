@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { storyText } from "./backlog.ts";
 import { defaultCard, MAX_INPUT_CHARS, TEMPLATES, type Chain } from "./chains.ts";
-import { fillInput, MAX_TURNS, remainingCommands, runChain, runSession, talkOn, type AfterAsk, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
+import { continueAfter, fillInput, MAX_TURNS, remainingCommands, runChain, runSession, talkOn, type AfterAsk, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
 import type { TurnResult } from "./session.ts";
 import { Talk, type Move, type WaitRequest } from "./talk.ts";
 import type { ReviewPrep } from "./worktree.ts";
@@ -141,6 +141,137 @@ describe("runSession: session one", () => {
     const outcome = await runSession(AUTHOR_SESSION, deps);
     assert.equal(outcome.status, "failed");
     assert.equal(requests.length, MAX_TURNS);
+  });
+});
+
+describe("runSession: a card that cannot go on parks", () => {
+  const brief = (r: TurnAsk) => [r.prompt, r.model, r.resume, r.interactive];
+  const docker = "docker is not installed";
+
+  it("parks on a HALT; Continue resumes the same session with the continue prompt and the chain reaches DONE", async () => {
+    const { deps, requests, waits, events } = harness(
+      [reply("plan\nCOORDINER: NEXT Light", 1), reply(`COORDINER: HALT ${docker}`, 2), reply("COORDINER: DONE", 3)],
+      undefined,
+      [(t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.deepEqual(requests.map(brief).at(-1), [continueAfter(docker), "m-weak", "sess-2", false]);
+    assert.deepEqual(waits.map((w) => [w.card, w.parked, w.ready, w.nextCard]), [["Implement", docker, false, undefined]]);
+    assert.deepEqual(events.filter((e) => e.type === "step-finished").map((e) => e.status), ["done", "halted", "done"]);
+    assert.deepEqual(events.filter((e) => e.type === "step-started").map((e) => e.index), [0, 1, 2]);
+  });
+
+  it("takes a message to a parked card as a turn of the same session; Continue then applies its status line", async () => {
+    const { deps, requests } = harness(
+      [reply("plan\nCOORDINER: NEXT Light", 1), reply(`COORDINER: HALT ${docker}`, 2), reply("checked\nCOORDINER: DONE", 3)],
+      undefined,
+      [(t) => void t.send("installed it, check again"), (t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "checked" });
+    assert.deepEqual(requests.map(brief).at(-1), ["installed it, check again", "m-weak", "sess-2", true]);
+    assert.equal(requests.length, 3);
+  });
+
+  it("parks again with the new reason when the card halts again after Continue", async () => {
+    const { deps, waits } = harness(
+      [reply(`COORDINER: HALT ${docker}`, 1), reply("COORDINER: HALT docker runs, but the socket is denied", 2)],
+      undefined,
+      [(t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "halted", reason: "docker runs, but the socket is denied", sessionId: "sess-2" });
+    assert.deepEqual(waits.map((w) => w.parked), [docker, "docker runs, but the socket is denied"]);
+  });
+
+  it("parks again when a talk on a parked card ends on a HALT and the user continues", async () => {
+    const { deps, waits, requests } = harness(
+      [reply(`COORDINER: HALT ${docker}`, 1), reply("COORDINER: HALT still no docker", 2), reply("COORDINER: NEXT Light", 3), reply("COORDINER: DONE", 4)],
+      undefined,
+      [(t) => void t.send("try now"), (t) => t.continue(), (t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.deepEqual(waits.map((w) => w.parked), [docker, undefined, "still no docker"]);
+    assert.equal(requests[2]!.prompt, continueAfter("still no docker"));
+  });
+
+  it("ends with the halt's outcome and session id when the user stops a parked card", async () => {
+    const stop = new AbortController();
+    const { deps } = harness([reply("COORDINER: NEXT Light", 1), reply(`COORDINER: HALT ${docker}`, 2)], stop.signal, [() => stop.abort()]);
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "halted", reason: docker, sessionId: "sess-2" });
+  });
+
+  it("parks on a failed turn that started its session; Continue resumes that session", async () => {
+    const { deps, requests } = harness(
+      [reply("COORDINER: NEXT Light", 1), { ok: false, sessionId: "sess-2", error: "the API is overloaded" }, reply("COORDINER: DONE", 3)],
+      undefined,
+      [(t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.deepEqual(requests.map(brief).at(-1), [continueAfter("the API is overloaded"), "m-weak", "sess-2", false]);
+  });
+
+  it("parks on a failed turn with no session; Continue sends the card's prompt again on the session before", async () => {
+    const { deps, requests } = harness(
+      [reply("COORDINER: NEXT Light", 1), { ok: false, error: "claude was not found" }, reply("COORDINER: DONE", 3)],
+      undefined,
+      [(t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.deepEqual(requests.slice(1).map(brief), [
+      ["/m-skills:implementing-architect Implement the approved plan above.", "m-weak", "sess-1", false],
+      ["/m-skills:implementing-architect Implement the approved plan above.", "m-weak", "sess-1", false],
+    ]);
+  });
+
+  it("puts a message to a card parked with no session in front of the card's prompt, so the skill still runs", async () => {
+    const { deps, requests } = harness(
+      [reply("COORDINER: NEXT Light", 1), { ok: false, error: "claude was not found" }, reply("COORDINER: DONE", 3)],
+      undefined,
+      [(t) => void t.send("fixed the path"), (t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.deepEqual(requests.map(brief).at(-1), ["fixed the path\n\n/m-skills:implementing-architect Implement the approved plan above.", "m-weak", "sess-1", true]);
+  });
+
+  it("parks when the status line is still missing after the reminder", async () => {
+    const { deps, waits, requests } = harness([reply("no marker", 1), reply("still none", 2), reply("COORDINER: NEXT Light", 3), reply("COORDINER: DONE", 4)], undefined, [(t) => t.continue()]);
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.match(waits[0]!.parked ?? "", /did not report a COORDINER status line/);
+    assert.match(requests[2]!.prompt, /^The user has handled what stopped you/);
+  });
+
+  it("parks at the turn cap; Continue gives the card a fresh allowance", async () => {
+    const looping = Array.from({ length: MAX_TURNS * 2 }, (_, n) => reply("COORDINER: NEXT Light", n + 1));
+    const { deps, requests, waits, events } = harness([...looping, reply("COORDINER: DONE", 99)], undefined, [(t) => t.continue()]);
+    const outcome = await runSession(AUTHOR_SESSION, deps);
+    assert.equal(outcome.status, "failed");
+    assert.equal(requests.length, MAX_TURNS * 2);
+    assert.deepEqual(waits.map((w) => w.parked), [`the run reached the ${MAX_TURNS}-turn cap without finishing.`, `the run reached the ${MAX_TURNS}-turn cap without finishing.`]);
+    assert.equal(requests[MAX_TURNS]!.prompt, "Continue with the next step of the plan.");
+    assert.equal(requests[MAX_TURNS]!.resume, `sess-${MAX_TURNS}`);
+    const started = events.filter((e) => e.type === "step-started").map((e) => e.index);
+    assert.deepEqual(started, Array.from({ length: MAX_TURNS * 2 }, (_, i) => i));
+  });
+
+  it("gives a card at the turn cap a fresh allowance when the user talks to it, then continues", async () => {
+    const looping = Array.from({ length: MAX_TURNS }, (_, n) => reply("COORDINER: NEXT Light", n + 1));
+    const { deps, requests, waits } = harness(
+      [...looping, reply("it keeps finding more to do", 98), reply("COORDINER: DONE", 99)],
+      undefined,
+      [(t) => void t.send("why are you looping?"), (t) => t.continue()],
+    );
+    assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
+    assert.deepEqual(waits.map((w) => w.parked), [`the run reached the ${MAX_TURNS}-turn cap without finishing.`, undefined]);
+    assert.deepEqual(requests.slice(MAX_TURNS).map(brief), [
+      ["why are you looping?\n\nContinue with the next step of the plan.", "m-weak", `sess-${MAX_TURNS}`, true],
+      ["End your reply with your COORDINER status line.", "m-weak", "sess-98", false],
+    ]);
+  });
+
+  it("gives a pausing card its talk back on Continue after a park", async () => {
+    const idea = (fillInput(TEMPLATES.find((t) => t.id === "idea")!, "an offline notes app") as { ok: true; chain: Chain }).chain;
+    const { deps, requests } = harness([{ ok: false, sessionId: "sess-1", error: "overloaded" }, reply("Which platforms?", 2)], undefined, [(t) => t.continue()]);
+    await runSession(idea.sessions[0]!, deps);
+    assert.deepEqual(requests.map(brief).at(-1), [continueAfter("overloaded"), "m-strong", "sess-1", true]);
   });
 });
 
@@ -357,10 +488,10 @@ describe("runSession: talking with the user", () => {
     assert.deepEqual(requests.map((r) => [r.prompt, r.interactive]).at(-1), ["End your reply with your COORDINER status line.", false]);
   });
 
-  it("ends the run on an unattended HALT even when a pause was asked for", async () => {
+  it("parks on an unattended HALT even when a pause was asked for", async () => {
     const { deps, waits } = harness([(t) => (t.requestPause(), reply("COORDINER: HALT needs a migration decision", 1))]);
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "halted", reason: "needs a migration decision", sessionId: "sess-1" });
-    assert.equal(waits.length, 0);
+    assert.deepEqual(waits.map((w) => [w.parked, w.ready]), [["needs a migration decision", false]]);
   });
 
   it("tells the chat which card the turn is for by its place in the session, not only its label", async () => {

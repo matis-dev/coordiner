@@ -17,11 +17,12 @@ import { createJournal, journalFileName, type JournalRecord } from "./journal.ts
 import { replyOf } from "./protocol.ts";
 import { fillInput, remainingCommands, runChain, talkOn, type AfterAsk, type Outcome, type RunEvent } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
-import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type RunChat, type TurnMode } from "./run-chat.ts";
+import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type Decision, type RunChat, type TurnMode } from "./run-chat.ts";
 import { listCommands, runTurn, type TurnControl, type TurnResult } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
 import { commonEfforts, modelOptions, mskillsPresent, palette, type ModelOption, type PaletteEntry } from "./skills.ts";
 import { plain } from "./text.ts";
+import type { QuestionWait } from "./unattended.ts";
 import { applyTask, liveProcess, stopLine, type Process } from "./processes.ts";
 import { finishedMessage, nothingToReviewMessage, pickedChain, processItem, startItems, stepItem, type StepView } from "./view.ts";
 import { addWorktree, prepareReview, removalNote, resumeCommand, setUpRepo, type Exec, type RepoInfo, type SetupPrompt, type Worktree } from "./worktree.ts";
@@ -202,9 +203,14 @@ async function offerRemoval(worktree: Worktree, output: vscode.OutputChannel): P
   return note !== undefined;
 }
 
-// The commit brief is model text: it is shown, never offered as a command to copy or run.
-async function announce(outcome: Outcome, heading: string, worktree: Worktree, chain: Chain, output: vscode.OutputChannel): Promise<void> {
+// The commit brief is model text: it is shown, never offered as a command to copy or run. So are the questions the run answered
+// without the user, listed for them to check.
+async function announce(outcome: Outcome, heading: string, worktree: Worktree, chain: Chain, output: vscode.OutputChannel, decided: readonly Decision[]): Promise<void> {
   const name = plain(heading);
+  if (decided.length > 0) {
+    output.appendLine("Decided without you (the Recommended option):");
+    for (const d of decided) output.appendLine(`- ${plain(d.card)}: ${plain(d.question)} → ${plain(d.answer)} (${d.after})`);
+  }
   if ((outcome.status === "halted" || outcome.status === "failed") && outcome.sessionId) {
     output.appendLine(`To take over this session, run in ${worktree.path}: claude --resume ${outcome.sessionId}`);
   }
@@ -256,7 +262,8 @@ type LastTurn = { sessionId: string; model: string; effort?: Effort; card: strin
 type Journal = (record: JournalRecord) => Promise<void>;
 
 // A run the user confirmed: the filled chain, its name, and a worktree whose setup is done.
-type Place = { chain: Chain; name: string; slug: string; worktree: Worktree; env: Record<string, string | undefined>; claudePath: string; models: Models; journal: Journal };
+// `questions`: how the run treats a question from a card that runs unattended, chosen with the run's confirmation.
+type Place = { chain: Chain; name: string; slug: string; worktree: Worktree; models: Models; journal: Journal; questions: QuestionWait };
 
 type RunContext = {
   state: RunState;
@@ -324,6 +331,26 @@ async function readyRepo(folder: string, output: vscode.OutputChannel): Promise<
   return undefined;
 }
 
+// What a turn runs with, read again for every turn, so a setting fixed while a card waits applies when it carries on.
+async function turnTools(): Promise<{ ok: true; env: Record<string, string | undefined>; claudePath: string } | { ok: false; error: string }> {
+  const config = vscode.workspace.getConfiguration("coordiner");
+  const env = sessionEnvFor(config);
+  const claude = await claudeFor(config, env);
+  return claude.ok ? { ok: true, env, claudePath: claude.path } : claude;
+}
+
+// The run's confirmation, one Run button for each way it can treat a question from a card that runs unattended.
+const RUN_CHOICES: ReadonlyArray<readonly [string, QuestionWait]> = [
+  ["Run, wait 5 min for answers", "timed"],
+  ["Run, wait for my answers", "always"],
+  ["Run, never wait", "never"],
+];
+
+async function confirmRun(message: string, detail: string): Promise<QuestionWait | undefined> {
+  const choice = await vscode.window.showWarningMessage(message, { modal: true, detail }, ...RUN_CHOICES.map(([label]) => label));
+  return RUN_CHOICES.find(([label]) => label === choice)?.[1];
+}
+
 // What the sessions run with: the editor's environment and the claude to start.
 async function sessionTools(): Promise<{ env: Record<string, string | undefined>; claudePath: string; models: Models } | undefined> {
   const config = vscode.workspace.getConfiguration("coordiner");
@@ -341,8 +368,10 @@ function runNotes(chain: Chain): string[] {
   const sessions = chain.sessions.map((s, i) => `${i + 1}. ${s.cards.map((c) => plain(c.label)).join(" → ")}`).join("\n");
   return [
     chain.sessions.some((s) => s.cards.some((c) => c.pause))
-      ? "Cards that pause wait for you in the chat under the chains editor. Every other card runs unattended: its questions are answered with the Recommended option and logged."
-      : "The chain runs unattended: questions are answered with the Recommended option and logged.",
+      ? "Cards that pause wait for you in the chat under the chains editor. Every other card runs unattended."
+      : "The chain runs unattended.",
+    "A question from a card that runs unattended shows in the chat. Wait 5 min: answer it within 5 minutes, or the Recommended option is taken. Wait for my answers: it waits as long as it takes. Never wait: the Recommended option is taken at once. A question with no Recommended option always waits for you, and every answer taken without you is listed when the run ends.",
+    "A card that cannot go on (a halt, a failed turn) waits for you in the chat with the reason: reply to it, or fix the cause and choose Continue.",
     "In the chat you can message any card (it gets your message with its next turn) or pause it after its turn. Anything auto mode will not approve is denied, and so is any git write or GitHub publish.",
     `Each session starts a fresh conversation:\n${sessions}`,
     "Keep this computer awake: the run stops if VS Code closes.",
@@ -419,8 +448,8 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
     repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
     setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
   ].filter(Boolean).join("\n\n");
-  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, { modal: true, detail }, "Run");
-  if (choice !== "Run") return undefined;
+  const questions = await confirmRun(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, detail);
+  if (!questions) return undefined;
   endAfter(ctx.state);
 
   const added = await addWorktree(repo.root, slug, { exec, exists });
@@ -431,7 +460,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   }
   output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
   const worktree = { root: repo.root, path: added.path, branch: added.branch };
-  const journal = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models: tools.models });
+  const journal = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models: tools.models, questions });
   if (setup) {
     const result = await runSetup(setup, added.path, tools.env, exec);
     if (!result.ok) {
@@ -441,7 +470,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
       return undefined;
     }
   }
-  return { chain: filled.chain, name: input.name, slug, worktree, ...tools, journal };
+  return { chain: filled.chain, name: input.name, slug, worktree, models: tools.models, journal, questions };
 }
 
 // A next chain in the worktree of the run before: no new worktree and no setup, and its input is that run's last reply.
@@ -468,17 +497,17 @@ async function confirmHere(chain: Chain, here: Here, ctx: RunContext): Promise<P
     takesInput ? `Input: ${plain(card)}'s last reply, ${here.input.length} characters.` : "This chain takes no input.",
     ...runNotes(chain),
   ].join("\n\n");
-  const choice = await vscode.window.showWarningMessage(`Run ${plain(chain.name)} in the same worktree?`, { modal: true, detail }, "Run");
-  if (choice !== "Run") return undefined;
+  const questions = await confirmRun(`Run ${plain(chain.name)} in the same worktree?`, detail);
+  if (!questions) return undefined;
   endAfter(ctx.state);
-  const journal = startJournal(ctx, here.slug, { type: "run-started", chain: chain.name, story: here.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models });
-  return { chain: filled.chain, name: here.name, slug: here.slug, worktree, ...tools, journal };
+  const journal = startJournal(ctx, here.slug, { type: "run-started", chain: chain.name, story: here.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models, questions });
+  return { chain: filled.chain, name: here.name, slug: here.slug, worktree, models: tools.models, journal, questions };
 }
 
 // Runs the chain in its place, then leaves the chat open on the last session. Returns the run's announcement.
 async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>> {
   const { state, provider, reveal, output } = ctx;
-  const { chain, name, worktree, env, claudePath, models, journal } = place;
+  const { chain, name, worktree, models, journal, questions } = place;
   const abort = new AbortController();
   const log = (line: string) => {
     output.appendLine(line);
@@ -491,6 +520,7 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     moved: ctx.onRunChange,
     needsYou: ctx.needsYou,
     log,
+    questions,
   });
   Object.assign(state, { abort, chainId: chain.id, chat });
   ctx.onRunChange();
@@ -521,13 +551,14 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
   const turn = async ({ mode, ...request }: AfterAsk & { mode: TurnMode }, signal: AbortSignal): Promise<TurnResult> => {
     const card = chat.talk.snapshot().card ?? "";
     let result: TurnResult;
+    const tools = await turnTools();
     try {
-      result = await runTurn({
+      result = !tools.ok ? { ok: false, error: tools.error } : await runTurn({
         ...request,
         ...chat.forTurn(mode),
         cwd: worktree.path,
-        env,
-        claudePath,
+        env: tools.env,
+        claudePath: tools.claudePath,
         requiredCommands: required,
         signal,
         onGuard: log,
@@ -569,7 +600,7 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
   chat.ended(outcome, last && { card: last.card });
   if (last) talkAfter(last, { chat, place, ctx, stopProcess, turn });
   const ended = outcome;
-  return () => announce(ended, name, worktree, chain, output);
+  return () => announce(ended, name, worktree, chain, output, chat.decided());
 }
 
 // The chat after the run: each message is a turn of the run's last session, and each turn holds the slot, so a new run waits
@@ -776,6 +807,8 @@ class ChainsEditor {
         this.ctx.onRunChange();
       },
       copyResume: () => void (after && this.copyResume(after)),
+      // The user runs it, if they choose to; coordiner only puts it on the clipboard.
+      copyText: (text: string) => void vscode.env.clipboard.writeText(text),
       nextChain: () => void (after && startCommand(this, after.here)),
     };
     if (!actOnChat(chat.talk, actions, message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);

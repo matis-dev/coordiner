@@ -40,6 +40,13 @@ export type SessionPlace = { session: number; nextSession?: string };
 
 const NUDGE = "End your reply with your COORDINER status line.";
 
+// What a parked card is sent when the user chooses Continue, in the session that stopped.
+export const continueAfter = (reason: string): string =>
+  `The user has handled what stopped you (${reason}). Check that it is fixed, then carry on with the step, and end your reply with your COORDINER status line.`;
+
+// Why a card stopped, and the outcome the run ends with if the user stops it there.
+type Parking = { outcome: Extract<Outcome, { status: "halted" | "failed" }>; reason: string };
+
 // One session runs its cards in order, resuming one conversation. A "once" card takes one turn; NEXT moves to the next card on the
 // tier it names, DONE moves to the next card on its own tier. A review's DONE skips the loop cards after it (nothing to fix goes
 // straight to history); any other skill's DONE does not. A "loop" card continues on each NEXT and moves on at DONE. NEXT on a last
@@ -48,6 +55,10 @@ const NUDGE = "End your reply with your COORDINER status line.";
 // A card that pauses, or one the user paused, talks with the user: after each turn it waits, each message is another turn, and
 // Continue applies the latest status line the card gave (a pausing card that gave none is done). Only unattended turns count
 // toward MAX_TURNS. Messages the user queued go in front of the next turn's prompt.
+//
+// A card that cannot go on (a HALT, a failed turn, no status line after the reminder, the turn cap) parks instead of ending the
+// run: it waits for the user, a message is a turn with them, and Continue retries it, in the session that stopped when there is
+// one. Stop ends the run with the outcome that parked it, so the session can still be taken over by hand.
 //
 // A card with its own model runs every turn on it, loop turns and the reminder included: NEXT <tier> then only picks the tier the
 // card after it starts on.
@@ -75,16 +86,16 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     latest = undefined;
   };
 
-  // Moves the session on from a status line: sets the next turn, or returns the outcome that ends the session. `step` is how the
-  // turn that gave the status is reported.
-  const advance = (status: Status, text: string, sessionId: string): { end?: Outcome; step: [StepStatus, string] } => {
+  // Moves the session on from a status line: sets the next turn, or returns the outcome that ends the session or the parking that
+  // stops the card. `step` is how the turn that gave the status is reported.
+  const advance = (status: Status, text: string, sessionId: string): { end?: Outcome; park?: Parking; step: [StepStatus, string] } => {
     const kind = skillDefault(cards[card]!.skill).kind;
     chat = false;
-    if (status.kind === "halt") return { end: { status: "halted", reason: status.reason, sessionId }, step: ["halted", status.reason] };
+    if (status.kind === "halt") return { park: { outcome: { status: "halted", reason: status.reason, sessionId }, reason: status.reason }, step: ["halted", status.reason] };
     if (status.kind === "none") {
       if (nudged) {
         const reason = "the session did not report a COORDINER status line, even after a reminder";
-        return { end: { status: "halted", reason, sessionId }, step: ["halted", "no COORDINER status line after a reminder"] };
+        return { park: { outcome: { status: "halted", reason, sessionId }, reason }, step: ["halted", "no COORDINER status line after a reminder"] };
       }
       nudged = true;
       prompt = NUDGE;
@@ -111,9 +122,36 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     return { step: ["done", `next: ${status.tier}`] };
   };
 
+  // The card waits for the user. Returns the outcome to end the run with when they stop it; otherwise the next turn is set, with a
+  // fresh turn allowance: their message, or the retry on Continue. A prompt that never reached the session (`unsent`) is the retry,
+  // and a message goes in front of it, as a queued one does, so the card's own prompt is never lost.
+  const park = async ({ outcome, reason }: Parking, next: { retry: string } | { unsent: string }): Promise<Outcome | undefined> => {
+    const move = await deps.talk.waitForYou({ card: cards[card]!.label, ready: false, signal: deps.signal, parked: reason });
+    if (move.kind === "stopped") return outcome;
+    latest = undefined;
+    nudged = false;
+    unattendedTurns = 0;
+    ({ label } = cards[card]!);
+    const retry = "unsent" in next ? next.unsent : next.retry;
+    if (move.kind === "message") {
+      prompt = "unsent" in next ? `${move.text}\n\n${retry}` : move.text;
+      attended = true;
+      chat = true;
+      return undefined;
+    }
+    prompt = retry;
+    attended = cards[card]!.pause;
+    chat = false;
+    return undefined;
+  };
+
   for (let index = 0; ; index++) {
     if (deps.signal.aborted) return stop({ status: "stopped" });
-    if (!attended && unattendedTurns >= MAX_TURNS) return stop({ status: "failed", error: `the run reached the ${MAX_TURNS}-turn cap without finishing.` });
+    if (!attended && unattendedTurns >= MAX_TURNS) {
+      const error = `the run reached the ${MAX_TURNS}-turn cap without finishing.`;
+      const ended = await park({ outcome: { status: "failed", error }, reason: error }, { unsent: prompt });
+      if (ended) return stop(ended);
+    }
     if (!attended) unattendedTurns++;
     deps.talk.at({ card: cards[card]!.label, index: card, session: place.session, attended, ...(card === cards.length - 1 && place.nextSession ? { nextSession: place.nextSession } : {}) });
     const queued = deps.talk.takeQueued(cards[card]!.label);
@@ -131,12 +169,17 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
         return stop({ status: "stopped" });
       }
       finish(["failed", result.error]);
-      return stop({ status: "failed", error: result.error, ...(sessionId ? { sessionId } : {}) });
+      // A turn that started its session took the prompt; one that did not is tried again as it was.
+      if (sessionId) resume = sessionId;
+      const parking: Parking = { outcome: { status: "failed", error: result.error, ...(sessionId ? { sessionId } : {}) }, reason: result.error };
+      const ended = await park(parking, sessionId ? { retry: continueAfter(result.error) } : { unsent: prompt });
+      if (ended) return stop(ended);
+      continue;
     }
     resume = result.sessionId;
     const status = parseStatus(result.resultText);
 
-    // A halt in an unattended turn ends the run even when a pause was asked for; the user takes over with claude --resume.
+    // A halt in an unattended turn parks the card even when a pause was asked for.
     if (attended || (deps.talk.pausePending() && status.kind !== "halt")) {
       if (status.kind !== "none") latest = { status, text: result.resultText };
       finish(["done", "waiting for you"]);
@@ -153,14 +196,22 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
       const decided = latest ?? { status: cards[card]!.pause ? ({ kind: "done" } as const) : ({ kind: "none" } as const), text: "" };
       latest = undefined;
       nudged = false;
-      const { end } = advance(decided.status, decided.text, result.sessionId);
+      const { end, park: parking } = advance(decided.status, decided.text, result.sessionId);
       if (end) return stop(end);
+      if (parking) {
+        const ended = await park(parking, { retry: continueAfter(parking.reason) });
+        if (ended) return stop(ended);
+      }
       continue;
     }
 
-    const { end, step } = advance(status, result.resultText, result.sessionId);
+    const { end, park: parking, step } = advance(status, result.resultText, result.sessionId);
     finish(step);
     if (end) return stop(end);
+    if (parking) {
+      const ended = await park(parking, { retry: continueAfter(parking.reason) });
+      if (ended) return stop(ended);
+    }
   }
 }
 

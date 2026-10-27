@@ -694,3 +694,104 @@ describe("run chat: a message that reached the running turn", () => {
     assert.equal(page.status(), "Your message reached Implement");
   });
 });
+
+describe("run chat: a card that needs you", () => {
+  it("shows why the card stopped, and Continue named for it as the main action", async () => {
+    const page = await open();
+    page.reset(view());
+    page.update(view({ phase: "waiting", card: "Implement", attended: true, parked: "docker is not installed." }));
+    assert.equal(page.line(), "Implement needs you: docker is not installed. Reply to it, or fix the cause and choose Continue to try again.");
+    const continueButton = page.button("Continue Implement");
+    assert.equal(continueButton.hidden, false);
+    assert.equal(continueButton.classList.contains("run"), true);
+    assert.equal(page.status(), "Implement needs you: docker is not installed.");
+  });
+});
+
+describe("run chat: commands in a reply", () => {
+  const reply = "Docker is missing.\n\n```sh\nsudo apt install docker.io\n```\n\nThen:\n\n```\nsudo usermod -aG docker $USER\n```";
+
+  it("shows each fenced block as code with a Copy button named for it, and the text around it as text", async () => {
+    const page = await open();
+    page.reset(view(), [{ kind: "assistant", card: "Implement", text: reply }]);
+    const entry = page.entries()[0]!;
+    assert.deepEqual([...entry.querySelectorAll("p.text")].map((p) => p.textContent), ["Docker is missing.", "Then:"]);
+    assert.deepEqual([...entry.querySelectorAll("pre code")].map((c) => c.textContent), ["sudo apt install docker.io", "sudo usermod -aG docker $USER"]);
+    const copy = page.button("Copy command 2");
+    assert.equal(copy.textContent, "Copy");
+    copy.focus();
+    copy.click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatCopyText", text: "sudo usermod -aG docker $USER" });
+    assert.equal(page.doc.activeElement, copy);
+    assert.equal(page.status(), "Copied command 2");
+  });
+
+  it("renders markup inside a fenced block as text", async () => {
+    const page = await open();
+    page.reset(view(), [{ kind: "assistant", card: "Implement", text: '```html\n<img src=x onerror="alert(1)">\n```' }]);
+    assert.equal(page.doc.querySelector("#transcript img"), null);
+    assert.equal(page.doc.querySelector("#transcript pre code")!.textContent, '<img src=x onerror="alert(1)">');
+  });
+
+  it("offers no Copy button for a block too long to copy", async () => {
+    const page = await open();
+    page.reset(view(), [{ kind: "assistant", card: "Implement", text: `\`\`\`\n${"x".repeat(MAX_INPUT_CHARS + 1)}\n\`\`\`` }]);
+    assert.equal(page.doc.querySelector("#transcript pre"), page.doc.querySelector("#transcript .code pre"));
+    assert.equal(page.doc.querySelector("#transcript .code button"), null);
+  });
+
+  it("warns instead of offering Copy for a block with hidden characters", async () => {
+    const page = await open();
+    const rlo = String.fromCharCode(0x202e);
+    page.reset(view(), [{ kind: "assistant", card: "Implement", text: `\`\`\`\necho ${rlo}txt.exe\n\`\`\`` }]);
+    assert.equal(page.doc.querySelector("#transcript .code button"), null);
+    assert.match(page.doc.querySelector("#transcript .code .note")!.textContent!, /hidden characters/);
+  });
+});
+
+describe("run chat: a question with a time limit", () => {
+  const timed = (expiresAt: number) => view({ card: "Plan", question: { ...question, card: "Plan", expiresAt } });
+  afterEach(() => mock.timers.reset());
+
+  it("counts down the time left in the form as plain text, and says so once when it is asked", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.reset(view({ card: "Plan" }));
+    page.update(timed(300_000));
+    const expiry = page.doc.querySelector<HTMLElement>("form.question .expiry")!;
+    assert.equal(expiry.textContent, "Takes the recommended answer in 5:00 unless you answer.");
+    assert.equal(expiry.getAttribute("aria-live"), null);
+    assert.equal(page.status(), "Plan asks: Store. If you do not answer in time, it takes the recommended answer");
+    page.doc.getElementById("status")!.textContent = "";
+    mock.timers.tick(1000);
+    assert.equal(expiry.textContent, "Takes the recommended answer in 4:59 unless you answer.");
+    assert.equal(page.status(), "", "the countdown is not announced");
+  });
+
+  it("shows no time limit for a question that waits for the user", async () => {
+    const page = await open();
+    page.reset(view({ card: "Brainstorm" }));
+    page.update(view({ card: "Brainstorm", question }));
+    assert.equal(page.doc.querySelector("form.question .expiry"), null);
+  });
+
+  it("moves focus to the message box when the question is withdrawn while the user is in its form", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.reset(view({ card: "Plan" }));
+    page.input().focus();
+    page.update(timed(300_000));
+    assert.equal(page.doc.activeElement!.getAttribute("type"), "radio");
+    page.update(view({ card: "Plan" }));
+    assert.equal(page.doc.activeElement, page.input());
+    assert.equal(page.doc.querySelector<HTMLFormElement>("form.question")!.hidden, true);
+  });
+
+  it("shows a question taken without the user, and says so once", async () => {
+    const page = await open();
+    page.reset(view({ card: "Plan" }));
+    page.append([{ kind: "decided", card: "Plan", question: "Which store?", answer: "SQLite (Recommended)", after: "after 5 minutes" }]);
+    assert.deepEqual([...page.entries()[0]!.children].map((c) => c.textContent), ["Recommended answer taken for Plan, after 5 minutes", "Which store? → SQLite (Recommended)"]);
+    assert.equal(page.status(), "Plan took the recommended answer");
+  });
+});

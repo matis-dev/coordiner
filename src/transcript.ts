@@ -2,6 +2,7 @@ import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { MAX_ENTRIES } from "./chat-logic.ts";
 import type { Outcome } from "./run.ts";
 import { clip, plain } from "./text.ts";
+import type { DecidedAfter } from "./unattended.ts";
 
 // What the run's chat shows. Model text reaches it only through plain(), and the webview sets it with textContent.
 export type Entry =
@@ -9,6 +10,8 @@ export type Entry =
   | { kind: "tool"; card: string; name: string; input: string }
   | { kind: "you"; card: string; text: string }
   | { kind: "answer"; card: string; question: string; answer: string }
+  // A question answered with its Recommended option without the user.
+  | { kind: "decided"; card: string; question: string; answer: string; after: DecidedAfter }
   | { kind: "divider"; session: number }
   | { kind: "end"; status: Outcome["status"]; reason?: string }
   // A turn of the chat after the run that failed; the chat stays open.

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import { announcement, busyLabel, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, destination, endedLine, entriesAnnouncement, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel } from "./chat-logic.ts";
+import { announcement, busyLabel, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, textParts } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -230,5 +230,78 @@ describe("chat height", () => {
   it("fills the editor only when true was saved", () => {
     assert.equal(savedMax(true), true);
     for (const value of [false, "true", 1, undefined]) assert.equal(savedMax(value), false);
+  });
+});
+
+describe("a card that needs you", () => {
+  const parked = view({ phase: "waiting", card: "Implement", attended: true, parked: "docker is not installed. " });
+
+  it("says why the card stopped and how to move on, and names Continue for the card", () => {
+    assert.equal(statusLine(parked), "Implement needs you: docker is not installed. Reply to it, or fix the cause and choose Continue to try again.");
+    assert.equal(continueLabel({ ...parked, nextCard: "Review" }), "Continue Implement");
+  });
+
+  it("is announced once, when the card starts waiting", () => {
+    assert.equal(announcement(view({ card: "Implement" }), parked), "Implement needs you: docker is not installed. ");
+    assert.equal(announcement(parked, parked), undefined);
+  });
+});
+
+describe("a question with a time limit", () => {
+  const question = { id: "q1", card: "Plan", questions: [{ question: "Which store?", header: "Store", options: [{ label: "SQLite (Recommended)" }] }] };
+
+  it("is announced with what happens when its time runs out", () => {
+    assert.equal(announcement(view({ card: "Plan" }), view({ card: "Plan", question: { ...question, expiresAt: 300_000 } })), "Plan asks: Store. If you do not answer in time, it takes the recommended answer");
+    assert.equal(announcement(view({ card: "Plan" }), view({ card: "Plan", question })), "Plan asks: Store");
+  });
+
+  it("counts the time left from the clock, and says when it is up", () => {
+    assert.equal(expiryLabel(300_000, 0), "Takes the recommended answer in 5:00 unless you answer.");
+    assert.equal(expiryLabel(300_000, 299_001), "Takes the recommended answer in 0:01 unless you answer.");
+    assert.equal(expiryLabel(300_000, 300_000), "Taking the recommended answer.");
+  });
+
+  it("announces a question taken without the user by its card, after a reply", () => {
+    const decided = { kind: "decided", card: "Plan", question: "Which store?", answer: "SQLite", after: "at once" } as const;
+    assert.equal(entriesAnnouncement([decided]), "Plan took the recommended answer");
+    assert.equal(entriesAnnouncement([decided, { kind: "assistant", card: "Plan", text: "ok" }]), "Plan replied");
+  });
+});
+
+describe("textParts", () => {
+  it("keeps text without a fence whole", () => {
+    assert.deepEqual(textParts("just text\nover two lines"), [{ code: false, text: "just text\nover two lines" }]);
+    assert.deepEqual(textParts(""), [{ code: false, text: "" }]);
+  });
+
+  it("splits fenced blocks out as code, dropping the language and the closing newline", () => {
+    assert.deepEqual(textParts("Run:\n```sh\ndocker --version\n```\nThen:\n```\nnode --version\nnpm --version\n```"), [
+      { code: false, text: "Run:" },
+      { code: true, text: "docker --version" },
+      { code: false, text: "Then:" },
+      { code: true, text: "node --version\nnpm --version" },
+    ]);
+  });
+
+  it("keeps a block that is only code, with nothing around it", () => {
+    assert.deepEqual(textParts("```\nls\n```"), [{ code: true, text: "ls" }]);
+  });
+
+  it("leaves an unclosed fence as text", () => {
+    assert.deepEqual(textParts("Run:\n```sh\ndocker --version"), [{ code: false, text: "Run:\n```sh\ndocker --version" }]);
+  });
+
+  it("copies a block up to the message cap, not past it", () => {
+    assert.equal(copyable("x".repeat(MAX_INPUT_CHARS)), true);
+    assert.equal(copyable("x".repeat(MAX_INPUT_CHARS + 1)), false);
+  });
+
+  it("copies no block with a bidi control or a zero-width character, which can make it read as another command", () => {
+    for (const code of [0x200b, 0x200f, 0x202a, 0x202e, 0x2060, 0x2066, 0x2069, 0xfeff]) {
+      const text = `echo safe${String.fromCharCode(code)} && rm -rf ~`;
+      assert.equal(hasHidden(text), true, code.toString(16));
+      assert.equal(copyable(text), false, code.toString(16));
+    }
+    assert.equal(hasHidden("sudo apt install docker.io — ok"), false);
   });
 });

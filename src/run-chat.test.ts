@@ -5,12 +5,13 @@ import type { ChatMessage } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
 import { actOnChat, cacheFrom, createRunChat, IDLE_CHAT } from "./run-chat.ts";
+import { QUESTION_WAIT_MS, type QuestionWait } from "./unattended.ts";
 
 const question = { question: "Which \u001b[31mstore?", options: [{ label: "SQLite" }, { label: "Files (Recommended)" }] };
 const said = (text: string) => ({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "text", text }] } }) as unknown as SDKAssistantMessage;
 const toolOptions = () => ({ signal: new AbortController().signal }) as Parameters<CanUseTool>[2];
 
-function setup(now = () => 0) {
+function setup(now = () => 0, questions: QuestionWait = "never", sleep?: (ms: number, signal: AbortSignal) => Promise<void>) {
   const posted: ChatMessage[] = [];
   const records: JournalRecord[] = [];
   const logs: string[] = [];
@@ -23,7 +24,9 @@ function setup(now = () => 0) {
     moved: () => void moves++,
     needsYou: (card) => void waiting.push(card),
     log: (line) => void logs.push(line),
+    questions,
     now,
+    ...(sleep ? { sleep } : {}),
   });
   return { chat, posted, records, logs, waiting, moves: () => moves, appended: () => posted.flatMap((m) => (m.type === "chatAppend" ? m.entries : [])), updates: () => posted.filter((m) => m.type === "chatUpdate") };
 }
@@ -192,6 +195,33 @@ describe("createRunChat: forTurn", () => {
     assert.deepEqual(waiting, []);
   });
 
+  it("shows, records and lists a question answered without the user, its text made plain", async () => {
+    const { chat, records, appended } = setup();
+    chat.talk.at({ card: "Plan", index: 0, session: 0, attended: false });
+    await chat.forTurn("unattended").canUseTool("AskUserQuestion", { questions: [question] }, toolOptions());
+    const decision = { card: "Plan", question: "Which \u001b[31mstore?", answer: "Files (Recommended)", after: "at once" };
+    assert.deepEqual(appended(), [{ kind: "decided", card: "Plan", question: "Which [31mstore?", answer: "Files (Recommended)", after: "at once" }]);
+    assert.deepEqual(records.at(-1), { type: "decided", ...decision });
+    assert.deepEqual(chat.decided(), [decision]);
+    chat.decided()[0]!.answer = "changed";
+    assert.equal(chat.decided()[0]!.answer, "Files (Recommended)");
+  });
+
+  it("shows an unattended question in the chat with its expiry when the run waits, and takes the user's answer", async () => {
+    let wake = () => {};
+    const { chat, waiting } = setup(() => 50, "timed", () => new Promise((resolve) => (wake = resolve)));
+    chat.talk.at({ card: "Plan", index: 0, session: 0, attended: false });
+    const pending = chat.forTurn("unattended").canUseTool("AskUserQuestion", { questions: [question] }, toolOptions());
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(chat.view().question?.expiresAt, 50 + QUESTION_WAIT_MS);
+    assert.deepEqual(waiting, ["Plan"]);
+    chat.talk.answer(chat.view().question!.id, [{ picked: ["SQLite"] }]);
+    const result = await pending;
+    assert.deepEqual(result?.behavior === "allow" && result.updatedInput?.answers, { "Which \u001b[31mstore?": "SQLite" });
+    assert.deepEqual(chat.decided(), []);
+    wake();
+  });
+
   it("gives an interactive turn the interactive note, and asks the user", async () => {
     const { chat } = setup();
     chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });
@@ -220,7 +250,7 @@ describe("actOnChat", () => {
   it("passes each chat message to the run's chat, and stops the run on chatStop", async () => {
     const { chat } = setup();
     let stopped = 0;
-    const stop = { stop: () => void stopped++, copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked") };
+    const stop = { stop: () => void stopped++, copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: () => assert.fail("not asked") };
     chat.talk.at({ card: "Implement", index: 0, session: 0, attended: false });
     assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "one" }), true);
     assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "  " }), false);
@@ -240,10 +270,18 @@ describe("actOnChat", () => {
   it("hands the actions after the run to the extension", () => {
     const { chat } = setup();
     const asked: string[] = [];
-    const actions = { stop: () => void asked.push("stop"), copyResume: () => void asked.push("copy"), nextChain: () => void asked.push("next") };
+    const actions = { stop: () => void asked.push("stop"), copyResume: () => void asked.push("copy"), nextChain: () => void asked.push("next"), copyText: (text: string) => void asked.push(`text: ${text}`) };
     assert.equal(actOnChat(chat.talk, actions, { type: "chatCopyResume" }), true);
     assert.equal(actOnChat(chat.talk, actions, { type: "chatNextChain" }), true);
     assert.deepEqual(asked, ["copy", "next"]);
+  });
+
+  it("hands a command to copy to the extension, at any time", () => {
+    const { chat } = setup();
+    const asked: string[] = [];
+    const actions = { stop: () => assert.fail("not asked"), copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: (text: string) => void asked.push(text) };
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatCopyText", text: "docker --version" }), true);
+    assert.deepEqual(asked, ["docker --version"]);
   });
 });
 
