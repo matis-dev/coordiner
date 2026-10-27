@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseStories, slugify, storyText } from "./backlog.ts";
+import { parseStories, slugify, storyText, wholeFileStory } from "./backlog.ts";
 
 describe("parseStories", () => {
   it("finds Story N and Slice N headings at any level, case-insensitively", () => {
@@ -20,6 +20,18 @@ describe("parseStories", () => {
 
   it("returns no stories when none match", () => {
     assert.deepEqual(parseStories("# Notes\nStory 1 is mentioned in prose\n## Epic 2\n"), []);
+  });
+});
+
+describe("wholeFileStory", () => {
+  it("is named by the first heading, and the rest of the file is its body", () => {
+    const story = wholeFileStory("<!-- meta -->\n# 01 · Register a company and sign in\nintro\n## Acceptance criteria\n- one\n", "01-register.md");
+    assert.deepEqual(story, { heading: "01 · Register a company and sign in", body: "<!-- meta -->\nintro\n## Acceptance criteria\n- one" });
+    assert.equal(slugify(story.heading), "01-register-a-company-and-sign-in");
+  });
+
+  it("is named by the file when it has no heading", () => {
+    assert.deepEqual(wholeFileStory("Add a settings page.\n", "settings.MD"), { heading: "settings", body: "Add a settings page." });
   });
 });
 

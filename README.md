@@ -90,11 +90,13 @@ A story says what should change and for whom. The **Story** template plans it, i
    …
    ```
 
+   A file with no `Story <number>` or `Slice <number>` heading, such as one story per file in `docs/stories/`, runs whole: its first heading names the run.
+
    For a one-off you can skip the file: choose **Type a story…** in the next step and write the story in one line.
 
 2. Run **Coordiner: Run Story…**, pick the file, then the story.
 3. Read the confirm dialog and choose **Run**. It shows the install command Coordiner will run in the new worktree (taken from the lockfile) and warns if your checkout has uncommitted changes, which the worktree will not contain.
-4. Follow the steps in the **Run** view. Keep VS Code open and the computer awake: closing VS Code stops the run. **Coordiner: Stop Run** stops it by hand.
+4. Follow the steps in the **Run** view. Keep VS Code open and the computer awake: closing VS Code stops the run. The Stop button in the **Run** view's title bar, or **Coordiner: Stop Run**, stops it by hand; once the run has ended, it ends the chat after the run.
 
    While a turn runs, its background processes (a test run, a Monitor, a subagent) are listed under its step, with their latest progress line. **Stop Process**, the stop button on the row or in its context menu (**Shift+F10**), stops one. The list clears when the turn ends.
 

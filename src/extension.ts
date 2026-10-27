@@ -3,10 +3,10 @@ import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
-import { parseStories, slugify, storyText, type Story } from "./backlog.ts";
+import { parseStories, slugify, storyText, wholeFileStory, type Story } from "./backlog.ts";
 import { ChainStore, type StoreFs } from "./chain-store.ts";
 import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type Effort, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
@@ -134,11 +134,13 @@ async function pickStory(): Promise<Story | "type" | undefined> {
   );
   if (!picked) return undefined;
   if (!picked.uri) return "type";
-  const stories = parseStories(await readFile(picked.uri.fsPath, "utf8"));
-  if (stories.length === 0) {
-    await vscode.window.showInformationMessage(`Coordiner: no stories found in ${picked.label}. Headings look like "## Story 1: …" or "### Slice 2: …"; or choose "Type a story…".`);
+  const markdown = await readFile(picked.uri.fsPath, "utf8");
+  if (markdown.trim() === "") {
+    void vscode.window.showInformationMessage(`Coordiner: ${picked.label} is empty. Write the story in it, or choose "Type a story…".`);
     return undefined;
   }
+  const stories = parseStories(markdown);
+  if (stories.length === 0) return wholeFileStory(markdown, basename(picked.uri.fsPath));
   const chosen = await vscode.window.showQuickPick(
     stories.map((story) => ({ label: plain(story.heading), story })),
     { title: "Pick a story", placeHolder: "Story to run" },
@@ -317,7 +319,7 @@ async function readyRepo(folder: string, output: vscode.OutputChannel): Promise<
       output.appendLine(setup.detail);
       output.show(true);
     }
-    await vscode.window.showErrorMessage(`Coordiner: ${setup.reason}${setup.detail ? " See the Coordiner output." : ""}`);
+    void vscode.window.showErrorMessage(`Coordiner: ${setup.reason}${setup.detail ? " See the Coordiner output." : ""}`);
   }
   return undefined;
 }
@@ -328,7 +330,7 @@ async function sessionTools(): Promise<{ env: Record<string, string | undefined>
   const env = sessionEnvFor(config);
   const claude = await claudeFor(config, env);
   if (!claude.ok) {
-    await vscode.window.showErrorMessage(`Coordiner: ${claude.error}`);
+    void vscode.window.showErrorMessage(`Coordiner: ${claude.error}`);
     return undefined;
   }
   return { env, claudePath: claude.path, models: readModels(config) };
@@ -365,11 +367,12 @@ function startJournal(ctx: RunContext, slug: string, start: Extract<JournalRecor
   return journal;
 }
 
-// Returns the run's announcement, for after the slot is given back; nothing when the run never started.
+// Returns the run's announcement, for after the slot is given back; nothing when the run never started. Its messages are not
+// awaited: a notification that slides into the notification center never settles, and the slot would stay taken.
 async function startRun(chain: Chain, ctx: RunContext, here?: Here): Promise<(() => Promise<void>) | undefined> {
   const check = runnable(chain);
   if (!check.ok) {
-    await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${check.reason}`);
+    void vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${check.reason}`);
     return undefined;
   }
   const place = here ? await confirmHere(chain, here, ctx) : await prepareWorktree(chain, ctx);
@@ -381,14 +384,14 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   const { output } = ctx;
   const folder = openFolder();
   if (folder === undefined) {
-    await vscode.window.showErrorMessage("Coordiner: open a folder first. Sessions run in the open folder.");
+    void vscode.window.showErrorMessage("Coordiner: open a folder first. Sessions run in the open folder.");
     return undefined;
   }
   let repo;
   try {
     repo = await readyRepo(folder, output);
   } catch (error) {
-    await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
+    void vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
     return undefined;
   }
   if (!repo) return undefined;
@@ -398,14 +401,14 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   if (!input) return undefined;
   const filled = fillInput(chain, input.text);
   if (!filled.ok) {
-    await vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
+    void vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
     return undefined;
   }
   let slug;
   try {
     slug = slugify(input.name);
   } catch (error) {
-    await vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
+    void vscode.window.showErrorMessage(`Coordiner: ${(error as Error).message}`);
     return undefined;
   }
 
@@ -423,7 +426,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   const added = await addWorktree(repo.root, slug, { exec, exists });
   if (!added.ok) {
     if (added.detail) output.appendLine(added.detail);
-    await vscode.window.showErrorMessage(`Coordiner: ${added.reason}`);
+    void vscode.window.showErrorMessage(`Coordiner: ${added.reason}`);
     return undefined;
   }
   output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
@@ -434,7 +437,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
     if (!result.ok) {
       output.appendLine(result.detail);
       void journal({ type: "outcome", outcome: { status: "failed", error: result.message } });
-      await vscode.window.showErrorMessage(`Coordiner: ${result.message}`);
+      void vscode.window.showErrorMessage(`Coordiner: ${result.message}`);
       return undefined;
     }
   }
@@ -445,19 +448,19 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
 async function confirmHere(chain: Chain, here: Here, ctx: RunContext): Promise<Place | undefined> {
   const { worktree, card } = here;
   if (!(await exists(worktree.path))) {
-    await vscode.window.showErrorMessage(`Coordiner: ${plain(worktree.path)} no longer exists, so ${plain(chain.name)} cannot run there.`);
+    void vscode.window.showErrorMessage(`Coordiner: ${plain(worktree.path)} no longer exists, so ${plain(chain.name)} cannot run there.`);
     return undefined;
   }
   const tools = await sessionTools();
   if (!tools) return undefined;
   const takesInput = inputOf(chain) !== undefined;
   if (takesInput && here.input.trim() === "") {
-    await vscode.window.showErrorMessage(`Coordiner: ${plain(card)} gave no reply to start ${plain(chain.name)} from.`);
+    void vscode.window.showErrorMessage(`Coordiner: ${plain(card)} gave no reply to start ${plain(chain.name)} from.`);
     return undefined;
   }
   const filled = fillInput(chain, here.input);
   if (!filled.ok) {
-    await vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
+    void vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
     return undefined;
   }
   const detail = [
@@ -767,7 +770,11 @@ class ChainsEditor {
       return;
     }
     const actions = {
-      stop: () => (abort ? abort.abort() : endAfter(state)),
+      stop: () => {
+        if (abort) return abort.abort();
+        endAfter(state);
+        this.ctx.onRunChange();
+      },
       copyResume: () => void (after && this.copyResume(after)),
       nextChain: () => void (after && startCommand(this, after.here)),
     };
@@ -829,14 +836,19 @@ export function activate(context: vscode.ExtensionContext): void {
   // Reveal without stealing focus; a hidden view just rejects, which is fine.
   const reveal = (step: RunItem) => void view.reveal(step, { focus: false, select: false }).then(undefined, () => undefined);
   let editor: ChainsEditor | undefined;
+  // The Run view's Stop button shows while the slot is held and while the chat after a run is open.
+  const changed = () => {
+    editor?.post();
+    void vscode.commands.executeCommand("setContext", "coordiner.busy", ctx.slot.busy() || state.after !== undefined);
+  };
   const ctx: RunContext = {
     state,
-    slot: oneRun(() => editor?.post()),
+    slot: oneRun(changed),
     provider,
     reveal,
     output,
     storage: context.globalStorageUri,
-    onRunChange: () => editor?.post(),
+    onRunChange: changed,
     postChat: (message) => editor?.postChat(message),
     needsYou: (card) => editor?.needsYou(card),
   };
@@ -855,8 +867,14 @@ export function activate(context: vscode.ExtensionContext): void {
       const process = liveProcess(provider.processes, (item as { id?: unknown } | undefined)?.id);
       if (process && state.stopProcess) await state.stopProcess(process);
     }),
+    // The same stop as the chat's: the run, else the chat after it. Before the sessions start, the run is waiting on a dialog or its setup.
     vscode.commands.registerCommand("coordiner.stopRun", async () => {
       if (state.abort) state.abort.abort();
+      else if (state.after) {
+        endAfter(state);
+        changed();
+        void vscode.window.showInformationMessage("Coordiner: ended the chat after the run.");
+      } else if (ctx.slot.busy()) await vscode.window.showInformationMessage("Coordiner: the run is still being set up. Answer or cancel its open dialog, or wait for setup to finish.");
       else await vscode.window.showInformationMessage("Coordiner: no run is active.");
     }),
   );

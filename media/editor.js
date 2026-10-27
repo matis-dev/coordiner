@@ -153,6 +153,8 @@ export async function start() {
         el("label", { for: id, class: "visually-hidden" }, `Arguments for ${label}`),
         el("textarea", { id, rows: 2, maxlength: chainsModule.MAX_ARGS, "data-focus": id, onchange: (e) => save(edit.setArgs(chain, s, i, e.target.value), `Saved ${label}`, id) }, c.args),
       );
+      const stray = logic.strayNote(c.args);
+      if (stray) children.push(el("p", { class: "note" }, stray));
     } else if (c.args) {
       children.push(el("p", { class: "args" }, logic.argParts(c.args).map((part) => ("chip" in part ? el("span", { class: "chip" }, part.chip) : part.text))));
     }
@@ -225,7 +227,7 @@ export async function start() {
       el(
         "select",
         // Off only when there is nothing to pick; an effort the model no longer takes can still be set back to the default.
-        { id: effortId, "data-focus": effortId, "aria-disabled": String(why !== undefined && c.effort === undefined), "aria-describedby": why ? `effort-why-${s}-${i}` : undefined, onchange: (e) => {
+        { id: effortId, "data-focus": effortId, "aria-disabled": String(why !== undefined && c.effort === undefined), "aria-describedby": why ? `effort-why-${s}-${i}` : undefined, title: why, onchange: (e) => {
           saveSetting(chain, (to) => edit.setEffort(to, s, i, e.target.value || undefined), label, effortId);
         } },
         el("option", { value: "" }, "Model default"),
@@ -265,7 +267,7 @@ export async function start() {
       el("select", { id, "data-focus": id, onchange: (e) => picks.set(key, e.target.value) }, options),
       el(
         "button",
-        { type: "button", "data-focus": logic.addKey(s), "aria-disabled": String(full !== undefined), "aria-describedby": full ? `full-${s}` : undefined, onclick: () => {
+        { type: "button", "data-focus": logic.addKey(s), "aria-disabled": String(full !== undefined), "aria-describedby": full ? `full-${s}` : undefined, title: full, onclick: () => {
           if (full) return announce(full);
           const skill = document.getElementById(id).value;
           if (!skill) return;
@@ -302,7 +304,7 @@ export async function start() {
       el("button", { type: "button", "data-focus": "refresh-skills", onclick: () => vscode.postMessage({ type: "refreshPalette" }) }, "Refresh skills"),
       el(
         "button",
-        { type: "button", class: "run", "data-focus": "run", "aria-disabled": String(reason !== undefined), "aria-describedby": reason ? "run-reason" : undefined, onclick: () => {
+        { type: "button", class: "run", "data-focus": "run", "aria-disabled": String(reason !== undefined), "aria-describedby": reason ? "run-reason" : undefined, title: reason, onclick: () => {
           if (reason) return announce(reason);
           vscode.postMessage({ type: "run", id: chain.id });
         } },
@@ -335,21 +337,22 @@ export async function start() {
     });
     if (editable) {
       const full = logic.addSessionReason(chain);
+      // replaceChildren writes an undefined part out as the text "undefined", so only elements go into parts.
       parts.push(
         el(
           "p",
           {},
           el(
             "button",
-            { type: "button", "data-focus": "add-session", "aria-disabled": String(full !== undefined), "aria-describedby": full ? "sessions-full" : undefined, onclick: () => {
+            { type: "button", "data-focus": "add-session", "aria-disabled": String(full !== undefined), "aria-describedby": full ? "sessions-full" : undefined, title: full, onclick: () => {
               if (full) return announce(full);
               save(edit.addSession(chain), `Added session ${chain.sessions.length + 1}`, logic.addKey(chain.sessions.length));
             } },
             "Add a session",
           ),
         ),
-        full ? el("p", { id: "sessions-full", class: "reason" }, full) : undefined,
       );
+      if (full) parts.push(el("p", { id: "sessions-full", class: "reason" }, full));
     }
     detail.replaceChildren(...parts);
   }

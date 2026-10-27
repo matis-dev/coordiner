@@ -63,7 +63,8 @@
       },
       {
         "command": "coordiner.stopRun",
-        "title": "Coordiner: Stop Run"
+        "title": "Coordiner: Stop Run",
+        "icon": "$(debug-stop)"
       },
       {
         "command": "coordiner.stopProcess",
@@ -100,6 +101,11 @@
           "command": "coordiner.openChains",
           "when": "view == coordiner.run",
           "group": "navigation@2"
+        },
+        {
+          "command": "coordiner.stopRun",
+          "when": "view == coordiner.run && coordiner.busy",
+          "group": "navigation@0"
         }
       ]
     },

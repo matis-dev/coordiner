@@ -262,9 +262,21 @@ describe("chains webview: editing a chain", () => {
     const add = page.named("Add");
     assert.equal(add.getAttribute("aria-disabled"), "true");
     assert.equal(page.doc.getElementById(add.getAttribute("aria-describedby")!)!.textContent, `A session holds at most ${MAX_CARDS} skills.`);
+    assert.equal(add.title, `A session holds at most ${MAX_CARDS} skills.`);
     add.click();
     assert.deepEqual(page.saves(), []);
     assert.equal(page.status(), `A session holds at most ${MAX_CARDS} skills.`);
+  });
+
+  it("leaves no stray text under Add a session while more sessions fit", async () => {
+    const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("acme:a")] }] };
+    const page = await open({ selectedId: "own" });
+    page.send({ chains: [own] });
+    const detail = page.doc.getElementById("detail")!;
+    assert.equal(page.named("Add a session").getAttribute("aria-disabled"), "false");
+    assert.equal(page.named("Add a session").hasAttribute("title"), false);
+    assert.ok([...detail.childNodes].every((n) => n.nodeType === n.ELEMENT_NODE));
+    assert.doesNotMatch(detail.textContent!, /undefined/);
   });
 
   it("turns Add a session off at the most sessions a chain holds, says why, and saves nothing", async () => {
@@ -274,6 +286,7 @@ describe("chains webview: editing a chain", () => {
     const add = page.named("Add a session");
     assert.equal(add.getAttribute("aria-disabled"), "true");
     assert.equal(page.doc.getElementById(add.getAttribute("aria-describedby")!)!.textContent, `A chain holds at most ${MAX_SESSIONS} sessions.`);
+    assert.equal(add.title, `A chain holds at most ${MAX_SESSIONS} sessions.`);
     add.click();
     assert.deepEqual(page.saves(), []);
     assert.equal(page.status(), `A chain holds at most ${MAX_SESSIONS} sessions.`);
@@ -488,6 +501,7 @@ describe("chains webview: model and effort", () => {
     const effort = page.doc.getElementById("effort-0-1")!;
     assert.equal(effort.getAttribute("aria-disabled"), "true");
     assert.equal(page.doc.getElementById(effort.getAttribute("aria-describedby")!)!.textContent, "This model has no effort setting.");
+    assert.equal(effort.title, "This model has no effort setting.");
     page.send();
     assert.equal(page.doc.getElementById("effort-0-1")!.getAttribute("aria-disabled"), "true");
     assert.match(page.doc.getElementById("effort-why-0-1")!.textContent!, /once the session's models are listed/);
@@ -631,11 +645,24 @@ describe("chains webview: running", () => {
     assert.deepEqual(cards.map((c) => c.getAttribute("aria-current")), [null, "step"]);
   });
 
-  it("disables Run while another run is in progress", async () => {
+  it("disables Run while another run is in progress, and its tooltip says how to stop it", async () => {
     const page = await open({ selectedId: "own" });
     page.send({ running: true });
-    assert.equal(page.named("Run Own").getAttribute("aria-disabled"), "true");
-    assert.match(page.doc.getElementById("run-reason")!.textContent!, /in progress/);
+    const run = page.named("Run Own");
+    assert.equal(run.getAttribute("aria-disabled"), "true");
+    assert.match(page.doc.getElementById("run-reason")!.textContent!, /in progress.*Coordiner: Stop Run/);
+    assert.equal(run.title, page.doc.getElementById("run-reason")!.textContent);
+    page.send({ running: false });
+    assert.equal(page.named("Run Own").hasAttribute("title"), false);
+  });
+
+  it("notes a {{…}} in a card's arguments that Run will not fill", async () => {
+    const withPath: Chain = { ...own, sessions: [{ cards: [{ ...defaultCard("acme:a"), args: "{{docs/stories/01.md}}" }, { ...defaultCard("acme:b"), args: "{{story}}" }] }] };
+    const page = await open({ selectedId: "own" });
+    page.send({ chains: [withPath] });
+    const [first, second] = page.all("#detail .card");
+    assert.match(first!.textContent!, /\{\{docs\/stories\/01\.md\}\} is not a placeholder/);
+    assert.doesNotMatch(second!.textContent!, /not a placeholder/);
   });
 
   it("flags a card whose skill the workspace does not offer", async () => {

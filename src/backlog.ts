@@ -17,6 +17,14 @@ export function parseStories(markdown: string): Story[] {
   return stories;
 }
 
+// A file with no Story or Slice headings is one story: named by its first heading, else by the file's name.
+export function wholeFileStory(markdown: string, fileName: string): Story {
+  const lines = markdown.split("\n");
+  const at = lines.findIndex((line) => ANY_HEADING.test(line));
+  if (at === -1) return { heading: fileName.replace(/\.md$/i, ""), body: markdown.trim() };
+  return { heading: lines[at]!.replace(ANY_HEADING, "").trim(), body: lines.filter((_, i) => i !== at).join("\n").trim() };
+}
+
 export const storyText = (story: Story): string => `${story.heading}\n\n${story.body}`;
 
 // The slug becomes a branch and a directory name, so it is restricted to [a-z0-9-].

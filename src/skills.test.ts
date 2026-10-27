@@ -51,6 +51,28 @@ describe("modelOptions", () => {
   it("falls back to the id when the label is empty", () => {
     assert.equal(modelOptions([info("m", { displayName: "" })])[0]!.label, "m");
   });
+
+  it("offers the default row's model once, named by the model rather than as the default", () => {
+    const listed = [
+      info("default", { resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", description: "Opus 5.5 · Best for everyday, complex tasks" }),
+      info("opus", { resolvedModel: "claude-opus-5-5", displayName: "Opus", description: "Opus 5.5 · Best for everyday, complex tasks" }),
+      info("sonnet", { resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet", description: "Sonnet 5.5 · Efficient for routine tasks" }),
+    ];
+    assert.deepEqual(modelOptions(listed), [
+      { id: "claude-opus-5-5", label: "Opus 5.5", efforts: [] },
+      { id: "claude-sonnet-5-5", label: "Sonnet 5.5", efforts: [] },
+    ]);
+  });
+
+  it("still offers a default row nothing else resolves to, named from its description", () => {
+    const listed = [info("default", { resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", description: "Opus 5.5 · Best for everyday, complex tasks" })];
+    assert.deepEqual(modelOptions(listed), [{ id: "claude-opus-5-5", label: "Opus 5.5", efforts: [] }]);
+  });
+
+  it("keeps the display name when the description has no model lead", () => {
+    assert.equal(modelOptions([info("m", { displayName: "M", description: "A plain sentence." })])[0]!.label, "M");
+    assert.equal(modelOptions([info("m", { displayName: "M", description: " · lead is empty" })])[0]!.label, "M");
+  });
 });
 
 describe("commonEfforts", () => {

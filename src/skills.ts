@@ -16,14 +16,17 @@ export function palette(commands: readonly string[]): PaletteEntry[] {
 export type ModelOption = { id: string; label: string; efforts: Effort[] };
 
 // A card stores the model id the session resolves to, so the session's own model check can compare it. An alias row and an explicit
-// row for the same model are offered once; an id that is not one plain token is not offered at all.
+// row for the same model are offered once; an id that is not one plain token is not offered at all. The "default" row comes last: a
+// card pinned to it keeps that model when the default moves, so it is named by the model ("Opus 5.5", the lead of the description
+// "Opus 5.5 · Best for …"), not "Default (recommended)".
 export function modelOptions(models: readonly ModelInfo[]): ModelOption[] {
   const options: ModelOption[] = [];
-  for (const m of models) {
+  for (const m of [...models.filter((m) => m.value !== "default"), ...models.filter((m) => m.value === "default")]) {
     const id = m.resolvedModel ?? m.value;
     if (!MODEL.test(id) || options.some((o) => o.id === id)) continue;
     const efforts = m.supportsEffort === false ? [] : EFFORTS.filter((e) => m.supportedEffortLevels?.includes(e));
-    options.push({ id, label: plain(m.displayName) || id, efforts });
+    const name = m.description.includes(" · ") ? plain(m.description.split(" · ")[0]!) : "";
+    options.push({ id, label: name || plain(m.displayName) || id, efforts });
   }
   return options;
 }

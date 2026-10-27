@@ -36,7 +36,7 @@ export const pinNote = (card: Card): string | undefined =>
   card.model !== undefined && skillDefault(card.skill).kind === "loop" ? "Pinned: NEXT <tier> does not change this card's model." : undefined;
 
 export function runReason(chain: Chain, view: EditorView): string | undefined {
-  if (view.running) return "A run is in progress.";
+  if (view.running) return "A run is in progress. To run another, stop it first: Stop run or End chat in its chat, the Stop button in the Run view, or Coordiner: Stop Run.";
   if (view.mskills === false && usesMskills(chain)) return "Needs m-skills, which is not installed.";
   const result = runnable(chain, view.palette?.map((p) => p.skill));
   if (!result.ok) return result.reason;
@@ -73,6 +73,14 @@ export const argParts = (args: string): ({ text: string } | { chip: string })[] 
       const kind = INPUT_KINDS.find((k) => INPUTS[k].placeholder === part);
       return kind ? { chip: INPUTS[kind].chip } : { text: part };
     });
+
+// `{{…}}` that Run will not fill, such as a file path, reaches the skill as typed; the card says so.
+export function strayNote(args: string): string | undefined {
+  const stray = [...new Set(args.match(/\{\{[^{}]*\}\}/g) ?? [])].filter((p) => !PLACEHOLDERS.some((known) => known === p));
+  if (stray.length === 0) return undefined;
+  const which = stray.length === 1 ? `${stray[0]} is not a placeholder` : `${stray.join(" and ")} are not placeholders`;
+  return `${which}, so the skill gets it as typed. Run fills only ${PLACEHOLDERS.join(", ")}; for a story file, write ${INPUTS.story.placeholder} and pick the file when Run asks.`;
+}
 
 // Why Add or Add a session is off: the chain is at a limit the extension would refuse to save past.
 export const addCardReason = (chain: Chain, s: number): string | undefined =>
