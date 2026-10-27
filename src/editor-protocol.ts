@@ -1,5 +1,5 @@
 import { MAX_INPUT_CHARS, parseChain, type Chain, type Effort } from "./chains.ts";
-import type { CacheClock, Pick } from "./chat-logic.ts";
+import type { CacheClock, Pick, TurnClock } from "./chat-logic.ts";
 import type { Outcome } from "./run.ts";
 import type { ModelOption, PaletteEntry } from "./skills.ts";
 import type { TalkSnapshot } from "./talk.ts";
@@ -48,9 +48,9 @@ export type EditorState = {
 
 // The run's chat, kept apart from the chains state so a new message never re-renders the chain being edited.
 // `cache` only while a card waits for the user: that is when the time it stays warm is the user's to spend. `ending` once the run
-// has ended: how it ended, with the reason a halt or failure gave.
+// has ended: how it ended, with the reason a halt or failure gave. `turn` only while a card runs: how long, and its last activity.
 export type Ending = { status: Outcome["status"]; reason?: string };
-export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock; ending?: Ending };
+export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock; turn?: TurnClock; ending?: Ending };
 export type ChatMessage =
   // Everything: on "ready", and when a run starts.
   | { type: "chat"; chat: ChatView; entries: Entry[] }

@@ -13,6 +13,10 @@ export const MAX_ENTRIES = 1000;
 // lifetime it writes, and five minutes is taken.
 export type CacheClock = { since: number; ttlMs: number; assumed: boolean };
 
+// The turn running: since when, and the latest sign of life from it (a message, a tool call, the user's answers), with the last
+// tool it called.
+export type TurnClock = { since: number; lastAt: number; last?: string };
+
 const pad = (n: number): string => String(n).padStart(2, "0");
 function clock(ms: number): string {
   const s = Math.ceil(ms / 1000);
@@ -27,6 +31,14 @@ export function cacheLabel(cache: CacheClock, now: number): { text: string; expi
   const assumed = cache.assumed ? " (assumed 5-minute cache)" : "";
   if (left <= 0) return { text: `Prompt cache expired: your next message re-reads the whole conversation without the cache discount.${assumed}`, expired: true };
   return { text: `Prompt cache warm for ${clock(left)}${assumed}`, expired: false };
+}
+
+// Elapsed time counts whole seconds up from the clock, and a clock that moved back reads as no time at all.
+const elapsed = (ms: number): string => clock(Math.max(0, Math.floor(ms / 1000) * 1000));
+
+// Worked out from the clock, as cacheLabel is: a turn that streams nothing for minutes still shows it is alive, and for how long.
+export function busyLabel(turn: TurnClock, now: number): string {
+  return `Working ${elapsed(now - turn.since)} · last activity ${elapsed(now - turn.lastAt)} ago${turn.last ? ` · ${turn.last}` : ""}`;
 }
 
 // What the user chose for one question: offered labels, and their own text when they picked Other.
@@ -98,6 +110,8 @@ export function announcement(prev: ChatView | undefined, next: ChatView): string
     const first = q.questions[0]!;
     return q.questions.length > 1 ? `${q.card} asks ${q.questions.length} questions` : `${q.card} asks: ${first.header || first.question}`;
   }
+  // The form goes away the moment the answers are sent; this says where they went.
+  if (prev?.question && !q && next.phase === "running") return `Answers sent; ${next.card} is working on them`;
   if (next.afterRun && !prev?.afterRun) return `${statusLine(next)}${next.returned ? " Your queued message is back in the message box." : ""}`;
   if (next.phase === "waiting" && prev?.phase !== "waiting") return next.continueReady ? `${next.card} is waiting for you; Continue is ready` : `${next.card} is waiting for you`;
   if (next.returned && !prev?.returned) return "The run ended before your message was sent; it is back in the message box.";
@@ -107,10 +121,13 @@ export function announcement(prev: ChatView | undefined, next: ChatView): string
   return undefined;
 }
 
-// New transcript entries are not a live region; a reply is announced by who gave it, and tool calls are not announced at all.
+// New transcript entries are not a live region; a reply is announced by who gave it, a message of the user's by where it went (a
+// queued one is announced when it is queued), and tool calls are not announced at all.
 export function entriesAnnouncement(entries: readonly Entry[]): string | undefined {
   const reply = entries.findLast((e) => e.kind === "assistant");
-  return reply ? `${reply.card} replied` : undefined;
+  if (reply) return `${reply.card} replied`;
+  const sent = entries.findLast((e) => e.kind === "you");
+  return sent ? `Your message reached ${sent.card}` : undefined;
 }
 
 // The chat's height, as a share of the window: the divider above it moves in steps between these bounds.
@@ -139,3 +156,6 @@ export const heightFromPointer = (clientY: number, windowHeight: number): number
 
 // The saved state is the webview's own, but it is read defensively: anything but a number falls back to the initial height.
 export const savedHeight = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? clampHeight(value) : CHAT_HEIGHT.initial);
+
+// Whether the chat fills the editor, from the saved state: only a saved true does, so a fresh or damaged state starts docked.
+export const savedMax = (value: unknown): boolean => value === true;

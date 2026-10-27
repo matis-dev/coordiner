@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import { announcement, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, destination, endedLine, entriesAnnouncement, firstUnanswered, heightForKey, heightFromPointer, savedHeight, statusLine, cacheLabel } from "./chat-logic.ts";
+import { announcement, busyLabel, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, destination, endedLine, entriesAnnouncement, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -137,6 +137,13 @@ describe("announcement", () => {
     assert.equal(announcement(view({ phase: "ended" }), view({ phase: "ended" })), undefined);
   });
 
+  it("announces once that answers were sent while the card runs on, and not when the run ended with the form open", () => {
+    const open = view({ question: { id: "q1", card: "Implement", questions: [single] } });
+    assert.equal(announcement(open, view()), "Answers sent; Implement is working on them");
+    assert.equal(announcement(view(), view()), undefined);
+    assert.equal(announcement(open, view({ phase: "ended" })), "The run has ended.");
+  });
+
   it("announces a queued message with where it goes, and a pause asked for", () => {
     assert.equal(announcement(view(), view({ queued: [{ id: "m1", text: "x" }] })), "Message queued for the next turn of Implement");
     assert.equal(announcement(undefined, view({ queued: [{ id: "m1", text: "x" }] })), "Message queued for the next turn of Implement");
@@ -147,9 +154,24 @@ describe("announcement", () => {
 });
 
 describe("entriesAnnouncement", () => {
-  it("names the card of the latest reply, and stays quiet for tool calls and the user's own words", () => {
+  it("names the card of the latest reply, else the card the user's message reached, and stays quiet for tool calls", () => {
     assert.equal(entriesAnnouncement([{ kind: "assistant", card: "Plan", text: "a" }, { kind: "assistant", card: "Implement", text: "b" }, { kind: "tool", card: "Implement", name: "Read", input: "{}" }]), "Implement replied");
-    assert.equal(entriesAnnouncement([{ kind: "tool", card: "Implement", name: "Read", input: "{}" }, { kind: "you", card: "Implement", text: "hi" }]), undefined);
+    assert.equal(entriesAnnouncement([{ kind: "tool", card: "Implement", name: "Read", input: "{}" }, { kind: "you", card: "Implement", text: "hi" }]), "Your message reached Implement");
+    assert.equal(entriesAnnouncement([{ kind: "tool", card: "Implement", name: "Read", input: "{}" }]), undefined);
+  });
+});
+
+describe("busyLabel", () => {
+  it("counts whole seconds up since the turn started and since its last activity, with the last tool", () => {
+    assert.equal(busyLabel({ since: 1000, lastAt: 150_000, last: "Bash" }, 192_900), "Working 3:11 · last activity 0:42 ago · Bash");
+  });
+
+  it("names no tool before one was called, and shows hours from one hour on", () => {
+    assert.equal(busyLabel({ since: 0, lastAt: 0 }, 3_600_000), "Working 1:00:00 · last activity 1:00:00 ago");
+  });
+
+  it("reads a clock that moved back as no time at all", () => {
+    assert.equal(busyLabel({ since: 5000, lastAt: 5000 }, 1000), "Working 0:00 · last activity 0:00 ago");
   });
 });
 
@@ -203,5 +225,10 @@ describe("chat height", () => {
     assert.equal(savedHeight("50"), CHAT_HEIGHT.initial);
     assert.equal(savedHeight(Number.NaN), CHAT_HEIGHT.initial);
     assert.equal(savedHeight(undefined), CHAT_HEIGHT.initial);
+  });
+
+  it("fills the editor only when true was saved", () => {
+    assert.equal(savedMax(true), true);
+    for (const value of [false, "true", 1, undefined]) assert.equal(savedMax(value), false);
   });
 });

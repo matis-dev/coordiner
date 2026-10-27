@@ -48,6 +48,7 @@ export class Talk {
   private state: TalkSnapshot = { phase: "idle", attended: false, queued: [], continueReady: false, pausePending: false };
   private waiter?: Waiter;
   private asking?: Asking;
+  private inject?: (text: string) => boolean;
   private ids = 0;
 
   constructor(hooks: TalkHooks) {
@@ -75,6 +76,21 @@ export class Talk {
     this.update({ ...this.state, queued: [] });
     this.hooks.delivered(card, text);
     return text;
+  }
+
+  // The running turn's way in for a message (TurnControl.inject), while a turn runs; undefined between turns.
+  injectInto(inject?: (text: string) => boolean): void {
+    this.inject = inject;
+  }
+
+  // Messages a turn took but ended before starting (it failed or was stopped) go back in front of the queue: the next turn gets
+  // them, or the user does when the run ends. Once the chat has ended, they go straight back to the user.
+  giveBack(texts: readonly string[]): void {
+    if (this.state.phase === "ended") {
+      this.update({ ...this.state, returned: [this.state.returned, ...texts].filter(Boolean).join("\n\n") });
+      return;
+    }
+    this.update({ ...this.state, queued: [...texts.map((text) => ({ id: this.nextId("m"), text })), ...this.state.queued] });
   }
 
   pausePending(): boolean {
@@ -141,13 +157,18 @@ export class Talk {
 
   // ── The user, through the chat ──────────────────────────────────────────────
 
-  // While a card waits, the message is its next turn; otherwise it is queued for the next turn. False when it was refused.
+  // While a card waits, the message is its next turn. While one runs, the turn takes it at once when it can; otherwise, or behind
+  // messages already queued, it is queued for the next turn. False when it was refused.
   send(text: string): boolean {
     const { phase } = this.state;
     if (text.trim() === "" || text.length > MAX_INPUT_CHARS || phase === "idle" || phase === "ended") return false;
     if (this.waiter) {
       this.hooks.delivered(this.waiter.card, text);
       this.waiter.settle({ kind: "message", text });
+      return true;
+    }
+    if (phase === "running" && this.state.queued.length === 0 && this.inject?.(text)) {
+      this.hooks.delivered(this.state.card!, text);
       return true;
     }
     this.update({ ...this.state, queued: [...this.state.queued, { id: this.nextId("m"), text }] });

@@ -17,10 +17,15 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
 
   const title = el("h2", { id: "chat-h" }, "Run");
   const toggle = el("button", { type: "button", "aria-expanded": "true", "aria-controls": "chat-body", onclick: () => setOpen(toggle.getAttribute("aria-expanded") !== "true") }, "Hide chat");
+  // A toggle whose name stays put: the pressed state says which way it is.
+  const maxButton = el("button", { type: "button", "aria-pressed": "false", onclick: () => setMax(maxButton.getAttribute("aria-pressed") !== "true") }, "Maximize chat");
   const line = el("p", { class: "chat-status" });
   // Plain text, not a live region: it changes every second. Only the expiry is announced, once.
   const cacheLine = el("p", { class: "chat-cache", hidden: true });
   let cacheTimer;
+  // The same for a running turn: how long it has run, and its last sign of life. Never announced.
+  const busyLine = el("p", { class: "chat-busy", hidden: true });
+  let busyTimer;
   const transcript = el("ol", { id: "transcript", "aria-label": "Run transcript" });
   const queuedList = el("ul", { class: "queued", "aria-label": "Queued messages" });
   const form = el("form", { class: "question", "aria-labelledby": "question-h", hidden: true, onsubmit: (e) => (e.preventDefault(), submitAnswers()) });
@@ -54,17 +59,19 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     "div",
     { id: "chat-body" },
     line,
+    busyLine,
     cacheLine,
     transcript,
     queuedList,
     form,
     el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, sendButton, pauseButton, continueButton, copyButton, nextButton, stopButton)),
   );
-  root.replaceChildren(el("div", { class: "chat-head" }, title, toggle), body);
+  root.replaceChildren(el("div", { class: "chat-head" }, title, el("div", { class: "chat-head-actions" }, maxButton, toggle)), body);
 
   // The divider between the chains and the chat: the window-splitter pattern, its value the chat's share of the window.
   const { min, max } = logic.CHAT_HEIGHT;
   let height = logic.savedHeight(vscode.getState()?.chatHeight);
+  let maximized = logic.savedMax(vscode.getState()?.chatMax);
   const splitter = el("div", {
     id: "chat-splitter",
     role: "separator",
@@ -96,21 +103,40 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
 
   function setHeight(next, save) {
     height = next;
-    root.style.height = `${next}vh`;
     splitter.setAttribute("aria-valuenow", String(next));
     splitter.setAttribute("aria-valuetext", `${next}% of the window`);
     if (save) remember({ chatHeight: next });
+    layout();
   }
-  setHeight(height, false);
 
-  // A hidden chat shrinks to its heading, and there is nothing to resize.
+  // A hidden chat shrinks to its heading, and a maximized one fills the editor in place of the chains: in neither is there anything
+  // to resize. The saved height stays, so the chat comes back to it.
+  function layout() {
+    const open = !body.hidden;
+    splitter.hidden = !open || maximized;
+    root.style.height = open && !maximized ? `${height}vh` : "";
+    document.body.classList.toggle("chat-max", open && maximized);
+  }
+
   function setOpen(open) {
     toggle.setAttribute("aria-expanded", String(open));
     toggle.textContent = open ? "Hide chat" : "Show chat";
     body.hidden = !open;
-    splitter.hidden = !open;
-    root.style.height = open ? `${height}vh` : "";
+    // A hidden chat cannot fill the editor, so hiding it gives the chains their room back.
+    if (!open && maximized) setMax(false);
+    else layout();
   }
+
+  function setMax(on) {
+    maximized = on;
+    maxButton.setAttribute("aria-pressed", String(on));
+    remember({ chatMax: on });
+    if (on && body.hidden) setOpen(true);
+    else layout();
+  }
+
+  maxButton.setAttribute("aria-pressed", String(maximized));
+  setHeight(height, false);
 
   function showError(text) {
     error.textContent = text;
@@ -277,6 +303,18 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     const said = prev && !readByFocus ? logic.announcement(prev, next) : undefined;
     if (said) announce(said);
     showCache(next);
+    showBusy(next);
+  }
+
+  // One timer at most, running only while a turn runs; it reads the turn's clock, so a computer that slept shows the right time.
+  function showBusy(next) {
+    clearInterval(busyTimer);
+    busyTimer = undefined;
+    busyLine.hidden = !(next.phase === "running" && next.turn);
+    if (busyLine.hidden) return;
+    const tick = () => (busyLine.textContent = logic.busyLabel(next.turn, Date.now()));
+    tick();
+    busyTimer = setInterval(tick, 1000);
   }
 
   // One timer at most, running only while a card waits; any update starts over from the cache it carries.
@@ -316,4 +354,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   });
 
   render(idle, undefined);
+
+  // A chain picked in the rail needs the column a maximized chat covers, or it opens out of sight and its focus goes nowhere.
+  return { showChains: () => maximized && setMax(false) };
 }

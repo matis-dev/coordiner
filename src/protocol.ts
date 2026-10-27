@@ -34,6 +34,7 @@ export const UNATTENDED_NOTE = [
   "Any other skill: when its work is done, end with `COORDINER: DONE`.",
   "If you hit a decision the plan reserves for the user (a one-way door), do not ask: end with `COORDINER: HALT <one-line reason>`.",
   "The status line must be the last line of your final message.",
+  "The user may send a message while you work: take it into account, carry on with the skill's work, and still end your final message with the status line it calls for.",
   "Questions you genuinely need answered go through AskUserQuestion, and every question must carry an option labelled (Recommended) that is safe to take without the user; for multi-select, label a recommended set. Coordiner takes the Recommended option and logs it.",
 ].join(" ");
 

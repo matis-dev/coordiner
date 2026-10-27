@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addCard, addSession, duplicate, moveCard, removeCard, removeSession, rename, setArgs, setEffort, setModel } from "./chain-edit.ts";
+import { addCard, addSession, duplicate, moveCard, removeCard, removeSession, rename, setArgs, setEffort, setModel, setPause } from "./chain-edit.ts";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
 
 const chain: Chain = { id: "c", name: "C", sessions: [{ cards: [defaultCard("a"), defaultCard("b"), defaultCard("c")] }, { cards: [defaultCard("d")] }] };
@@ -62,6 +62,12 @@ describe("model and effort", () => {
   it("sets and clears the effort without touching the model", () => {
     assert.deepEqual(setEffort(pinned, 0, 1, "max").sessions[0]!.cards[1], { ...defaultCard("b"), model: "claude-haiku-5-5", effort: "max" });
     assert.deepEqual(setEffort(pinned, 0, 1).sessions[0]!.cards[1], { ...defaultCard("b"), model: "claude-haiku-5-5" });
+  });
+
+  it("sets and clears the pause without touching the other fields", () => {
+    const paused = setPause(pinned, 0, 1, true);
+    assert.deepEqual(paused.sessions[0]!.cards[1], { ...pinned.sessions[0]!.cards[1]!, pause: true });
+    assert.deepEqual(setPause(paused, 0, 1, false).sessions[0]!.cards[1], pinned.sessions[0]!.cards[1]);
   });
 
   it("leaves the chain as it was out of range", () => {

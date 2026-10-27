@@ -41,6 +41,50 @@ describe("Talk: queueing for the next turn", () => {
     assert.equal(talk.takeQueued("Implement"), undefined);
   });
 
+  it("puts a message into the running turn when it takes one, and queues it when it does not", () => {
+    const { talk, last, delivered, snapshots } = running();
+    const taken: string[] = [];
+    let open = true;
+    talk.injectInto((text) => open && taken.push(text) > 0);
+    const before = snapshots.length;
+    assert.equal(talk.send("use the helper"), true);
+    assert.deepEqual(taken, ["use the helper"]);
+    assert.deepEqual(delivered, [["Implement", "use the helper"]]);
+    assert.equal(snapshots.length, before, "nothing queued, so nothing changed");
+    open = false;
+    assert.equal(talk.send("and keep it small"), true);
+    assert.deepEqual(last().queued.map((q) => q.text), ["and keep it small"]);
+  });
+
+  it("queues behind messages already queued, so they reach the card in order, and after the turn has no way in", () => {
+    const { talk, last } = running();
+    talk.send("first");
+    const taken: string[] = [];
+    talk.injectInto((text) => taken.push(text) > 0);
+    talk.send("second");
+    assert.deepEqual(taken, []);
+    assert.deepEqual(last().queued.map((q) => q.text), ["first", "second"]);
+    talk.takeQueued("Implement");
+    talk.injectInto(undefined);
+    talk.send("third");
+    assert.deepEqual(last().queued.map((q) => q.text), ["third"]);
+  });
+
+  it("takes back what a turn ended before starting: in front of the queue, and to the user once the run has ended", () => {
+    const { talk, last } = running();
+    talk.send("queued after");
+    talk.giveBack(["never started", "nor this"]);
+    assert.deepEqual(last().queued.map((q) => q.text), ["never started", "nor this", "queued after"]);
+    talk.end();
+    assert.equal(last().returned, "never started\n\nnor this\n\nqueued after");
+
+    const ended = running();
+    ended.talk.end();
+    ended.talk.giveBack(["sent as the chat ended"]);
+    assert.equal(ended.last().returned, "sent as the chat ended");
+    assert.deepEqual(ended.last().queued, []);
+  });
+
   it("refuses an empty message and one over the length limit, and takes one at the limit", () => {
     const { talk } = running();
     assert.equal(talk.send("  \n"), false);

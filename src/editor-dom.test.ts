@@ -82,11 +82,11 @@ describe("chains webview: loading", () => {
     assert.ok(page.named("Own"));
   });
 
-  it("opens on the Story template, read-only, with a fresh-context divider between its sessions", async () => {
+  it("opens on the Story template, its arguments read-only, with a fresh-context divider between its sessions", async () => {
     const page = await open();
     page.send();
     assert.equal(page.doc.querySelector("#detail h2")!.textContent, "Story");
-    assert.match(page.doc.getElementById("detail")!.textContent!, /Built-in template, read-only\./);
+    assert.match(page.doc.getElementById("detail")!.textContent!, /Built-in template\. Changing a card's model, effort or pause saves your own copy; duplicate it to edit the rest\./);
     assert.equal(page.all('#detail [role="separator"]').length, 1);
     assert.equal(page.all('#detail [role="separator"]')[0]!.getAttribute("aria-label"), "Fresh context: session 2 starts a new conversation");
     assert.equal(page.all("#detail textarea").length, 0);
@@ -426,10 +426,30 @@ describe("chains webview: model and effort", () => {
     assert.equal((page.doc.getElementById("model-0-1") as HTMLSelectElement).value, "");
   });
 
-  it("shows no selects on a built-in template", async () => {
-    const page = await open({ selectedId: "story" });
+  it("shows the settings on a template's cards, and saves a change to a copy that takes its place with focus on the same control", async () => {
+    const page = await open({ selectedId: "kickoff" });
     page.send(listed);
-    assert.equal(page.doc.querySelector("#detail select[id^=model]"), null);
+    assert.equal(page.doc.querySelector('label[for="model-0-0"]')!.textContent, "Model for Kickoff");
+    choose(page, "model-0-0", "m-opus");
+    const [copy] = page.saves();
+    assert.equal(copy!.name, "Kickoff copy");
+    assert.equal(copy!.builtIn, undefined);
+    assert.notEqual(copy!.id, "kickoff");
+    assert.equal(copy!.sessions[0]!.cards[0]!.model, "m-opus");
+    assert.equal(page.status(), "Copied Kickoff to Kickoff copy to save this change");
+    assert.deepEqual(page.stored(), { selectedId: copy!.id });
+    assert.equal(page.doc.querySelector("#detail h2")!.textContent, "Kickoff copy");
+    assert.equal(page.focused()?.id, "model-0-0");
+    assert.equal((page.doc.getElementById("model-0-0") as HTMLSelectElement).value, "m-opus");
+    assert.equal(TEMPLATES.find((t) => t.id === "kickoff")!.sessions[0]!.cards[0]!.model, undefined, "the template is untouched");
+  });
+
+  it("copies a template for an effort change too", async () => {
+    const page = await open({ selectedId: "kickoff" });
+    page.send(listed);
+    choose(page, "effort-0-0", "low");
+    assert.equal(page.saves()[0]!.sessions[0]!.cards[0]!.effort, "low");
+    assert.equal(page.focused()?.id, "effort-0-0");
   });
 
   it("pins a model, keeps focus on its select and says it saved", async () => {
@@ -519,6 +539,37 @@ describe("chains webview: model and effort", () => {
   });
 });
 
+describe("chains webview: pause for me", () => {
+  const box = (page: Awaited<ReturnType<typeof open>>, id: string) => page.doc.getElementById(id) as HTMLInputElement;
+  const toggle = (page: Awaited<ReturnType<typeof open>>, id: string) => {
+    box(page, id).checked = !box(page, id).checked;
+    box(page, id).dispatchEvent(new page.w.Event("change", { bubbles: true }));
+  };
+
+  it("is a checkbox named for its card, and saves the pause on the user's own chain", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send();
+    const field = box(page, "pause-0-1");
+    assert.equal(field.type, "checkbox");
+    assert.equal(field.checked, false);
+    assert.equal(field.closest("label")!.textContent, " Pause for me after b");
+    toggle(page, "pause-0-1");
+    assert.deepEqual(page.saves()[0]!.sessions[0]!.cards[1], { ...own.sessions[0]!.cards[1]!, pause: true });
+    assert.equal(page.saves()[0]!.id, "own");
+    assert.equal(page.status(), "Saved b");
+    assert.equal(page.focused()?.id, "pause-0-1");
+  });
+
+  it("copies a template to turn its pause off", async () => {
+    const page = await open({ selectedId: "kickoff" });
+    page.send();
+    toggle(page, "pause-0-0");
+    assert.equal(page.saves()[0]!.name, "Kickoff copy");
+    assert.equal(page.saves()[0]!.sessions[0]!.cards[0]!.pause, false);
+    assert.equal(page.focused()?.id, "pause-0-0");
+  });
+});
+
 describe("chains webview: running", () => {
   it("runs a runnable chain", async () => {
     const page = await open({ selectedId: "own" });
@@ -537,7 +588,7 @@ describe("chains webview: running", () => {
     assert.equal(run.getAttribute("aria-disabled"), "false");
     run.click();
     assert.deepEqual(page.posted.at(-1), { type: "run", id: "new-project" });
-    assert.match(page.doc.getElementById("detail")!.textContent!, /Pauses for you/);
+    assert.equal((page.doc.getElementById("pause-0-0") as HTMLInputElement).checked, true);
   });
 
   it("runs a single skill from its template", async () => {
@@ -566,7 +617,8 @@ describe("chains webview: running", () => {
     page.send({ running: true, runningAt: { chainId: "story", session: 1, index: 0 } });
     const current = page.all('.card[aria-current="step"]');
     assert.equal(current.length, 1);
-    assert.match(current[0]!.textContent!, /^Review.*Running$/);
+    assert.equal(current[0]!.querySelector(".card-label")!.textContent, "Review");
+    assert.equal(current[0]!.querySelector(".flag.running")!.textContent, "Running");
     page.send({ running: true, runningAt: { chainId: "own", session: 0, index: 0 } });
     assert.equal(page.all('.card[aria-current="step"]').length, 0);
   });

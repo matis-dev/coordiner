@@ -19,7 +19,7 @@ Coordiner does not call the Anthropic API itself. Each session goes through the 
 The session signs in as `claude` does in your terminal:
 
 - **An API credential is set** in the environment sessions get (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, an `apiKeyHelper`, or a Bedrock, Vertex or Foundry provider variable): usage is billed to that credential's account, whatever account you are logged in with. A session never asks before using an `ANTHROPIC_API_KEY`, as an interactive `claude` does.
-- **Otherwise**: your Claude Code login (`~/.claude/.credentials.json`), so usage counts against your subscription's limits, as `claude -p` does.
+- **Otherwise**: your Claude Code login (in the macOS Keychain, or `~/.claude/.credentials.json` on Linux and Windows), so usage counts against your subscription's limits, as `claude -p` does.
 
 Sessions get the editor's full environment, plus `coordiner.extraPath`. A key exported in your shell profile therefore switches every run to API billing. To check which applies, run `claude` in a terminal and type `/status`. The full order is in [Authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence).
 
@@ -145,7 +145,7 @@ For a typed answer, Run then suggests a run name made from it, which you can cha
 
 ⏸ marks a card that pauses for you: the brainstorm, the debugging, the kickoff and the onboarding are conversations, and your answer at Run only opens them. The conversation happens in the run's chat, described below.
 
-1. Select a template and choose **Duplicate to edit**. Templates are read-only.
+1. Select a template and choose **Duplicate to edit**. A template's skills and arguments are read-only; changing a card's model, effort or pause copies it for you.
 2. Edit the copy: **Add** a skill from the list (every skill your Claude Code session offers, m-skills first), move cards with the arrow buttons or **Alt+←** / **Alt+→**, edit a card's arguments, add or remove sessions. Every change is saved at once. To have Run ask for an input, put one placeholder in a card's arguments:
 
    | Placeholder | Run asks for | What replaces it |
@@ -159,7 +159,7 @@ For a typed answer, Run then suggests a run name made from it, which you can cha
 
 ### Choose a card's model and effort
 
-Each card in your own chains has a **Model** and an **Effort** list.
+Each card has a **Model** and an **Effort** list, and a **Pause for me** checkbox that makes it wait for you after each turn. On a template, changing any of them saves your own copy of the template (named "<template> copy", under **My chains**), selects it, and keeps focus on the same control; the template stays as it was.
 
 - **By tier**, the default, runs the card on its tier's model from the `coordiner.models.*` settings, and the plan's `NEXT <tier>` lines switch it as the run goes.
 - Pick a model to pin the card to it for every turn, loop turns and reminders included.
@@ -169,12 +169,14 @@ The lists come from the same session that lists the skills. If it cannot list it
 
 ### Talk to a run in the chat
 
-The run's chat sits under the chains in the chains editor. It shows what the running card says and which tools it uses, with a **fresh context** divider where a new session starts; the card the run is on is marked **Running** in its lane. If a card starts waiting for you while the editor is closed, the editor opens without taking focus and a notification says so. Drag the bar above the chat to change its height, or focus the bar and use **↑** / **↓** (**Home** and **End** for the smallest and largest); the editor remembers the height. **Hide chat** folds it down to its heading.
+The run's chat sits under the chains in the chains editor. It shows what the running card says and which tools it uses, with a **fresh context** divider where a new session starts; the card the run is on is marked **Running** in its lane. If a card starts waiting for you while the editor is closed, the editor opens without taking focus and a notification says so. Drag the bar above the chat to change its height, or focus the bar and use **↑** / **↓** (**Home** and **End** for the smallest and largest); the editor remembers the height. **Hide chat** folds it down to its heading. **Maximize chat** gives the chat the whole column the chains use, and the editor remembers that too; press it again, **Hide chat**, or pick a chain in the list to bring the chains back. A long question form scrolls on its own, so the transcript above it stays readable.
 
-- **A card that pauses (⏸)** waits after each of its turns. Write in the message box and choose **Send** (or press **Ctrl+Enter**); your message is its next turn, in the same conversation. When the skill asks you something, its question shows as a form: pick an option, or pick **Other** and write your own answer, then choose **Send answers**.
+- **A card that pauses (⏸)** waits after each of its turns. Write in the message box and choose **Send** (or press **Ctrl+Enter**); your message is its next turn, in the same conversation. When the skill asks you something, its question shows as a form: pick an option, or pick **Other** and write your own answer, then choose **Send answers**. The chat says the answers were sent, and the card carries on.
 - **Continue to …** moves the chain on. It is highlighted once the card has given its status line, and you can keep talking before you choose it. A pausing card that never gave a status line simply moves on to the next card.
-- **Any other card** keeps running unattended. A message you send while it works is queued and goes in front of its next turn; the queue says where it goes, including the next session (in a fresh context) when the card may finish first, and **Withdraw** takes a message back. **Pause after this turn** makes the card wait for you once its current turn ends, as a pausing card does.
+- **While a card works**, a line under the status shows how long its turn has run, how long since its last activity, and the last tool it used. A message you send then goes into the running turn: the card finishes the tool it is running, ends that step, and answers your message in the same turn, and the chat says your message reached it. If the turn fails or is stopped before it gets to your message, the message is queued again (or put back in the message box when the run ends). If the turn cannot take a message (it is ending, or your `claude` does not report what became of one), the message is queued and goes in front of the next turn; the queue says where it goes, including the next session (in a fresh context) when the card may finish first, and **Withdraw** takes a message back. Messages already queued keep their place: a new one queues behind them.
+- **Any other card** keeps running unattended. **Pause after this turn** makes the card wait for you once its current turn ends, as a pausing card does.
 - **Stop run** stops the run. A message still queued when the run ends goes back into the message box.
+- **When the run ends**, the transcript says how (done, halted with its reason, failed, stopped), and the chat stays open on the run's last session: each message you send is another turn of it, on the same model and effort, and needs no status line. **Copy resume command** copies `cd <worktree> && claude --resume <id>` to take the session over in a terminal. **Start the next chain here** opens **Start…** and runs the chain you pick in the same worktree, with the last card's reply as its input, after a confirm. **End chat** ends it, and so does confirming a new run.
 - A question waits for your answer for as long as it takes; nothing runs and nothing is spent while it waits.
 - While a card waits, a line under the status counts down how long the prompt cache stays warm. A message sent after that re-reads the whole conversation without the cache discount; the chat says once when the time is up. If the session has not shown how long its cache lasts, five minutes is assumed and the line says so.
 

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   query as sdkQuery,
   type CanUseTool,
@@ -22,14 +23,17 @@ export const REQUIRED_COMMANDS = [
   "m-skills:rolling-history",
 ];
 
-export type QueryFn = (params: { prompt: string; options: Options }) => AsyncIterable<SDKMessage> & Pick<Query, "stopTask">;
+export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage> & Pick<Query, "stopTask">;
 // What the Run view needs to list a turn's background processes: the live set, and each one's latest progress line.
 export type TaskMessage = SDKTaskProgressMessage | SDKBackgroundTasksChangedMessage;
-export type TurnControl = { stopTask(taskId: string): Promise<void> };
+// `inject` writes a user message into the running turn: false when the turn cannot take one (its session does not report what
+// becomes of a message, or the turn is ending), and the caller keeps the message for the next turn.
+export type TurnControl = { stopTask(taskId: string): Promise<void>; inject(text: string): boolean };
 
 export type TurnResult =
   | { ok: true; sessionId: string; model: string; resultText: string; commands: string[] }
-  | { ok: false; sessionId?: string; error: string };
+  // `undelivered`: messages injected into the turn that it ended before starting, in the order they were sent.
+  | { ok: false; sessionId?: string; error: string; undelivered?: string[] };
 
 export type TurnRequest = {
   prompt: string;
@@ -58,6 +62,49 @@ export type TurnRequest = {
 };
 
 type InitMessage = Extract<SDKMessage, { type: "system"; subtype: "init" }>;
+
+const userMessage = (text: string): SDKUserMessage => ({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null });
+
+// The turn's prompt as a stream: the first message, then whatever is pushed while the turn runs, until it is closed.
+function promptStream(first: string) {
+  const pending: SDKUserMessage[] = [];
+  let closed = false;
+  let wake = () => {};
+  async function* messages(): AsyncGenerator<SDKUserMessage> {
+    yield userMessage(first);
+    for (;;) {
+      while (pending.length > 0) yield pending.shift()!;
+      if (closed) return;
+      await new Promise<void>((resolve) => (wake = resolve));
+    }
+  }
+  return {
+    messages: messages(),
+    closed: () => closed,
+    push(message: SDKUserMessage) {
+      pending.push(message);
+      wake();
+    },
+    close() {
+      closed = true;
+      wake();
+    },
+  };
+}
+
+// Observed against Claude Code 2.1.310 (CHANGELOG, 2026-10-27): a message pushed with priority "now" lets the running tool finish,
+// ends the turn there with an empty result, and runs as the next turn of the same query, under the same hooks and canUseTool. The
+// CLI reports what becomes of it in command_lifecycle frames (queued, started, completed, cancelled), keyed by the uuid it was sent
+// with, when its init lists the msg_lifecycle_v1 capability. The SDK types neither, so both are read defensively.
+const LIFECYCLE = "msg_lifecycle_v1";
+const reportsLifecycle = (init: InitMessage): boolean => {
+  const { capabilities } = init as { capabilities?: unknown };
+  return Array.isArray(capabilities) && capabilities.includes(LIFECYCLE);
+};
+function lifecycleOf(message: SDKMessage): { uuid: string; state: string } | undefined {
+  const m = message as { type: string; command_uuid?: unknown; state?: unknown };
+  return m.type === "command_lifecycle" && typeof m.command_uuid === "string" && typeof m.state === "string" ? { uuid: m.command_uuid, state: m.state } : undefined;
+}
 
 export type ListQueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => { supportedCommands(): Promise<SlashCommand[]>; supportedModels(): Promise<ModelInfo[]> };
 // The models are a bonus: a session that lists its skills but not its models still lists its skills. Each error is the bare reason;
@@ -105,14 +152,27 @@ export function pluginProblem(init: InitMessage, required: readonly string[]): s
   return undefined;
 }
 
-// One turn = one SDK query. A later turn continues the same conversation through `resume`, optionally on another model.
-export async function runTurn({ prompt, cwd, model, effort, requiredCommands, canUseTool, env, claudePath, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, onStarted, onTask, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
+// One turn = one SDK query. A later turn continues the same conversation through `resume`, optionally on another model. The prompt
+// stream is closed however the turn ends, so it never waits on a session that is gone.
+export function runTurn(request: TurnRequest): Promise<TurnResult> {
+  const input = promptStream(request.prompt);
+  return turnOn(input, request).finally(input.close);
+}
+
+async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effort, requiredCommands, canUseTool, env, claudePath, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, onStarted, onTask, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
   let sessionId: string | undefined;
+  // Messages injected and not yet started by the session, by uuid: while one is left, a result may not be the turn's last.
+  const unstarted = new Map<string, string>();
+  // A result is held back only when something accounts for it: the early end each injected message causes, or another command the
+  // CLI reported starting. A CLI that stops sending lifecycle frames then ends the turn after the message's own turn, not never.
+  let owed = 0;
+  let injectable = false;
+  const failed = (error: string): TurnResult => ({ ok: false, sessionId, error, ...(unstarted.size > 0 ? { undelivered: [...unstarted.values()] } : {}) });
   try {
     const messages = query({
-      prompt,
+      prompt: input.messages,
       options: {
         cwd,
         model,
@@ -130,7 +190,17 @@ export async function runTurn({ prompt, cwd, model, effort, requiredCommands, ca
         ...(maxTurns ? { maxTurns } : {}),
       },
     });
-    onStarted?.({ stopTask: (taskId) => messages.stopTask(taskId) });
+    onStarted?.({
+      stopTask: (taskId) => messages.stopTask(taskId),
+      inject: (text) => {
+        if (!injectable || input.closed()) return false;
+        const uuid = randomUUID();
+        unstarted.set(uuid, text);
+        owed += 1;
+        input.push({ ...userMessage(text), priority: "now", uuid });
+        return true;
+      },
+    });
     let reportedModel = model;
     let commands: string[] = [];
     for await (const message of messages) {
@@ -138,6 +208,7 @@ export async function runTurn({ prompt, cwd, model, effort, requiredCommands, ca
         sessionId = message.session_id;
         reportedModel = message.model;
         commands = message.slash_commands;
+        injectable = reportsLifecycle(message);
         const problem = pluginProblem(message, requiredCommands);
         if (problem) {
           abortController.abort();
@@ -150,17 +221,28 @@ export async function runTurn({ prompt, cwd, model, effort, requiredCommands, ca
       }
       if (message.type === "assistant" && message.parent_tool_use_id === null) onMessage?.(message);
       if (message.type === "system" && (message.subtype === "task_progress" || message.subtype === "background_tasks_changed")) onTask?.(message);
+      const lifecycle = lifecycleOf(message);
+      if (lifecycle?.state === "started" && !unstarted.has(lifecycle.uuid)) owed += 1;
+      if (lifecycle && lifecycle.state !== "queued") unstarted.delete(lifecycle.uuid);
       if (message.type === "result") {
         sessionId = message.session_id;
+        // The turn a message was injected into ends early; the message's own turn follows, and its result is the one returned. The
+        // latest reply's status line is the one that counts, since the message may have changed where the chain goes.
+        if (message.subtype === "success" && !message.is_error && unstarted.size > 0 && owed > 0) {
+          owed -= 1;
+          continue;
+        }
+        // Closed now, not in finally: returning first waits on the SDK, and a message injected meanwhile would be taken and never run.
+        input.close();
         // Returning here also avoids the throw query() raises after an error result.
         if (message.subtype === "success" && !message.is_error) return { ok: true, sessionId, model: reportedModel, resultText: message.result, commands };
         // A "success" flagged is_error carries the reason (an API error, an outdated claude) in its result text.
-        if (message.subtype === "success" && message.result) return { ok: false, sessionId, error: `the session failed: ${message.result}` };
-        return { ok: false, sessionId, error: `the session ended with ${message.subtype}.` };
+        if (message.subtype === "success" && message.result) return failed(`the session failed: ${message.result}`);
+        return failed(`the session ended with ${message.subtype}.`);
       }
     }
-    return { ok: false, sessionId, error: "the session ended without a result." };
+    return failed("the session ended without a result.");
   } catch (error) {
-    return { ok: false, sessionId, error: `the Claude Agent SDK raised: ${reason(error)}` };
+    return failed(`the Claude Agent SDK raised: ${reason(error)}`);
   }
 }

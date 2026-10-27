@@ -9,6 +9,7 @@ import {
   afterRemove,
   argParts,
   copyName,
+  copyThenEdit,
   effortAfterModel,
   effortChoices,
   effortKey,
@@ -19,6 +20,7 @@ import {
   moveDelta,
   moveKey,
   newChainId,
+  pauseKey,
   pinNote,
   PLACEHOLDER_NOTE,
   removeKey,
@@ -103,6 +105,7 @@ describe("model and effort", () => {
   it("names the selects' focus keys by session and card", () => {
     assert.equal(modelKey(1, 2), "model-1-2");
     assert.equal(effortKey(1, 2), "effort-1-2");
+    assert.equal(pauseKey(1, 2), "pause-1-2");
   });
 });
 
@@ -131,6 +134,15 @@ describe("names and ids", () => {
   it("names a copy and keeps it within the name limit", () => {
     assert.equal(copyName("Story"), "Story copy");
     assert.equal(copyName("x".repeat(100)).length, 100);
+  });
+
+  it("edits a copy of a template, and the chain itself when it is the user's own", () => {
+    const template = TEMPLATES.find((t) => t.id === "kickoff")!;
+    const own: Chain = { id: "own", name: "Own", sessions: [] };
+    const copy = (from: Chain): Chain => ({ id: "c", name: copyName(from.name), sessions: from.sessions });
+    const renamed = (chain: Chain): Chain => ({ ...chain, name: `${chain.name}!` });
+    assert.deepEqual(copyThenEdit(template, renamed, copy), { id: "c", name: "Kickoff copy!", sessions: template.sessions });
+    assert.deepEqual(copyThenEdit(own, renamed, copy), { ...own, name: "Own!" });
   });
 
   it("makes ids a stored chain accepts", () => assert.match(newChainId(1_760_000_000_000), /^chain-[a-z0-9]+$/));

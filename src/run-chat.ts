@@ -1,5 +1,5 @@
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { CacheClock } from "./chat-logic.ts";
+import type { CacheClock, TurnClock } from "./chat-logic.ts";
 import type { ChatMessage, ChatView, EditorMessage, Ending } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
@@ -64,12 +64,25 @@ export function createRunChat({ title, post, record, moved, needsYou, log, now =
   };
   let shown: TalkSnapshot | undefined;
   let cache: CacheClock | undefined;
+  let turn: TurnClock | undefined;
   let ending: Ending | undefined;
-  const viewOf = (snapshot: TalkSnapshot): ChatView => ({ ...snapshot, title, ...(snapshot.phase === "waiting" && cache ? { cache } : {}), ...(ending ? { ending } : {}) });
+  const viewOf = (snapshot: TalkSnapshot): ChatView => ({
+    ...snapshot,
+    title,
+    ...(snapshot.phase === "waiting" && cache ? { cache } : {}),
+    ...(snapshot.phase === "running" && turn ? { turn } : {}),
+    ...(ending ? { ending } : {}),
+  });
   const talk = new Talk({
     changed: (snapshot) => {
       const before = shown;
       shown = snapshot;
+      // A turn's clock starts when a card starts running, or when the run moves to another card; answers sent are activity.
+      if (snapshot.phase === "running") {
+        const at = now();
+        if (before?.phase !== "running" || snapshot.card !== before.card || snapshot.index !== before.index || snapshot.session !== before.session) turn = { since: at, lastAt: at };
+        else if (before.question && !snapshot.question) turn = { ...turn!, lastAt: at };
+      }
       if (snapshot.session !== undefined && snapshot.session !== (before?.session ?? 0)) add([{ kind: "divider", session: snapshot.session }]);
       post({ type: "chatUpdate", chat: viewOf(snapshot) });
       if (snapshot.index !== before?.index || snapshot.session !== before?.session) moved();
@@ -98,7 +111,13 @@ export function createRunChat({ title, post, record, moved, needsYou, log, now =
       systemPromptAppend: NOTES[mode],
       onMessage: (message) => {
         cache = cacheFrom(message.message.usage, now(), cache);
-        add(entriesFrom(message, talk.snapshot().card ?? ""));
+        const snapshot = talk.snapshot();
+        const entries = entriesFrom(message, snapshot.card ?? "");
+        add(entries);
+        if (snapshot.phase !== "running" || !turn) return;
+        const tool = entries.findLast((e) => e.kind === "tool");
+        turn = { ...turn, lastAt: now(), ...(tool?.kind === "tool" ? { last: tool.name } : {}) };
+        post({ type: "chatUpdate", chat: viewOf(snapshot) });
       },
     }),
     ended: (outcome, after) => {

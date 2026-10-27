@@ -80,6 +80,9 @@ export const addCardReason = (chain: Chain, s: number): string | undefined =>
 export const addSessionReason = (chain: Chain): string | undefined => (chain.sessions.length >= MAX_SESSIONS ? `A chain holds at most ${MAX_SESSIONS} sessions.` : undefined);
 
 export const copyName = (name: string): string => `${name} copy`.slice(0, MAX_NAME);
+
+// A template never changes: an edit made on one goes to the copy `copy` makes of it, and the copy is what gets saved.
+export const copyThenEdit = (chain: Chain, change: (chain: Chain) => Chain, copy: (chain: Chain) => Chain): Chain => change(chain.builtIn ? copy(chain) : chain);
 export const newChainId = (now: number): string => `chain-${now.toString(36)}`;
 
 // Alt+Left / Alt+Right on a card move it; anything else is not ours.
@@ -96,6 +99,7 @@ export const removeKey = (s: number, i: number): string => `remove-${s}-${i}`;
 export const addKey = (s: number): string => `add-${s}`;
 export const modelKey = (s: number, i: number): string => `model-${s}-${i}`;
 export const effortKey = (s: number, i: number): string => `effort-${s}-${i}`;
+export const pauseKey = (s: number, i: number): string => `pause-${s}-${i}`;
 
 // After a move, focus stays on the same button of the moved card; at either end nothing moves.
 export function afterMove(s: number, i: number, delta: -1 | 1, count: number): string | undefined {

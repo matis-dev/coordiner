@@ -291,7 +291,7 @@ textarea {
   min-width: 0;
 }
 
-.card-settings .note, .card-settings .reason {
+.card-settings .note, .card-settings .reason, .card-settings .pause {
   grid-column: 1 / -1;
   margin: 0;
 }
@@ -381,6 +381,16 @@ textarea {
   gap: var(--gap);
 }
 
+.chat-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap);
+}
+
+/* Maximized, the chat takes the chains' place; the rail stays, and picking a chain there brings the chains back (media/chat.js). */
+.chat-max .pane { display: none; }
+.chat-max #chat { flex: 1; }
+
 .chat-head h2 {
   font-size: 1.15em;
   font-weight: 600;
@@ -388,7 +398,7 @@ textarea {
 }
 
 .chat-status { margin: 4px 0; color: var(--vscode-descriptionForeground); }
-.chat-cache { margin: 0 0 4px; font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+.chat-cache, .chat-busy { margin: 0 0 4px; font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 
 #transcript, .queued {
   list-style: none;
@@ -396,9 +406,10 @@ textarea {
   padding: 0;
 }
 
+/* Three lines at least, however many questions are open under it. */
 #transcript {
   flex: 1;
-  min-height: 1.5em;
+  min-height: 4.5em;
   overflow-y: auto;
 }
 
@@ -430,6 +441,14 @@ textarea {
   margin-bottom: 4px;
   border: 1px dashed var(--rule);
   border-radius: var(--radius);
+}
+
+/* A long form scrolls on its own, at most half the chat, so the transcript above it stays readable. */
+.question {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 50%;
+  overflow-y: auto;
 }
 
 .question fieldset {

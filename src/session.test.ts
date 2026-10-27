@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { CanUseTool, HookInput, ModelInfo, Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { CanUseTool, HookInput, ModelInfo, Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { listCommands, REQUIRED_COMMANDS, runTurn, type ListQueryFn, type QueryFn, type TaskMessage, type TurnControl } from "./session.ts";
 
 // Fixtures carry only the fields runTurn reads; the full SDK message types are far larger.
@@ -15,8 +15,15 @@ const base = { prompt: "go", cwd: "/repo", model: "model-a", env: { PATH: "/bin"
 const pushCall = { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: ["git", "push"].join(" ") } } as unknown as HookInput;
 const decision = (out: object) => (out as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision;
 
+// The text of each message the turn's prompt stream sent, read once the turn has closed it.
+async function texts(prompt: AsyncIterable<SDKUserMessage> | undefined): Promise<string[]> {
+  const sent: string[] = [];
+  for await (const m of prompt!) sent.push(m.message.content as string);
+  return sent;
+}
+
 const fakeQuery = (body: (options: Options) => AsyncGenerator<SDKMessage>) => {
-  const seen: { prompt?: string; options?: Options; stopped: string[] } = { stopped: [] };
+  const seen: { prompt?: AsyncIterable<SDKUserMessage>; options?: Options; stopped: string[] } = { stopped: [] };
   const query: QueryFn = ({ prompt, options }) => {
     seen.prompt = prompt;
     seen.options = options;
@@ -33,7 +40,7 @@ describe("runTurn", () => {
     });
     const result = await runTurn({ ...base, query });
     assert.deepEqual(result, { ok: true, sessionId: "sess-1", model: "model-a", resultText: "plan ready", commands: [...REQUIRED_COMMANDS] });
-    assert.equal(seen.prompt, "go");
+    assert.deepEqual(await texts(seen.prompt), ["go"]);
   });
 
   it("passes on the conversation's own assistant messages as they arrive, not a subagent's", async () => {
@@ -70,6 +77,127 @@ describe("runTurn", () => {
     });
     assert.equal((await runTurn({ ...base, query, onStarted: (c) => (control = c) })).ok, true);
     assert.deepEqual(seen.stopped, ["task-7"]);
+  });
+
+  describe("a message injected into the running turn", () => {
+    const reporting = () => init({ capabilities: ["interrupt_receipt_v1", "msg_lifecycle_v1"] });
+    const lifecycle = (uuid: unknown, state: unknown) => msg({ type: "command_lifecycle", command_uuid: uuid, state });
+    // The fake pulls the prompt stream as the SDK does, waiting on it before the message is pushed, to learn the uuid it was sent with.
+    const injectInto = async (prompt: AsyncIterable<SDKUserMessage> | undefined, control: TurnControl, text: string) => {
+      const stream = prompt![Symbol.asyncIterator]();
+      await stream.next();
+      const next = stream.next();
+      assert.equal(control.inject(text), true);
+      return (await next).value as SDKUserMessage;
+    };
+
+    it("goes into the prompt stream with priority now, and the result of its own turn is the one returned", async () => {
+      let control: TurnControl | undefined;
+      let injected: SDKUserMessage | undefined;
+      const { query, seen } = fakeQuery(async function* () {
+        yield reporting();
+        injected = await injectInto(seen.prompt, control!, "use the helper");
+        // The turn it went into ends early with an empty result; the message's own turn follows.
+        yield success("");
+        yield lifecycle(injected.uuid, "queued");
+        // A malformed frame is ignored; another command the CLI starts first holds back its own result too.
+        yield lifecycle(42, "started");
+        yield lifecycle("other-command", "started");
+        yield success("");
+        yield lifecycle(injected.uuid, "started");
+        yield success("final");
+      });
+      const result = await runTurn({ ...base, query, onStarted: (c) => (control = c) });
+      assert.deepEqual(result.ok && result.resultText, "final");
+      assert.equal(injected!.message.content, "use the helper");
+      assert.equal(injected!.priority, "now");
+      assert.match(injected!.uuid!, /^[0-9a-f-]{36}$/);
+      assert.equal(control!.inject("too late"), false, "the turn has ended");
+      assert.deepEqual(await texts(seen.prompt), [], "the stream is closed");
+    });
+
+    it("is refused before the session starts and by a session that does not report what becomes of a message", async () => {
+      let control: TurnControl | undefined;
+      const refused: boolean[] = [];
+      const { query } = fakeQuery(async function* () {
+        refused.push(control!.inject("early"));
+        yield init({ capabilities: ["interrupt_receipt_v1"] });
+        refused.push(control!.inject("unreported"));
+        yield success();
+      });
+      assert.equal((await runTurn({ ...base, query, onStarted: (c) => (control = c) })).ok, true);
+      assert.deepEqual(refused, [false, false]);
+    });
+
+    it("holds back one result per message, so two messages each get their turn", async () => {
+      let control: TurnControl | undefined;
+      const { query, seen } = fakeQuery(async function* () {
+        yield reporting();
+        const first = await injectInto(seen.prompt, control!, "one");
+        assert.equal(control!.inject("two"), true);
+        const second = (await seen.prompt![Symbol.asyncIterator]().next()).value as SDKUserMessage;
+        yield success("");
+        yield lifecycle(first.uuid, "started");
+        yield success("answer to one");
+        yield lifecycle(second.uuid, "started");
+        yield success("answer to two");
+      });
+      const result = await runTurn({ ...base, query, onStarted: (c) => (control = c) });
+      assert.deepEqual(result.ok && result.resultText, "answer to two");
+    });
+
+    it("ends after the message's own turn when the session never reports what became of it, instead of waiting for ever", async () => {
+      let control: TurnControl | undefined;
+      const { query, seen } = fakeQuery(async function* () {
+        yield reporting();
+        await injectInto(seen.prompt, control!, "use the helper");
+        yield success("");
+        yield success("answer\nCOORDINER: DONE");
+        yield success("never read");
+      });
+      const result = await runTurn({ ...base, query, onStarted: (c) => (control = c) });
+      assert.deepEqual(result.ok && result.resultText, "answer\nCOORDINER: DONE");
+    });
+
+    it("no longer holds the turn open once cancelled", async () => {
+      let control: TurnControl | undefined;
+      const { query, seen } = fakeQuery(async function* () {
+        yield reporting();
+        const injected = await injectInto(seen.prompt, control!, "never mind");
+        yield lifecycle(injected.uuid, "cancelled");
+        yield success("first");
+      });
+      const result = await runTurn({ ...base, query, onStarted: (c) => (control = c) });
+      assert.deepEqual(result.ok && result.resultText, "first");
+    });
+
+    it("does not hold back a failed result, and returns with it the message the turn never started", async () => {
+      let control: TurnControl | undefined;
+      const { query, seen } = fakeQuery(async function* () {
+        yield reporting();
+        await injectInto(seen.prompt, control!, "more");
+        yield msg({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "sess-1" });
+      });
+      assert.deepEqual(await runTurn({ ...base, query, onStarted: (c) => (control = c) }), {
+        ok: false,
+        sessionId: "sess-1",
+        error: "the session ended with error_during_execution.",
+        undelivered: ["more"],
+      });
+    });
+
+    it("returns only the messages not yet started when the turn is stopped", async () => {
+      let control: TurnControl | undefined;
+      const { query, seen } = fakeQuery(async function* () {
+        yield reporting();
+        const started = await injectInto(seen.prompt, control!, "ran");
+        yield lifecycle(started.uuid, "started");
+        assert.equal(control!.inject("waiting"), true);
+        throw new Error("aborted by user");
+      });
+      const result = await runTurn({ ...base, query, onStarted: (c) => (control = c) });
+      assert.deepEqual(!result.ok && result.undelivered, ["waiting"]);
+    });
   });
 
   it("passes on task progress and the live set of background tasks, and nothing else", async () => {

@@ -428,7 +428,7 @@ describe("runChain: other chains", () => {
     assert.deepEqual(h.requests, [{ prompt: "/acme:lint", model: "m-medium", interactive: false }]);
   });
 
-  // The first real Kickoff run: the card named the planning after it, and was halted as if it had given no status line.
+  // A one-card chain has no next card for NEXT to name: the NEXT ends the card as DONE would.
   it("ends a one-card Kickoff as done when it ends on NEXT and the user continues: no reminder, no halt", async () => {
     const h = harness([reply("profile written\nCOORDINER: NEXT Standard", 1)], undefined, [(t) => t.continue()]);
     const kickoff = TEMPLATES.find((t) => t.id === "kickoff")!;

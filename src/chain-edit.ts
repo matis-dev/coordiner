@@ -26,6 +26,7 @@ export const setModel = (chain: Chain, s: number, i: number, model?: string, eff
   withCard(chain, s, i, ({ model: _model, effort: _effort, ...c }) => ({ ...c, ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}) }));
 export const setEffort = (chain: Chain, s: number, i: number, effort?: Effort): Chain =>
   withCard(chain, s, i, ({ effort: _effort, ...c }) => ({ ...c, ...(effort !== undefined ? { effort } : {}) }));
+export const setPause = (chain: Chain, s: number, i: number, pause: boolean): Chain => withCard(chain, s, i, (c) => ({ ...c, pause }));
 
 export const addSession = (chain: Chain): Chain => ({ ...chain, sessions: [...chain.sessions, { cards: [] }] });
 export const removeSession = (chain: Chain, s: number): Chain => ({ ...chain, sessions: chain.sessions.filter((_, i) => i !== s) });

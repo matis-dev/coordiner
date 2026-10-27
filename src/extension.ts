@@ -528,13 +528,18 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
         requiredCommands: required,
         signal,
         onGuard: log,
-        onStarted: (c) => (control = c),
+        onStarted: (c) => {
+          control = c;
+          chat.talk.injectInto(c.inject);
+        },
         onTask: (message) => provider.setProcesses(applyTask(provider.processes, message)),
       });
     } finally {
       control = undefined;
+      chat.talk.injectInto(undefined);
       provider.setProcesses([]);
     }
+    if (!result.ok && result.undelivered) chat.talk.giveBack(result.undelivered);
     if (result.sessionId) {
       const reply = result.ok ? replyOf(result.resultText) : (last?.reply ?? "");
       last = { sessionId: result.sessionId, model: request.model, ...(request.effort ? { effort: request.effort } : {}), card, reply };

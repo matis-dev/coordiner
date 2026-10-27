@@ -45,13 +45,14 @@ export async function start() {
     requestAnimationFrame(() => (status.textContent = text));
   };
 
-  startChat({ vscode, root: chatRoot, logic: chatLogic, maxChars: chainsModule.MAX_INPUT_CHARS, announce, remember });
+  const chat = startChat({ vscode, root: chatRoot, logic: chatLogic, maxChars: chainsModule.MAX_INPUT_CHARS, announce, remember });
 
   const allChains = () => [...state.templates, ...state.chains];
   const selected = () => allChains().find((c) => c.id === selectedId) ?? state.templates[0];
   const newId = () => logic.newChainId(Date.now());
 
   function select(id) {
+    chat.showChains();
     selectedId = id;
     remember({ selectedId });
     pendingFocus = "chain-title";
@@ -65,6 +66,16 @@ export async function start() {
     vscode.postMessage({ type: "save", chain });
     render();
     if (message) announce(message);
+  }
+
+  // A setting changed on a template goes to a copy of it, which takes the template's place on screen. The copy's cards have the
+  // same focus keys, so focus stays on the control that was changed.
+  function saveSetting(chain, change, label, focus) {
+    const next = logic.copyThenEdit(chain, change, (from) => edit.duplicate(from, newId(), logic.copyName(from.name)));
+    if (next.id === chain.id) return save(next, `Saved ${label}`, focus);
+    selectedId = next.id;
+    remember({ selectedId });
+    save(next, `Copied ${chain.name} to ${next.name} to save this change`, focus);
   }
 
   function copyOf(chain) {
@@ -120,6 +131,7 @@ export async function start() {
         "button",
         { type: "button", "data-focus": "new-chain", onclick: () => {
           const chain = { id: newId(), name: "New chain", sessions: [{ cards: [] }] };
+          chat.showChains();
           selectedId = chain.id;
           remember({ selectedId });
           save(chain, "Created New chain", "chain-title");
@@ -140,12 +152,11 @@ export async function start() {
       children.push(
         el("label", { for: id, class: "visually-hidden" }, `Arguments for ${label}`),
         el("textarea", { id, rows: 2, maxlength: chainsModule.MAX_ARGS, "data-focus": id, onchange: (e) => save(edit.setArgs(chain, s, i, e.target.value), `Saved ${label}`, id) }, c.args),
-        settings(chain, s, i, c),
       );
     } else if (c.args) {
       children.push(el("p", { class: "args" }, logic.argParts(c.args).map((part) => ("chip" in part ? el("span", { class: "chip" }, part.chip) : part.text))));
     }
-    if (c.pause) children.push(el("span", { class: "flag" }, "Pauses for you"));
+    children.push(settings(chain, s, i, c));
     if (missing) children.push(el("span", { class: "flag" }, "Not available in this workspace"));
     if (!logic.modelOffered(c, state)) children.push(el("span", { class: "flag" }, "Model not offered by this session"));
     if (editable) {
@@ -181,12 +192,14 @@ export async function start() {
     return el("li", { class: "card", "aria-current": running ? "step" : undefined }, children);
   }
 
-  // Model and effort, each a native select whose visible label names the card. A stored value the session does not offer stays
-  // selected, marked, so the card shows what Run would refuse rather than quietly changing it.
+  // Model, effort and pause, each a native control whose label names the card, on every card: on a template, a change makes a copy.
+  // A stored value the session does not offer stays selected, marked, so the card shows what Run would refuse rather than quietly
+  // changing it.
   function settings(chain, s, i, c) {
     const label = c.label;
     const modelId = logic.modelKey(s, i);
     const effortId = logic.effortKey(s, i);
+    const pauseId = logic.pauseKey(s, i);
     const models = state.models ?? [];
     const efforts = logic.effortChoices(c, state);
     // Until the session lists its models, a pinned one is shown as stored: only a listed session can say it does not offer it.
@@ -202,7 +215,7 @@ export async function start() {
         "select",
         { id: modelId, "data-focus": modelId, onchange: (e) => {
           const model = e.target.value || undefined;
-          save(edit.setModel(chain, s, i, model, logic.effortAfterModel(c, model, state)), `Saved ${label}`, modelId);
+          saveSetting(chain, (to) => edit.setModel(to, s, i, model, logic.effortAfterModel(c, model, state)), label, modelId);
         } },
         el("option", { value: "" }, "By tier"),
         models.map((m) => el("option", { value: m.id, selected: m.id === c.model }, m.label)),
@@ -213,7 +226,7 @@ export async function start() {
         "select",
         // Off only when there is nothing to pick; an effort the model no longer takes can still be set back to the default.
         { id: effortId, "data-focus": effortId, "aria-disabled": String(why !== undefined && c.effort === undefined), "aria-describedby": why ? `effort-why-${s}-${i}` : undefined, onchange: (e) => {
-          save(edit.setEffort(chain, s, i, e.target.value || undefined), `Saved ${label}`, effortId);
+          saveSetting(chain, (to) => edit.setEffort(to, s, i, e.target.value || undefined), label, effortId);
         } },
         el("option", { value: "" }, "Model default"),
         efforts.map((effort) => el("option", { value: effort, selected: effort === c.effort }, effort)),
@@ -221,6 +234,13 @@ export async function start() {
       ),
       why ? el("p", { id: `effort-why-${s}-${i}`, class: "reason" }, why) : undefined,
       note ? el("p", { class: "note" }, note) : undefined,
+      el(
+        "label",
+        { class: "pause" },
+        el("input", { type: "checkbox", id: pauseId, "data-focus": pauseId, checked: c.pause, onchange: (e) => saveSetting(chain, (to) => edit.setPause(to, s, i, e.target.checked), label, pauseId) }),
+        " Pause for me",
+        el("span", { class: "visually-hidden" }, ` after ${label}`),
+      ),
     );
   }
 
@@ -275,7 +295,7 @@ export async function start() {
         el("button", { type: "button", "data-focus": "delete-chain", onclick: () => vscode.postMessage({ type: "delete", id: chain.id }) }, "Delete chain"),
       );
     } else {
-      parts.push(el("p", { class: "note" }, "Built-in template, read-only."));
+      parts.push(el("p", { class: "note" }, "Built-in template. Changing a card's model, effort or pause saves your own copy; duplicate it to edit the rest."));
       toolbar.push(el("button", { type: "button", "data-focus": "duplicate", onclick: () => copyOf(chain) }, "Duplicate to edit"));
     }
     toolbar.push(

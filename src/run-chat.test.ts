@@ -104,6 +104,50 @@ describe("createRunChat", () => {
     assert.deepEqual(chat.view().cache, { since: 50, ttlMs: 3_600_000, assumed: false });
   });
 
+  it("clocks a running turn from when its card starts running, and stamps its last activity and tool", () => {
+    let clock = 100;
+    const { chat, updates } = setup(() => clock);
+    const tool = (name: string) => ({ ...said(""), message: { content: [{ type: "tool_use", name, input: {} }] } }) as unknown as SDKAssistantMessage;
+    chat.talk.at({ card: "Plan", index: 0, session: 0, attended: false });
+    assert.deepEqual(chat.view().turn, { since: 100, lastAt: 100 });
+    clock = 200;
+    chat.forTurn("unattended").onMessage(tool("Bash"));
+    assert.deepEqual(chat.view().turn, { since: 100, lastAt: 200, last: "Bash" });
+    const last = updates().at(-1)!;
+    assert.deepEqual(last.type === "chatUpdate" && last.chat.turn, { since: 100, lastAt: 200, last: "Bash" });
+    clock = 300;
+    chat.forTurn("unattended").onMessage(said("thinking out loud"));
+    assert.deepEqual(chat.view().turn, { since: 100, lastAt: 300, last: "Bash" }, "a reply keeps the last tool");
+    clock = 400;
+    chat.talk.at({ card: "Plan", index: 0, session: 0, attended: false });
+    assert.equal(chat.view().turn?.since, 100, "another turn of the same card keeps the clock");
+    chat.talk.at({ card: "Implement", index: 1, session: 0, attended: false });
+    assert.deepEqual(chat.view().turn, { since: 400, lastAt: 400 });
+  });
+
+  it("counts the user's answers as activity, and shows no clock while the card waits", async () => {
+    let clock = 0;
+    const { chat } = setup(() => clock);
+    chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });
+    const answers = chat.talk.ask([question], new AbortController().signal);
+    clock = 50;
+    chat.talk.answer(chat.view().question!.id, [{ picked: ["SQLite"] }]);
+    await answers;
+    assert.deepEqual(chat.view().turn, { since: 0, lastAt: 50 });
+    void chat.talk.waitForYou({ card: "Brainstorm", ready: false, signal: new AbortController().signal });
+    assert.equal(chat.view().turn, undefined);
+  });
+
+  it("sends no turn update for a message outside a running turn", () => {
+    const { chat, updates } = setup();
+    chat.forTurn("unattended").onMessage(said("early"));
+    assert.equal(updates().length, 0);
+    void chat.talk.waitForYou({ card: "Brainstorm", ready: false, signal: new AbortController().signal });
+    const before = updates().length;
+    chat.forTurn("interactive").onMessage(said("late"));
+    assert.equal(updates().length, before);
+  });
+
   it("sends no cache while a card waits before any response arrived", () => {
     const { chat } = setup();
     void chat.talk.waitForYou({ card: "Brainstorm", ready: false, signal: new AbortController().signal });

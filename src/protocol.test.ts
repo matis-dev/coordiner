@@ -41,6 +41,10 @@ describe("UNATTENDED_NOTE", () => {
   it("tells the review, fix and history phases, and any other skill, how to end", () => {
     for (const phase of ["Reviewing:", "Fixing findings:", "Rolling history:", "Any other skill:"]) assert.ok(UNATTENDED_NOTE.includes(phase), phase);
   });
+
+  it("keeps the status line after a message the user sends while the card works", () => {
+    assert.match(UNATTENDED_NOTE, /user may send a message while you work: .*still end your final message with the status line/);
+  });
 });
 
 describe("INTERACTIVE_NOTE", () => {

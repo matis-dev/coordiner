@@ -576,3 +576,121 @@ describe("run chat: the divider above it", () => {
     assert.equal(page.chat().style.height, "35vh");
   });
 });
+
+describe("run chat: maximized", () => {
+  const maxed = (page: Awaited<ReturnType<typeof open>>) => page.doc.body.classList.contains("chat-max");
+
+  it("fills the editor in place of the chains, keeps focus on its button, and remembers it with what the editor saved", async () => {
+    const page = await open({ selectedId: "own", chatHeight: 60 });
+    const button = page.button("Maximize chat");
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+    button.focus();
+    button.click();
+    assert.equal(button.getAttribute("aria-pressed"), "true");
+    assert.equal(maxed(page), true);
+    assert.equal(page.splitter().hidden, true);
+    assert.equal(page.chat().style.height, "");
+    assert.equal(page.doc.activeElement, button);
+    assert.deepEqual(page.saved(), { selectedId: "own", chatHeight: 60, chatMax: true });
+    button.click();
+    assert.equal(maxed(page), false);
+    assert.equal(page.splitter().hidden, false);
+    assert.equal(page.chat().style.height, "60vh");
+    assert.equal((page.saved() as { chatMax: boolean }).chatMax, false);
+  });
+
+  it("opens maximized when it was saved that way", async () => {
+    const page = await open({ chatMax: true });
+    assert.equal(page.button("Maximize chat").getAttribute("aria-pressed"), "true");
+    assert.equal(maxed(page), true);
+    assert.equal(page.splitter().hidden, true);
+  });
+
+  it("gives the chains their column back when a chain is picked in the rail or a new one is made, with focus on its heading", async () => {
+    const page = await open({ chatMax: true });
+    page.state();
+    page.doc.querySelector<HTMLButtonElement>('[data-focus="rail-idea"]')!.click();
+    assert.equal(maxed(page), false);
+    assert.equal(page.button("Maximize chat").getAttribute("aria-pressed"), "false");
+    assert.equal((page.saved() as { chatMax: boolean }).chatMax, false);
+    assert.equal((page.doc.activeElement as HTMLElement).dataset.focus, "chain-title");
+    assert.equal(page.doc.activeElement!.textContent, "Idea");
+
+    page.button("Maximize chat").click();
+    page.doc.querySelector<HTMLButtonElement>('[data-focus="new-chain"]')!.click();
+    assert.equal(maxed(page), false);
+    assert.equal(page.doc.activeElement!.textContent, "New chain");
+  });
+
+  it("stays maximized when the run ends", async () => {
+    const page = await open({ chatMax: true });
+    page.reset(view());
+    page.update(view({ phase: "ended" }));
+    assert.equal(maxed(page), true);
+  });
+
+  it("gives the chains their room back when hidden, and shows the chat again when maximized from hidden", async () => {
+    const page = await open({ chatMax: true });
+    page.button("Hide chat").click();
+    assert.equal(maxed(page), false);
+    assert.equal(page.button("Maximize chat").getAttribute("aria-pressed"), "false");
+    assert.equal(page.splitter().hidden, true);
+    assert.equal((page.saved() as { chatMax: boolean }).chatMax, false);
+    page.button("Maximize chat").click();
+    assert.equal(page.button("Hide chat").getAttribute("aria-expanded"), "true");
+    assert.equal(page.doc.getElementById("chat-body")!.hidden, false);
+    assert.equal(maxed(page), true);
+  });
+});
+
+describe("run chat: a running turn", () => {
+  const busyLine = (page: Awaited<ReturnType<typeof open>>) => page.doc.querySelector<HTMLElement>(".chat-busy")!;
+  afterEach(() => mock.timers.reset());
+
+  it("counts up each second from the turn's clock, with the last activity and tool, as plain text", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 75_000 });
+    page.update(view({ turn: { since: 0, lastAt: 60_000, last: "Bash" } }));
+    assert.equal(busyLine(page).hidden, false);
+    assert.equal(busyLine(page).textContent, "Working 1:15 · last activity 0:15 ago · Bash");
+    assert.equal(busyLine(page).getAttribute("role"), null);
+    mock.timers.tick(1000);
+    assert.equal(busyLine(page).textContent, "Working 1:16 · last activity 0:16 ago · Bash");
+  });
+
+  it("shows nothing while a card waits, and its timer stops with the turn", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.update(view({ turn: { since: 0, lastAt: 0 } }));
+    page.update(view({ phase: "waiting", attended: true }));
+    assert.equal(busyLine(page).hidden, true);
+    const shown = busyLine(page).textContent;
+    mock.timers.tick(5000);
+    assert.equal(busyLine(page).textContent, shown);
+    page.update(view());
+    assert.equal(busyLine(page).hidden, true, "a running view without a clock shows nothing");
+  });
+
+  it("says once that the answers were sent, and keeps showing the turn", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.reset(view({ attended: true }));
+    page.update(view({ attended: true, question }));
+    page.doc.getElementById("status")!.textContent = "";
+    page.update(view({ attended: true, turn: { since: 0, lastAt: Date.now() } }));
+    assert.equal(page.status(), "Answers sent; Implement is working on them");
+    assert.equal(busyLine(page).hidden, false);
+    page.doc.getElementById("status")!.textContent = "";
+    page.update(view({ attended: true, turn: { since: 0, lastAt: Date.now() } }));
+    assert.equal(page.status(), "");
+  });
+});
+
+describe("run chat: a message that reached the running turn", () => {
+  it("says where it went", async () => {
+    const page = await open();
+    page.reset(view());
+    page.append([{ kind: "you", card: "Implement", text: "use the helper" }]);
+    assert.equal(page.status(), "Your message reached Implement");
+  });
+});
