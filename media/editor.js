@@ -146,7 +146,7 @@ export async function start() {
     const running = logic.runningCard(chain, s, state.runningAt) === i;
     const label = c.label;
     const children = [el("span", { class: "card-label" }, label), el("code", { class: "skill" }, c.skill)];
-    if (running) children.push(el("span", { class: "flag running" }, "Running"));
+    if (running) children.push(el("span", { class: "flag running" }, state.runningAt.waiting ? "Waiting for you" : "Running"));
     if (editable) {
       const id = `args-${s}-${i}`;
       children.push(

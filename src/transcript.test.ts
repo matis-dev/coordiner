@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { MAX_ENTRIES } from "./chat-logic.ts";
-import { endEntry, entriesFrom, Transcript, type Entry } from "./transcript.ts";
+import { endEntry, entriesFrom, toolInput, Transcript, type Entry } from "./transcript.ts";
 
 // Fixtures carry only the fields entriesFrom reads.
 const assistant = (...content: object[]) => ({ type: "assistant", parent_tool_use_id: null, message: { content } }) as unknown as SDKAssistantMessage;
@@ -16,7 +16,7 @@ describe("entriesFrom", () => {
     );
     assert.deepEqual(entries, [
       { kind: "assistant", card: "Plan", text: "Reading the code." },
-      { kind: "tool", card: "Plan", name: "Read", input: '{"file_path":"src/run.ts"}' },
+      { kind: "tool", card: "Plan", name: "Read", input: "src/run.ts" },
     ]);
   });
 
@@ -24,9 +24,9 @@ describe("entriesFrom", () => {
     assert.deepEqual(entriesFrom(assistant({ type: "text", text: " \n " }), "Plan"), []);
   });
 
-  it("clips a long tool input at 300 characters", () => {
-    const [entry] = entriesFrom(assistant({ type: "tool_use", id: "t1", name: "Write", input: { content: "x".repeat(400) } }), "Implement");
-    assert.equal(entry?.kind === "tool" && entry.input.length, 301);
+  it("clips a long tool input at 2000 characters", () => {
+    const [entry] = entriesFrom(assistant({ type: "tool_use", id: "t1", name: "Write", input: { content: "x".repeat(2100) } }), "Implement");
+    assert.equal(entry?.kind === "tool" && entry.input.length, 2001);
     assert.equal(entry?.kind === "tool" && entry.input.endsWith("…"), true);
   });
 
@@ -38,8 +38,34 @@ describe("entriesFrom", () => {
     const entries = entriesFrom(assistant({ type: "text", text: "red \u001b[31mtext" }, { type: "tool_use", id: "t1", name: "Ba\u0007sh", input: {} }), "Plan");
     assert.deepEqual(entries, [
       { kind: "assistant", card: "Plan", text: "red [31mtext" },
-      { kind: "tool", card: "Plan", name: "Bash", input: "{}" },
+      { kind: "tool", card: "Plan", name: "Bash", input: "" },
     ]);
+  });
+});
+
+describe("toolInput", () => {
+  it("shows the field that says what a call does, alone", () => {
+    assert.equal(toolInput("Bash", { command: "ls -la", description: "List files" }), "ls -la");
+    assert.equal(toolInput("Read", { file_path: "src/run.ts", limit: 20 }), "src/run.ts");
+  });
+
+  it("names each field when a tool has several telling ones, or is not known", () => {
+    assert.equal(toolInput("Grep", { pattern: "TODO", path: "src", output_mode: "content" }), "pattern: TODO\npath: src");
+    assert.equal(toolInput("mcp__x__y", { id: 3, tags: ["a"] }), 'id: 3\ntags: ["a"]');
+  });
+
+  it("lists the questions asked and the todos with their state", () => {
+    assert.equal(toolInput("AskUserQuestion", { questions: [{ question: "Which store?" }, { question: "Which port?" }] }), "Which store?\nWhich port?");
+    assert.equal(
+      toolInput("TodoWrite", { todos: [{ content: "plan", status: "completed" }, { content: "build", status: "in_progress" }, { content: "ship", status: "pending" }] }),
+      "[x] plan\n[~] build\n[ ] ship",
+    );
+  });
+
+  // The model writes a tool call's input, and a throw here would fail the turn that shows it.
+  it("shows a malformed question or todo as written instead of throwing", () => {
+    assert.equal(toolInput("AskUserQuestion", { questions: [null, "Which port?"] }), "null\nWhich port?");
+    assert.equal(toolInput("TodoWrite", { todos: [null, "ship", { status: "completed" }] }), '[ ] null\n[ ] ship\n[x] {"status":"completed"}');
   });
 });
 

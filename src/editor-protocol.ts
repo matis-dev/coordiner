@@ -42,7 +42,8 @@ export type EditorState = {
   tierEfforts?: Effort[];
   running: boolean;
   // The chain running, and where in it (the card's index in its session): the lanes mark that card.
-  runningAt?: { chainId: string; session: number; index: number };
+  // `waiting`: the card waits for the user, or asked them something.
+  runningAt?: { chainId: string; session: number; index: number; waiting?: boolean };
   storageError?: string;
   // How many changes could not be saved so far: each rise is said aloud, even when storageError reads the same as before.
   unsaved?: number;

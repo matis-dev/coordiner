@@ -216,7 +216,7 @@ describe("argParts", () => {
 
 describe("PLACEHOLDER_NOTE", () => {
   it("lists every placeholder Run knows", () =>
-    assert.equal(PLACEHOLDER_NOTE, "Put {{story}}, {{idea}} or {{bug}} in a card's arguments, and Run asks for that input and puts it there."));
+    assert.equal(PLACEHOLDER_NOTE, "{{story}}, {{idea}} and {{bug}} are placeholders: type one in a card's arguments, and Run asks for that input and puts it in its place."));
 });
 
 describe("strayNote", () => {

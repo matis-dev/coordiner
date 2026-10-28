@@ -53,7 +53,7 @@ async function open(stored?: Record<string, unknown>) {
     input: () => doc.getElementById("chat-input") as HTMLTextAreaElement,
     status: () => doc.getElementById("status")!.textContent,
     line: () => doc.querySelector(".chat-status")!.textContent,
-    entries: () => [...doc.querySelectorAll<HTMLElement>("#transcript li")],
+    entries: () => [...doc.querySelectorAll<HTMLElement>("#transcript > li")],
     reset: (chat: ChatView, entries: Entry[] = []) => post({ type: "chat", chat, entries }),
     update: (chat: ChatView) => post({ type: "chatUpdate", chat }),
     append: (entries: Entry[]) => post({ type: "chatAppend", entries }),
@@ -80,7 +80,7 @@ describe("run chat: before and during a run", () => {
     page.reset(view(), [
       { kind: "dropped" },
       { kind: "assistant", card: "Plan", text: "line one\nline two" },
-      { kind: "tool", card: "Plan", name: "Read", input: '{"file_path":"a.ts"}' },
+      { kind: "tool", card: "Plan", name: "Read", input: "a.ts" },
       { kind: "you", card: "Implement", text: "keep it small" },
       { kind: "answer", card: "Brainstorm", question: "Which store?", answer: "SQLite" },
       { kind: "divider", session: 1 },
@@ -91,8 +91,8 @@ describe("run chat: before and during a run", () => {
       page.entries().map((li) => li.textContent),
       [
         "Earlier messages were dropped to keep the chat short.",
-        "Planline one\nline two",
-        'Plan used Read {"file_path":"a.ts"}',
+        "Planline oneline two",
+        "Plan used Reada.ts",
         "You to Implementkeep it small",
         "You answered BrainstormWhich store? → SQLite",
         "fresh context: session 2",
@@ -708,6 +708,72 @@ describe("run chat: a card that needs you", () => {
   });
 });
 
+describe("run chat: the chip by the title", () => {
+  it("says a card works, waits for the user, or waits for their answer, and goes after the run", async () => {
+    const page = await open();
+    const chip = () => page.doc.querySelector<HTMLElement>(".chat-title .run-chip")!;
+    page.reset(view());
+    assert.deepEqual([chip().hidden, chip().textContent, chip().classList.contains("working")], [false, "Working", true]);
+    page.update(view({ phase: "waiting" }));
+    assert.deepEqual([chip().textContent, chip().classList.contains("needs")], ["Waiting for you", true]);
+    page.update(view({ question }));
+    assert.equal(chip().textContent, "Waiting for your answer");
+    page.update(view({ phase: "waiting", afterRun: true }));
+    assert.equal(chip().hidden, true);
+  });
+
+  it("stays in view when the chat is hidden", async () => {
+    const page = await open();
+    page.reset(view({ phase: "waiting" }));
+    page.button("Hide chat").click();
+    assert.equal(page.doc.getElementById("chat-body")!.hidden, true);
+    assert.equal(page.doc.querySelector<HTMLElement>(".chat-title .run-chip")!.hidden, false);
+  });
+});
+
+describe("run chat: tool calls", () => {
+  // jsdom lays nothing out: an input reads as taller than its box when it is longer than 100 characters.
+  const overflowing = (w: JSDOM["window"]) => {
+    for (const [name, value] of [["scrollHeight", 200], ["clientHeight", 50]] as const) {
+      Object.defineProperty(w.HTMLElement.prototype, name, { configurable: true, get(this: HTMLElement) { return (this.textContent ?? "").length > 100 ? value : 0; } });
+    }
+  };
+  const attrs = (pre: Element) => ["tabindex", "role", "aria-label"].map((a) => pre.getAttribute(a));
+
+  afterEach(() => delete (globalThis as Record<string, unknown>).ResizeObserver);
+
+  it("shows the tool's name and its input, and makes only an input that scrolls a named Tab stop", async () => {
+    const page = await open();
+    overflowing(page.w);
+    const long = "x".repeat(150);
+    page.reset(view(), [{ kind: "tool", card: "Implement", name: "Bash", input: "ls -la" }, { kind: "tool", card: "Implement", name: "Read", input: long }, { kind: "tool", card: "Implement", name: "Stop", input: "" }]);
+    const [bash, read, stop] = page.entries();
+    assert.equal(bash!.querySelector(".tool-name")!.textContent, "Bash");
+    const short = bash!.querySelector("pre.tool-input")!;
+    assert.equal(short.textContent, "ls -la");
+    assert.deepEqual(attrs(short), [null, null, null]);
+    assert.deepEqual(attrs(read!.querySelector("pre.tool-input")!), ["0", "group", "Read input"]);
+    assert.equal(stop!.querySelector("pre"), null);
+  });
+
+  it("checks again when the transcript changes size, since a new width rewraps every box", async () => {
+    const observers: (() => void)[] = [];
+    (globalThis as Record<string, unknown>).ResizeObserver = class {
+      constructor(callback: () => void) {
+        observers.push(callback);
+      }
+      observe() {}
+    };
+    const page = await open();
+    page.reset(view(), [{ kind: "tool", card: "Implement", name: "Read", input: "x".repeat(150) }]);
+    const pre = page.doc.querySelector("pre.tool-input")!;
+    assert.deepEqual(attrs(pre), [null, null, null]);
+    overflowing(page.w);
+    observers.at(-1)!();
+    assert.deepEqual(attrs(pre), ["0", "group", "Read input"]);
+  });
+});
+
 describe("run chat: commands in a reply", () => {
   const reply = "Docker is missing.\n\n```sh\nsudo apt install docker.io\n```\n\nThen:\n\n```\nsudo usermod -aG docker $USER\n```";
 
@@ -718,12 +784,32 @@ describe("run chat: commands in a reply", () => {
     assert.deepEqual([...entry.querySelectorAll("p.text")].map((p) => p.textContent), ["Docker is missing.", "Then:"]);
     assert.deepEqual([...entry.querySelectorAll("pre code")].map((c) => c.textContent), ["sudo apt install docker.io", "sudo usermod -aG docker $USER"]);
     const copy = page.button("Copy command 2");
-    assert.equal(copy.textContent, "Copy");
+    assert.equal(copy.textContent, "");
+    assert.equal(copy.getAttribute("title"), "Copy");
+    assert.equal(copy.querySelector("svg")!.getAttribute("aria-hidden"), "true");
     copy.focus();
     copy.click();
     assert.deepEqual(page.posted.at(-1), { type: "chatCopyText", text: "sudo usermod -aG docker $USER" });
     assert.equal(page.doc.activeElement, copy);
     assert.equal(page.status(), "Copied command 2");
+  });
+
+  it("renders a reply's Markdown as elements, with model text only ever as text", async () => {
+    const page = await open();
+    const md = "## Still blocked\n\n**Bold** and `code`:\n- one\n- [x] done\n\n| a | b |\n|---|--:|\n| 1 | 2 |\n\n> quoted\n\n***\n\n[site](https://example.com) [x](javascript:alert(1))";
+    page.reset(view(), [{ kind: "assistant", card: "Implement", text: md }]);
+    const reply = page.entries()[0]!;
+    assert.equal(reply.querySelector("h4")!.textContent, "Still blocked");
+    assert.equal(reply.querySelector("strong")!.textContent, "Bold");
+    assert.equal(reply.querySelector("p code")!.textContent, "code");
+    assert.deepEqual([...reply.querySelectorAll("ul > li")].map((li) => li.textContent), ["one", "done"]);
+    assert.equal(reply.querySelector<HTMLInputElement>("li.task input")!.checked, true);
+    assert.equal(reply.querySelector("td.align-right")!.textContent, "2");
+    assert.equal(reply.querySelector("blockquote")!.textContent, "quoted");
+    assert.ok(reply.querySelector(".md > hr"));
+    const links = [...reply.querySelectorAll("a")];
+    assert.deepEqual(links.map((a) => a.getAttribute("href")), ["https://example.com/"]);
+    assert.match(reply.textContent!, /x \(javascript:alert\(1\)\)/);
   });
 
   it("renders markup inside a fenced block as text", async () => {

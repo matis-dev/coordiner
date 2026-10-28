@@ -7,6 +7,13 @@ import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, proc
 const step = (overrides: Partial<StepView> = {}): StepView => ({ label: "Plan", tier: "strong", model: "m-strong", status: "running", ...overrides });
 
 describe("stepItem", () => {
+  it("marks the card waiting for the user with a bell, and says so first", () => {
+    const item = stepItem(step({ status: "waiting" }));
+    assert.equal(item.icon, "bell-dot");
+    assert.equal(item.description, "waiting for you · strong · m-strong");
+    assert.equal(item.accessibleLabel, "Plan, waiting for you, strong, m-strong");
+  });
+
   it("maps each status to its icon", () => {
     const icons = (["running", "done", "failed", "halted", "stopped"] as const).map((status) => stepItem(step({ status })).icon);
     assert.deepEqual(icons, ["loading~spin", "check", "error", "debug-stop", "circle-slash"]);
@@ -126,6 +133,7 @@ describe("currentItem", () => {
     assert.equal(currentItem("Story · 11", "chat open").icon, "comment-discussion");
     assert.equal(currentItem("Story · 1\u001b1", "ended").label, "Story · 11");
     assert.equal(currentItem("x", "ended").icon, "comment");
+    assert.deepEqual(currentItem("Story · 11", "waiting for you"), { label: "Story · 11", description: "waiting for you", icon: "bell-dot", accessibleLabel: "Story · 11, waiting for you" });
   });
 });
 

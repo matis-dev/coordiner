@@ -5,11 +5,13 @@ import type { Process } from "./processes.ts";
 import type { Outcome, StepStatus } from "./run.ts";
 import { clip, plain } from "./text.ts";
 
-export type StepView = { label: string; tier: Tier; model: string; effort?: Effort; status: "running" | StepStatus; detail?: string };
+// "waiting": the running card waits for the user, or asked them something; only the open session shows it.
+export type StepView = { label: string; tier: Tier; model: string; effort?: Effort; status: "running" | "waiting" | StepStatus; detail?: string };
 export type ItemView = { label: string; description: string; icon: string; accessibleLabel: string };
 
 const ICON: Record<StepView["status"], string> = {
   running: "loading~spin",
+  waiting: "bell-dot",
   done: "check",
   failed: "error",
   halted: "debug-stop",
@@ -21,11 +23,12 @@ export function stepItem(step: StepView): ItemView {
   const label = plain(step.label);
   const detail = step.detail && step.detail !== step.status ? ` · ${clip(plain(step.detail), 120)}` : "";
   const effort = step.effort ? ` · ${step.effort}` : "";
+  const waiting = step.status === "waiting" ? "waiting for you · " : "";
   return {
     label,
-    description: `${plain(step.tier)} · ${plain(step.model)}${effort}${detail}`,
+    description: `${waiting}${plain(step.tier)} · ${plain(step.model)}${effort}${detail}`,
     icon: ICON[step.status],
-    accessibleLabel: `${label}, ${step.status}, ${step.tier}, ${plain(step.model)}${step.effort ? `, effort ${step.effort}` : ""}`,
+    accessibleLabel: `${label}, ${step.status === "waiting" ? "waiting for you" : step.status}, ${step.tier}, ${plain(step.model)}${step.effort ? `, effort ${step.effort}` : ""}`,
   };
 }
 
@@ -75,8 +78,8 @@ export function sessionItem(past: PastRun, now: number): ItemView {
 }
 
 // The session open now, at the top of the list: its run going, or the chat after it.
-export function currentItem(title: string, phase: "running" | "chat open" | "ended"): ItemView {
-  const icon = phase === "running" ? "loading~spin" : phase === "chat open" ? "comment-discussion" : "comment";
+export function currentItem(title: string, phase: "running" | "waiting for you" | "chat open" | "ended"): ItemView {
+  const icon = phase === "running" ? "loading~spin" : phase === "waiting for you" ? "bell-dot" : phase === "chat open" ? "comment-discussion" : "comment";
   const label = plain(title);
   return { label, description: phase, icon, accessibleLabel: `${label}, ${phase}` };
 }

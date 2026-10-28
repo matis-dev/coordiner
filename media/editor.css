@@ -397,6 +397,46 @@ textarea {
   margin: 0;
 }
 
+.chat-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap);
+  min-width: 0;
+}
+
+/* The run's state beside its title. Working is quiet, in the anchor colour; waiting for you takes the activity bar badge's
+   colours, the way VS Code itself says something needs you. */
+.run-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+.run-chip .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.run-chip.working { color: var(--anchor); border-color: currentColor; }
+.run-chip.working .dot { animation: pulse 1.4s ease-in-out infinite; }
+
+.run-chip.needs {
+  color: var(--vscode-activityBarBadge-foreground, var(--vscode-button-foreground));
+  background: var(--vscode-activityBarBadge-background, var(--vscode-button-background));
+  border-color: transparent;
+  font-weight: 600;
+}
+
+@keyframes pulse { 50% { opacity: 0.25; } }
+
 .chat-status { margin: 4px 0; color: var(--vscode-descriptionForeground); }
 .chat-cache, .chat-busy { margin: 0 0 4px; font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 
@@ -422,14 +462,72 @@ textarea {
   margin: 2px 0 0;
 }
 
-.entry.tool code {
-  font-family: var(--vscode-editor-font-family);
+/* A tool call is one quiet row: its name, then its input in a box three lines high that scrolls for the rest. */
+.entry.tool {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gap);
+  margin-bottom: 4px;
   font-size: 0.9em;
   color: var(--vscode-descriptionForeground);
-  overflow-wrap: anywhere;
 }
 
-.entry .code { margin: 4px 0 0; }
+.tool-name {
+  flex: none;
+  min-width: 4.5em;
+  padding-top: 2px;
+  font-weight: 600;
+}
+
+.tool-input {
+  flex: 1;
+  min-width: 0;
+  max-height: calc(3 * 1.45em + 4px);
+  margin: 0;
+  padding: 2px 6px;
+  overflow-y: auto;
+  font-family: var(--vscode-editor-font-family);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-left: 2px solid var(--rule);
+}
+
+.tool-input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+
+/* A reply's Markdown, set tight: chat replies, not documents. */
+.md > :first-child { margin-top: 2px; }
+.md p.text { white-space: normal; margin: 2px 0 6px; }
+.md .md-h { font-size: 1em; font-weight: 600; margin: 10px 0 4px; }
+.md h3.md-h { font-size: 1.1em; }
+.md ul, .md ol { margin: 2px 0 6px; padding-left: 1.6em; }
+/* The transcript is itself a list, so a reply's lists say their markers outright rather than taking a nested list's. */
+.md ul { list-style: disc; }
+.md ul ul { list-style: circle; }
+.md ol { list-style: decimal; }
+.md li > p.text { margin: 0; }
+.md li.task { list-style: none; }
+.md li.task > input { margin: 0 6px 0 -1.4em; vertical-align: middle; }
+.md li.task > input + p.text { display: inline; }
+.md blockquote { margin: 4px 0 6px; padding-left: var(--gap); border-left: 2px solid var(--rule); color: var(--vscode-descriptionForeground); }
+.md hr { border: 0; border-top: 1px solid var(--rule); margin: var(--gap) 0; }
+.md a { color: var(--vscode-textLink-foreground); }
+.md a:hover { color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); }
+.md .target { color: var(--vscode-descriptionForeground); }
+.md :not(pre) > code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, transparent);
+}
+.md .table { overflow-x: auto; margin: 4px 0 6px; }
+.md table { border-collapse: collapse; }
+.md th, .md td { padding: 2px 8px; border: 1px solid var(--rule); text-align: left; vertical-align: top; }
+.md th { font-weight: 600; }
+.md .align-center { text-align: center; }
+.md .align-right { text-align: right; }
+
+.entry .code { position: relative; margin: 4px 0 6px; }
 
 .entry .code pre {
   margin: 0 0 2px;
@@ -440,6 +538,32 @@ textarea {
   overflow-wrap: anywhere;
   background: var(--vscode-textCodeBlock-background, transparent);
 }
+
+/* Room for the icon, so it never covers the end of a line. */
+.entry .code.copyable pre { padding-right: 32px; }
+
+.copy-code {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  background: transparent;
+  opacity: 0;
+}
+
+.copy-code svg { fill: none; stroke: currentColor; stroke-width: 1.2; }
+.copy-code:hover { background: var(--vscode-toolbar-hoverBackground, transparent); }
+.entry .code:hover .copy-code, .copy-code:focus-visible { opacity: 1; }
+/* No hover on a touch screen, so the icon stays. */
+@media (hover: none) { .copy-code { opacity: 1; } }
 
 .question .expiry { margin: 0 0 var(--gap); font-variant-numeric: tabular-nums; }
 

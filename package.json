@@ -1,7 +1,7 @@
 {
   "name": "coordiner",
   "displayName": "Coordiner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "matis-dev",
   "description": "Drives the m-skills story flow through headless Claude Code sessions, up to the commit brief.",
   "license": "MIT",

@@ -82,6 +82,22 @@ describe("createRunChat", () => {
     assert.equal(moves(), 2);
   });
 
+  it("says the run moved when its card starts or stops waiting for the user, so the lanes and the Sessions view mark it", async () => {
+    const { chat, moves } = setup();
+    chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });
+    assert.equal(moves(), 1);
+    const signal = new AbortController().signal;
+    const wait = chat.talk.waitForYou({ card: "Brainstorm", ready: false, signal });
+    assert.equal(moves(), 2);
+    chat.talk.send("desktop");
+    await wait;
+    assert.equal(moves(), 3);
+    void chat.talk.ask([question], signal);
+    assert.equal(moves(), 4);
+    chat.talk.send("one more thing");
+    assert.equal(moves(), 4);
+  });
+
   it("calls for the user once when a card starts waiting and once per new question", async () => {
     const { chat, waiting } = setup();
     chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });

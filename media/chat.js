@@ -16,6 +16,10 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   let chat = idle;
 
   const title = el("h2", { id: "chat-h" }, "Run");
+  // Next to the title, so it shows while the chat is hidden: a card working, or waiting for the user. Not a live region; the
+  // status region already says each change once.
+  const chipText = el("span");
+  const chip = el("span", { class: "run-chip", hidden: true }, el("span", { class: "dot", "aria-hidden": "true" }), chipText);
   const toggle = el("button", { type: "button", "aria-expanded": "true", "aria-controls": "chat-body", onclick: () => setOpen(toggle.getAttribute("aria-expanded") !== "true") }, "Hide chat");
   // A toggle whose name stays put: the pressed state says which way it is.
   const maxButton = el("button", { type: "button", "aria-pressed": "false", onclick: () => setMax(maxButton.getAttribute("aria-pressed") !== "true") }, "Maximize chat");
@@ -69,7 +73,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     form,
     el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, sendButton, pauseButton, continueButton, copyButton, nextButton, stopButton)),
   );
-  root.replaceChildren(el("div", { class: "chat-head" }, title, el("div", { class: "chat-head-actions" }, maxButton, toggle)), body);
+  root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip), el("div", { class: "chat-head-actions" }, maxButton, toggle)), body);
 
   // The divider between the chains and the chat: the window-splitter pattern, its value the chat's share of the window.
   const { min, max } = logic.CHAT_HEIGHT;
@@ -167,9 +171,16 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   function entry(e) {
     switch (e.kind) {
       case "assistant":
-        return el("li", { class: "entry assistant" }, el("span", { class: "who" }, e.card), parts(e.text));
+        return el("li", { class: "entry assistant" }, el("span", { class: "who" }, e.card), el("div", { class: "md" }, markdown(e.text)));
+      // A long input scrolls in its own small box (see scrollable).
       case "tool":
-        return el("li", { class: "entry tool" }, el("span", { class: "visually-hidden" }, `${e.card} used `), el("code", {}, `${e.name} ${e.input}`));
+        return el(
+          "li",
+          { class: "entry tool" },
+          el("span", { class: "visually-hidden" }, `${e.card} used `),
+          el("span", { class: "tool-name" }, e.name),
+          e.input ? el("pre", { class: "tool-input", "data-tool": e.name }, e.input) : undefined,
+        );
       case "you":
         return el("li", { class: "entry you" }, el("span", { class: "who" }, `You to ${e.card}`), el("p", { class: "text" }, e.text));
       case "answer":
@@ -187,31 +198,126 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     }
   }
 
-  // Fenced commands get a Copy button the user presses; the extension writes the clipboard, and nothing runs them. A block with
-  // hidden characters gets a warning instead, since selecting it by hand copies them too.
-  function parts(text) {
+  // ── Markdown ────────────────────────────────────────────────────────────────
+
+  // The parsed reply (src/chat-logic.ts) built as elements; every piece of model text goes in as a text node. Headings start at h3,
+  // under the chat's own h2. Fenced commands get a Copy button the user presses; the extension writes the clipboard, and nothing
+  // runs them. A block with hidden characters gets a warning instead, since selecting it by hand copies them too.
+  function markdown(text) {
     let n = 0;
-    return logic.textParts(text).map((part) => {
-      if (!part.code) return el("p", { class: "text" }, part.text);
-      n += 1;
-      const index = n;
-      let after;
-      if (logic.hasHidden(part.text)) {
-        after = el("p", { class: "note" }, "This command contains hidden characters, so it may not run as it reads. Do not run it.");
-      } else if (logic.copyable(part.text)) {
-        after = el("button", { type: "button", "aria-label": `Copy command ${index}`, onclick: () => {
-          vscode.postMessage({ type: "chatCopyText", text: part.text });
-          announce(`Copied command ${index}`);
-        } }, "Copy");
+    const blocks = (list) => list.map(block);
+    function block(b) {
+      switch (b.type) {
+        case "p":
+          return el("p", { class: "text" }, inline(b.inline));
+        case "h":
+          return el(`h${Math.min(b.level + 2, 6)}`, { class: "md-h" }, inline(b.inline));
+        case "code":
+          n += 1;
+          return codeBlock(b.text, n);
+        case "list":
+          return el(
+            b.ordered ? "ol" : "ul",
+            { start: b.ordered && b.start !== 1 ? b.start : undefined },
+            b.items.map((item) =>
+              el(
+                "li",
+                { class: item.task === undefined ? undefined : "task" },
+                item.task === undefined ? undefined : el("input", { type: "checkbox", disabled: true, checked: item.task, "aria-label": item.task ? "done" : "not done" }),
+                blocks(item.blocks),
+              ),
+            ),
+          );
+        case "quote":
+          return el("blockquote", {}, blocks(b.blocks));
+        case "table": {
+          const cell = (tag, content, k) => el(tag, { class: b.align[k] ? `align-${b.align[k]}` : undefined }, inline(content));
+          return el(
+            "div",
+            { class: "table" },
+            el("table", {}, el("thead", {}, el("tr", {}, b.head.map((c, k) => cell("th", c, k)))), el("tbody", {}, b.rows.map((row) => el("tr", {}, row.map((c, k) => cell("td", c, k)))))),
+          );
+        }
+        default:
+          return el("hr");
       }
-      return el("div", { class: "code" }, el("pre", {}, el("code", {}, part.text)), after);
+    }
+    return blocks(logic.markdown(text));
+  }
+
+  function inline(nodes) {
+    return nodes.map((node) => {
+      switch (node.type) {
+        case "text":
+          return document.createTextNode(node.text);
+        case "code":
+          return el("code", {}, node.text);
+        case "strong":
+        case "em":
+        case "del":
+          return el(node.type === "strong" ? "strong" : node.type === "em" ? "em" : "del", {}, inline(node.children));
+        case "link": {
+          // Only a web address is a link, and VS Code asks before opening it. Any other target is shown, not followed.
+          if (node.href) return el("a", { href: node.href, title: node.href, rel: "noreferrer" }, inline(node.children));
+          const words = inline(node.children);
+          const said = words.map((w) => w.textContent).join("");
+          return el("span", {}, words, said === node.target ? undefined : el("span", { class: "target" }, ` (${node.target})`));
+        }
+        default:
+          return el("br");
+      }
     });
   }
+
+  const SVG = "http://www.w3.org/2000/svg";
+  function icon(paths) {
+    const svg = document.createElementNS(SVG, "svg");
+    for (const [k, v] of Object.entries({ viewBox: "0 0 16 16", width: "16", height: "16", "aria-hidden": "true", focusable: "false" })) svg.setAttribute(k, v);
+    for (const d of paths) {
+      const path = document.createElementNS(SVG, "path");
+      path.setAttribute("d", d);
+      svg.append(path);
+    }
+    return svg;
+  }
+  const copyIcon = () => icon(["M5.5 5.5h8v9h-8z", "M3.5 10.5h-1v-9h8v1"]);
+  const doneIcon = () => icon(["M3 8.5l3 3 7-7"]);
+
+  // The Copy button is an icon in the block's corner, shown when the pointer is over the block or the button has focus.
+  function codeBlock(text, index) {
+    const pre = el("pre", {}, el("code", {}, text));
+    if (logic.hasHidden(text)) return el("div", { class: "code" }, pre, el("p", { class: "note" }, "This command contains hidden characters, so it may not run as it reads. Do not run it."));
+    if (!logic.copyable(text)) return el("div", { class: "code" }, pre);
+    let reset;
+    const button = el("button", { type: "button", class: "copy-code", "aria-label": `Copy command ${index}`, title: "Copy", onclick: () => {
+      vscode.postMessage({ type: "chatCopyText", text });
+      announce(`Copied command ${index}`);
+      button.replaceChildren(doneIcon());
+      clearTimeout(reset);
+      reset = setTimeout(() => button.replaceChildren(copyIcon()), 1500);
+    } }, copyIcon());
+    return el("div", { class: "code copyable" }, pre, button);
+  }
+
+  // A tool's input box is a Tab stop, named for its tool, only while it scrolls: one that shows all of its input needs no stop, and
+  // with one per tool call the keyboard would pass every call in the transcript on the way to the message box.
+  function scrollable(pre) {
+    if (pre.scrollHeight > pre.clientHeight) {
+      pre.tabIndex = 0;
+      pre.setAttribute("role", "group");
+      pre.setAttribute("aria-label", `${pre.dataset.tool} input`);
+    } else for (const name of ["tabindex", "role", "aria-label"]) pre.removeAttribute(name);
+  }
+
+  // A new width rewraps every box, and a chat shown again after Hide has its first real size.
+  if (typeof ResizeObserver === "function") new ResizeObserver(() => transcript.querySelectorAll("pre.tool-input").forEach(scrollable)).observe(transcript);
 
   // The page keeps the newest entries, as the extension does, so a long run cannot grow it without end.
   function append(entries) {
     const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
-    transcript.append(...entries.map(entry));
+    const added = entries.map(entry);
+    transcript.append(...added);
+    for (const li of added) li.querySelectorAll("pre.tool-input").forEach(scrollable);
     const kept = [...transcript.children].filter((li) => !li.dataset.dropped);
     if (kept.length > logic.MAX_ENTRIES) {
       for (const li of kept.slice(0, kept.length - logic.MAX_ENTRIES)) li.remove();
@@ -283,6 +389,10 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   function render(next, prev) {
     chat = next;
     title.textContent = next.title ? `Run: ${next.title}` : "Run";
+    const attention = logic.attention(next);
+    chip.hidden = !attention;
+    chip.className = `run-chip ${attention?.kind ?? ""}`;
+    chipText.textContent = attention?.text ?? "";
     line.textContent = logic.statusLine(next);
     inputLabel.textContent = next.card ? `Message to ${next.card}` : "Message";
     sendButton.setAttribute("aria-disabled", String(!logic.canSend(next)));

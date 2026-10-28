@@ -3,7 +3,7 @@ import type { Tier } from "./environment.ts";
 import type { JournaledEntry, LastTurn } from "./journal.ts";
 import type { Outcome, StepStatus } from "./run.ts";
 import { clip, plain } from "./text.ts";
-import { endEntry, Transcript, type Entry } from "./transcript.ts";
+import { endEntry, MAX_TOOL_INPUT, Transcript, type Entry } from "./transcript.ts";
 import type { Ending } from "./editor-protocol.ts";
 import type { DecidedAfter, QuestionWait } from "./unattended.ts";
 import type { StepView } from "./view.ts";
@@ -149,7 +149,7 @@ function entryOf(v: unknown): JournaledEntry | undefined {
     case "assistant":
       return str(v.card, 1000) && str(v.text) ? { kind: "assistant", card: plain(v.card), text: plain(v.text) } : undefined;
     case "tool":
-      return str(v.card, 1000) && str(v.name, 1000) && str(v.input) ? { kind: "tool", card: plain(v.card), name: plain(v.name), input: clip(plain(v.input), 300) } : undefined;
+      return str(v.card, 1000) && str(v.name, 1000) && str(v.input) ? { kind: "tool", card: plain(v.card), name: plain(v.name), input: clip(plain(v.input), MAX_TOOL_INPUT) } : undefined;
     case "divider":
       return Number.isInteger(v.session) && (v.session as number) > 0 ? { kind: "divider", session: v.session as number } : undefined;
     case "failed":

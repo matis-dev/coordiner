@@ -126,7 +126,7 @@ describe("chains webview: what a chain starts from", () => {
     const page = await open({ selectedId: "own" });
     page.send();
     assert.match(page.doc.querySelector(".starts")!.textContent!, /a name only/);
-    assert.match(page.doc.getElementById("detail")!.textContent!, /Put \{\{story\}\}, \{\{idea\}\} or \{\{bug\}\} in a card's arguments/);
+    assert.match(page.doc.getElementById("detail")!.textContent!, /\{\{bug\}\} are placeholders: type one in a card's arguments/);
   });
 });
 

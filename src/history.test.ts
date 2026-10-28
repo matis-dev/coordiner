@@ -61,7 +61,7 @@ describe("parseJournal", () => {
   it("strips control characters from everything it shows", () => {
     const run = parse(
       { type: "entry", entry: { kind: "assistant", card: "Pl\u001ban", text: "a\u0007b" } },
-      { type: "entry", entry: { kind: "tool", card: "P", name: "B\u001bash", input: "x".repeat(400) } },
+      { type: "entry", entry: { kind: "tool", card: "P", name: "B\u001bash", input: "x".repeat(2100) } },
       { type: "answer", card: "P", question: "Q\u001b?", answer: "A\u001b" },
       { type: "decided", card: "P", question: "Q\u001b?", answer: "A\u001b", after: "after 5 minutes" },
       { type: "entry", entry: { kind: "failed", card: "P", error: "e\u001brr" } },
@@ -69,7 +69,7 @@ describe("parseJournal", () => {
     );
     assert.deepEqual(run.entries.slice(0, 2), [
       { kind: "assistant", card: "Plan", text: "ab" },
-      { kind: "tool", card: "P", name: "Bash", input: `${"x".repeat(300)}…` },
+      { kind: "tool", card: "P", name: "Bash", input: `${"x".repeat(2000)}…` },
     ]);
     assert.deepEqual(run.entries.slice(2), [
       { kind: "answer", card: "P", question: "Q?", answer: "A" },

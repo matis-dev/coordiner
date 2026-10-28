@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import { announcement, busyLabel, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, textParts } from "./chat-logic.ts";
+import { announcement, busyLabel, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -268,29 +268,191 @@ describe("a question with a time limit", () => {
   });
 });
 
-describe("textParts", () => {
-  it("keeps text without a fence whole", () => {
-    assert.deepEqual(textParts("just text\nover two lines"), [{ code: false, text: "just text\nover two lines" }]);
-    assert.deepEqual(textParts(""), [{ code: false, text: "" }]);
+describe("markdown", () => {
+  const t = (text: string): Inline => ({ type: "text", text });
+  const p = (...inline: Inline[]): Block => ({ type: "p", inline });
+
+  it("keeps text without markup as one paragraph, a line break where the model broke the line", () => {
+    assert.deepEqual(markdown("just text\nover two lines"), [p(t("just text"), { type: "br" }, t("over two lines"))]);
+    assert.deepEqual(markdown(""), []);
   });
 
-  it("splits fenced blocks out as code, dropping the language and the closing newline", () => {
-    assert.deepEqual(textParts("Run:\n```sh\ndocker --version\n```\nThen:\n```\nnode --version\nnpm --version\n```"), [
-      { code: false, text: "Run:" },
-      { code: true, text: "docker --version" },
-      { code: false, text: "Then:" },
-      { code: true, text: "node --version\nnpm --version" },
+  it("splits fenced blocks out as code with their language, and the text around them into paragraphs", () => {
+    assert.deepEqual(markdown("Run:\n```sh\ndocker --version\n```\nThen:\n~~~\nnode --version\nnpm --version\n~~~"), [
+      p(t("Run:")),
+      { type: "code", lang: "sh", text: "docker --version" },
+      p(t("Then:")),
+      { type: "code", lang: "", text: "node --version\nnpm --version" },
     ]);
   });
 
-  it("keeps a block that is only code, with nothing around it", () => {
-    assert.deepEqual(textParts("```\nls\n```"), [{ code: true, text: "ls" }]);
-  });
-
   it("leaves an unclosed fence as text", () => {
-    assert.deepEqual(textParts("Run:\n```sh\ndocker --version"), [{ code: false, text: "Run:\n```sh\ndocker --version" }]);
+    assert.deepEqual(markdown("Run:\n```sh\ndocker --version"), [p(t("Run:"), { type: "br" }, t("```sh"), { type: "br" }, t("docker --version"))]);
   });
 
+  it("takes the list item's indent off a fence inside it, so the command has no stray spaces or empty last line", () => {
+    const [list] = markdown("2. In Konsole, check:\n   ```\n   docker run --rm hello-world\n   ```\n3. Start it.");
+    assert.deepEqual(list, {
+      type: "list",
+      ordered: true,
+      start: 2,
+      items: [
+        { blocks: [p(t("In Konsole, check:")), { type: "code", lang: "", text: "docker run --rm hello-world" }] },
+        { blocks: [p(t("Start it."))] },
+      ],
+    });
+  });
+
+  it("reads headings, rules, quotes, and tasks", () => {
+    assert.deepEqual(markdown("## Still blocked ##\n\n---\n> quoted\n> on"), [
+      { type: "h", level: 2, inline: [t("Still blocked")] },
+      { type: "hr" },
+      { type: "quote", blocks: [p(t("quoted"), { type: "br" }, t("on"))] },
+    ]);
+    assert.deepEqual(markdown("- [x] done\n- [ ] not yet"), [
+      { type: "list", ordered: false, start: 1, items: [{ task: true, blocks: [p(t("done"))] }, { task: false, blocks: [p(t("not yet"))] }] },
+    ]);
+  });
+
+  it("starts a list right under a paragraph, nests an indented one, and keeps items apart by a blank line in one list", () => {
+    const [intro, list] = markdown("Neither file is committed:\n- **`a.md`** is copied\n  - nested\n\n- second");
+    assert.deepEqual(intro, p(t("Neither file is committed:")));
+    assert.deepEqual(list, {
+      type: "list",
+      ordered: false,
+      start: 1,
+      items: [
+        { blocks: [p({ type: "strong", children: [{ type: "code", text: "a.md" }] }, t(" is copied")), { type: "list", ordered: false, start: 1, items: [{ blocks: [p(t("nested"))] }] }] },
+        { blocks: [p(t("second"))] },
+      ],
+    });
+  });
+
+  it("reads a table with its alignment, padding short rows", () => {
+    assert.deepEqual(markdown("| Step | Done |\n|:--|--:|\n| one | `yes` |\n| two |"), [
+      { type: "table", align: ["left", "right"], head: [[t("Step")], [t("Done")]], rows: [[[t("one")], [{ type: "code", text: "yes" }]], [[t("two")], []]] },
+    ]);
+  });
+
+  it("reads emphasis, strikethrough, and escapes, and leaves snake_case and lone stars alone", () => {
+    assert.deepEqual(inline("**bold** *em* _em_ ~~gone~~ ***both***"), [
+      { type: "strong", children: [t("bold")] },
+      t(" "),
+      { type: "em", children: [t("em")] },
+      t(" "),
+      { type: "em", children: [t("em")] },
+      t(" "),
+      { type: "del", children: [t("gone")] },
+      t(" "),
+      { type: "strong", children: [{ type: "em", children: [t("both")] }] },
+    ]);
+    assert.deepEqual(inline("snake_case_name and 2 * 3 * 4 and \\*not em\\*"), [t("snake_case_name and 2 * 3 * 4 and *not em*")]);
+    assert.deepEqual(inline("`**not bold**`"), [{ type: "code", text: "**not bold**" }]);
+  });
+
+  it("links only web addresses, and shows any other target as text", () => {
+    assert.deepEqual(inline("[docs](https://example.com/a) and https://example.com/b."), [
+      { type: "link", href: "https://example.com/a", target: "https://example.com/a", children: [t("docs")] },
+      t(" and "),
+      { type: "link", href: "https://example.com/b", target: "https://example.com/b", children: [t("https://example.com/b")] },
+      t("."),
+    ]);
+    assert.deepEqual(inline("[plan](.claude/plans/slice-1.md) [x](javascript:alert(1))"), [
+      { type: "link", target: ".claude/plans/slice-1.md", children: [t("plan")] },
+      t(" "),
+      { type: "link", target: "javascript:alert(1)", children: [t("x")] },
+    ]);
+  });
+
+  it("keeps raw HTML as text", () => {
+    assert.deepEqual(markdown("<b>bold</b>"), [p(t("<b>bold</b>"))]);
+  });
+
+  it("drops a heading's closing #s only when a space sets them off, and reads a fence with a backtick in its info as text", () => {
+    assert.deepEqual(markdown("#   spaced   #\n# a##\n# ###\n# plain"), [
+      { type: "h", level: 1, inline: [t("spaced")] },
+      { type: "h", level: 1, inline: [t("a##")] },
+      { type: "h", level: 1, inline: [t("###")] },
+      { type: "h", level: 1, inline: [t("plain")] },
+    ]);
+    assert.deepEqual(markdown("```a`b\nx"), [p(t("```a`b"), { type: "br" }, t("x"))]);
+  });
+
+  it("closes a backtick fence after an unclosed tilde fence, and leaves every unclosed fence as text", () => {
+    assert.deepEqual(markdown("~~~\n```\nx\n```"), [p(t("~~~")), { type: "code", lang: "", text: "x" }]);
+    assert.deepEqual(markdown("```a\n\n```b"), [p(t("```a")), p(t("```b"))]);
+  });
+
+  it("keeps an escaped pipe in its cell, and a list item open across a blank line when the next line is indented under it", () => {
+    assert.deepEqual(markdown("| a \\| b | c |\n|-|-|"), [{ type: "table", align: [undefined, undefined], head: [[t("a | b")], [t("c")]], rows: [] }]);
+    assert.deepEqual(markdown("- a\n\n  b"), [{ type: "list", ordered: false, start: 1, items: [{ blocks: [p(t("a")), p(t("b"))] }] }]);
+  });
+
+  it("reads a backslash line break, an angle-bracket address, and a star or escape inside emphasis", () => {
+    assert.deepEqual(inline("a\\\nb <https://example.com>"), [t("a"), { type: "br" }, t("b "), { type: "link", href: "https://example.com/", target: "https://example.com", children: [t("https://example.com")] }]);
+    assert.deepEqual(inline("*a**b* *c \\* d*"), [{ type: "em", children: [t("a**b")] }, t(" "), { type: "em", children: [t("c * d")] }]);
+  });
+
+  it("puts no link inside a link: a web address as a link's words stays text", () => {
+    assert.deepEqual(inline("[https://a.example](https://b.example) ![see <https://c.example>](https://d.example/i.png)"), [
+      { type: "link", href: "https://b.example/", target: "https://b.example", children: [t("https://a.example")] },
+      t(" "),
+      { type: "link", href: "https://d.example/i.png", target: "https://d.example/i.png", children: [t("see <https://c.example>")] },
+    ]);
+  });
+
+  it("shows a reply longer than MAX_MARKDOWN as written, its line breaks kept, without reading its markup", () => {
+    const long = `**not bold**\n\n${"x".repeat(MAX_MARKDOWN)}`;
+    assert.deepEqual(markdown(long), [p(t("**not bold**"), { type: "br" }, { type: "br" }, t("x".repeat(MAX_MARKDOWN)))]);
+    assert.deepEqual(markdown(" ".repeat(MAX_MARKDOWN + 1)), []);
+  });
+
+  it("stops nesting at MAX_DEPTH, so a reply of thousands of quote markers or brackets cannot overflow the stack", () => {
+    let [block] = markdown(`${">".repeat(20_000)} x`);
+    for (let level = 0; level < MAX_DEPTH; level++) {
+      assert.equal(block?.type, "quote");
+      [block] = (block as Extract<Block, { type: "quote" }>).blocks;
+    }
+    assert.deepEqual(block, p(t(`${">".repeat(20_000 - MAX_DEPTH)} x`)));
+    const [list] = markdown(Array.from({ length: 40 }, (_, i) => `${"  ".repeat(i)}- x`).join("\n"));
+    assert.equal(list?.type, "list");
+    const links = inline(`${"[".repeat(10_000)}x${"](y)".repeat(10_000)}`);
+    assert.equal(links[0]?.type, "link");
+  });
+
+  it("parses a reply at the size cap built to make a parser backtrack or rescan, each well within a second", () => {
+    const n = MAX_MARKDOWN - 10;
+    const shapes = {
+      "unclosed stars": "*a ".repeat(n / 3),
+      "unclosed underscores": "_a ".repeat(n / 3),
+      "unclosed brackets": "[".repeat(n),
+      "unclosed angles": "<".repeat(n),
+      "unclosed fences": "```a\n".repeat(n / 5),
+      "a fence info string ending in a backtick": `\`\`\`${"a".repeat(n)}\``,
+      "a delimiter row of spaces": `a|b\n-${" ".repeat(n)}x`,
+      "a heading of spaces": `# a${" ".repeat(n)}b`,
+      "list markers on one line": `${"- ".repeat(n / 2)}x`,
+    };
+    for (const [shape, text] of Object.entries(shapes)) {
+      const start = performance.now();
+      markdown(text);
+      assert.ok(performance.now() - start < 1000, shape);
+    }
+  });
+});
+
+describe("attention", () => {
+  const base: ChatView = { phase: "running", attended: false, queued: [], continueReady: false, pausePending: false };
+  it("says a card waits for the user's answer, waits for them, or works; after the run, nothing", () => {
+    assert.deepEqual(attention({ ...base, question: { id: "q", card: "Plan", questions: [] } }), { kind: "needs", text: "Waiting for your answer" });
+    assert.deepEqual(attention({ ...base, phase: "waiting" }), { kind: "needs", text: "Waiting for you" });
+    assert.deepEqual(attention(base), { kind: "working", text: "Working" });
+    assert.equal(attention({ ...base, phase: "waiting", afterRun: true }), undefined);
+    assert.equal(attention({ ...base, phase: "idle" }), undefined);
+  });
+});
+
+describe("copyable", () => {
   it("copies a block up to the message cap, not past it", () => {
     assert.equal(copyable("x".repeat(MAX_INPUT_CHARS)), true);
     assert.equal(copyable("x".repeat(MAX_INPUT_CHARS + 1)), false);

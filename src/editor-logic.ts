@@ -61,7 +61,7 @@ export function startsFrom(chain: Chain): string {
 }
 
 const PLACEHOLDERS = INPUT_KINDS.map((k) => INPUTS[k].placeholder);
-export const PLACEHOLDER_NOTE = `Put ${PLACEHOLDERS.slice(0, -1).join(", ")} or ${PLACEHOLDERS.at(-1)} in a card's arguments, and Run asks for that input and puts it there.`;
+export const PLACEHOLDER_NOTE = `${PLACEHOLDERS.slice(0, -1).join(", ")} and ${PLACEHOLDERS.at(-1)} are placeholders: type one in a card's arguments, and Run asks for that input and puts it in its place.`;
 
 // Splits a card's arguments so each placeholder can be shown as what Run will put there.
 const PLACEHOLDER = new RegExp(`(${PLACEHOLDERS.map((p) => p.replace(/[{}]/g, "\\$&")).join("|")})`);

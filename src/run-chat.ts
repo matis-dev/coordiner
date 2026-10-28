@@ -1,5 +1,5 @@
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { CacheClock, TurnClock } from "./chat-logic.ts";
+import { needsYou as waitsForUser, type CacheClock, type TurnClock } from "./chat-logic.ts";
 import type { ChatMessage, ChatView, EditorMessage, Ending } from "./editor-protocol.ts";
 import type { JournaledEntry, JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
@@ -18,7 +18,8 @@ export type RunChatDeps = {
   title: string;
   post(message: ChatMessage): void;
   record(record: JournalRecord): void;
-  // The card or session the run is on changed: the lanes mark the running card.
+  // The card or session the run is on changed, or the card started or stopped waiting for the user: the lanes mark the running
+  // card, and the Sessions view the one waiting.
   moved(): void;
   // A card started waiting for the user, or asked them something.
   needsYou(card: string): void;
@@ -103,7 +104,8 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
       }
       if (snapshot.session !== undefined && snapshot.session !== (before?.session ?? 0)) add([{ kind: "divider", session: snapshot.session }]);
       post({ type: "chatUpdate", chat: viewOf(snapshot) });
-      if (snapshot.index !== before?.index || snapshot.session !== before?.session) moved();
+      const waiting = waitsForUser(snapshot) !== (before !== undefined && waitsForUser(before));
+      if (snapshot.index !== before?.index || snapshot.session !== before?.session || waiting) moved();
       const asked = snapshot.question !== undefined && snapshot.question.id !== before?.question?.id;
       // After the run the chat waits after every reply, and the run's own announcement already says it ended.
       const waits = snapshot.phase === "waiting" && before?.phase !== "waiting" && !snapshot.afterRun;

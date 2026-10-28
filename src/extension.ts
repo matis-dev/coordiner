@@ -10,6 +10,7 @@ import { parseStories, slugify, storyText, wholeFileStory, type Story } from "./
 import { ChainStore, type StoreFs } from "./chain-store.ts";
 import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
+import { needsYou } from "./chat-logic.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
 import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
@@ -45,7 +46,7 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
   readonly onDidChangeTreeData = this.changed.event;
   steps: StepView[] = [];
   processes: Process[] = [];
-  private open?: { title: string; phase: "running" | "chat open" | "ended" };
+  private open?: { title: string; phase: "running" | "waiting for you" | "chat open" | "ended" };
   private past: PastRow[] = [];
 
   update(steps: StepView[]): void {
@@ -79,7 +80,8 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
 
   getTreeItem(element: RunItem): vscode.TreeItem {
     if ("kind" in element) return this.sessionTreeItem(element);
-    const view = isProcess(element) ? processItem(element, this.running()?.label ?? "") : stepItem(element);
+    const waiting = element === this.running() && this.open?.phase === "waiting for you";
+    const view = isProcess(element) ? processItem(element, this.running()?.label ?? "") : stepItem(waiting ? { ...element, status: "waiting" } : element);
     const item = treeItem(view);
     // The Stop process action (inline, and in the context menu for the keyboard) shows on these items only.
     if (isProcess(element)) item.contextValue = "process";
@@ -428,13 +430,11 @@ function runNotes(chain: Chain): string[] {
   const sessions = chain.sessions.map((s, i) => `${i + 1}. ${s.cards.map((c) => plain(c.label)).join(" → ")}`).join("\n");
   return [
     chain.sessions.some((s) => s.cards.some((c) => c.pause))
-      ? "Cards that pause wait for you in the chat under the chains editor. Every other card runs unattended."
+      ? "Cards that pause wait for you in the chat. The rest run unattended."
       : "The chain runs unattended.",
-    "A question from a card that runs unattended shows in the chat. Wait 5 min: answer it within 5 minutes, or the Recommended option is taken. Wait for my answers: it waits as long as it takes. Never wait: the Recommended option is taken at once. A question with no Recommended option always waits for you, and every answer taken without you is listed when the run ends.",
-    "A card that cannot go on (a halt, a failed turn) waits for you in the chat with the reason: reply to it, or fix the cause and choose Continue.",
-    "In the chat you can message any card (it gets your message with its next turn) or pause it after its turn. Anything auto mode will not approve is denied, and so is any git write or GitHub publish.",
-    `Each session starts a fresh conversation:\n${sessions}`,
-    "Keep this computer awake: the run stops if VS Code closes.",
+    "Wait 5 min: an unanswered question takes its Recommended option after 5 minutes. Never wait: at once. A question with no Recommended option always waits for you.",
+    `Sessions:\n${sessions}`,
+    "Git writes and GitHub publishes are denied. Keep VS Code open until the run ends.",
   ];
 }
 
@@ -825,7 +825,9 @@ async function loadSessions(ctx: RunContext, skipped: Set<string>): Promise<Past
 // Where the run is, for the lanes to mark; nothing once it has ended.
 function runningAt({ abort, chainId, chat }: RunState): Pick<EditorState, "runningAt"> {
   const view = chat?.view();
-  return abort && chainId && view?.index !== undefined && view.session !== undefined ? { runningAt: { chainId, session: view.session, index: view.index } } : {};
+  return abort && chainId && view?.index !== undefined && view.session !== undefined
+    ? { runningAt: { chainId, session: view.session, index: view.index, ...(needsYou(view) ? { waiting: true } : {}) } }
+    : {};
 }
 
 class ChainsEditor {
@@ -1064,7 +1066,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // The Sessions view's Stop button shows while the slot is held and while the chat after a run is open.
   const changed = () => {
     editor?.post();
-    provider.setOpen(state.open && { title: state.open.title, phase: state.abort ? "running" : state.after ? "chat open" : "ended" });
+    const chat = state.chat?.view();
+    const waiting = state.abort !== undefined && chat !== undefined && needsYou(chat);
+    provider.setOpen(state.open && { title: state.open.title, phase: waiting ? "waiting for you" : state.abort ? "running" : state.after ? "chat open" : "ended" });
+    // The count on the Coordiner icon in the activity bar, seen with the Sessions view closed.
+    view.badge = waiting ? { value: 1, tooltip: `${plain(chat.card ?? "A card")} is waiting for you` } : undefined;
     void vscode.commands.executeCommand("setContext", "coordiner.busy", ctx.slot.busy() || state.after !== undefined);
   };
   // Only the newest listing is shown, so a slow one cannot replace a later one.
