@@ -4,6 +4,7 @@ import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent
 import type { ChatMessage } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
+import type { Entry } from "./transcript.ts";
 import { actOnChat, cacheFrom, createRunChat, IDLE_CHAT } from "./run-chat.ts";
 import { QUESTION_WAIT_MS, type QuestionWait } from "./unattended.ts";
 
@@ -11,7 +12,7 @@ const question = { question: "Which \u001b[31mstore?", options: [{ label: "SQLit
 const said = (text: string) => ({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "text", text }] } }) as unknown as SDKAssistantMessage;
 const toolOptions = () => ({ signal: new AbortController().signal }) as Parameters<CanUseTool>[2];
 
-function setup(now = () => 0, questions: QuestionWait = "never", sleep?: (ms: number, signal: AbortSignal) => Promise<void>) {
+function setup(now = () => 0, questions: QuestionWait = "never", sleep?: (ms: number, signal: AbortSignal) => Promise<void>, past?: Entry[]) {
   const posted: ChatMessage[] = [];
   const records: JournalRecord[] = [];
   const logs: string[] = [];
@@ -27,6 +28,7 @@ function setup(now = () => 0, questions: QuestionWait = "never", sleep?: (ms: nu
     questions,
     now,
     ...(sleep ? { sleep } : {}),
+    ...(past ? { past } : {}),
   });
   return { chat, posted, records, logs, waiting, moves: () => moves, appended: () => posted.flatMap((m) => (m.type === "chatAppend" ? m.entries : [])), updates: () => posted.filter((m) => m.type === "chatUpdate") };
 }
@@ -318,5 +320,60 @@ describe("createRunChat: the end of the run", () => {
     const { chat, appended } = setup();
     chat.failed("Kickoff", "the session failed: \u001b[31mAPI Error");
     assert.deepEqual(appended(), [{ kind: "failed", card: "Kickoff", error: "the session failed: [31mAPI Error" }]);
+  });
+
+  it("does not journal the end entry; the outcome record says how the run ended", () => {
+    const { chat, records } = setup();
+    chat.ended({ status: "done", text: "brief" }, { card: "Kickoff" });
+    assert.deepEqual(records, []);
+  });
+});
+
+describe("createRunChat: the journal", () => {
+  it("records what the sessions said, the dividers and failed turns, but not the user's side twice", async () => {
+    const { chat, records } = setup();
+    chat.talk.at({ card: "Plan", index: 0, session: 0, attended: true });
+    chat.forTurn("interactive").onMessage(said("the plan"));
+    chat.talk.send("keep it small");
+    chat.talk.takeQueued("Plan");
+    chat.talk.at({ card: "Review", index: 0, session: 1, attended: true });
+    chat.failed("Review", "no network");
+    assert.deepEqual(records, [
+      { type: "entry", entry: { kind: "assistant", card: "Plan", text: "the plan" } },
+      { type: "you", card: "Plan", text: "keep it small" },
+      { type: "entry", entry: { kind: "divider", session: 1 } },
+      { type: "entry", entry: { kind: "failed", card: "Review", error: "no network" } },
+    ]);
+  });
+});
+
+describe("createRunChat: a reopened session", () => {
+  const past: Entry[] = [
+    { kind: "assistant", card: "Plan", text: "the plan" },
+    { kind: "end", status: "halted", reason: "needs a decision" },
+  ];
+
+  it("shows the transcript read back from the journal first, and does not record it again", () => {
+    const { chat, posted, records } = setup(undefined, undefined, undefined, past);
+    assert.deepEqual(posted, [{ type: "chat", chat: { ...IDLE_CHAT, title: "Idea · notes" }, entries: past }]);
+    assert.deepEqual(chat.entries(), past);
+    chat.forTurn("after").onMessage(said("next step"));
+    assert.deepEqual(chat.entries(), [...past, { kind: "assistant", card: "", text: "next step" }]);
+    assert.deepEqual(records, [{ type: "entry", entry: { kind: "assistant", card: "", text: "next step" } }]);
+  });
+
+  it("opens on the session without a second end entry, ready to keep talking", () => {
+    const { chat, appended, waiting } = setup(undefined, undefined, undefined, past);
+    chat.reopened({ status: "halted", reason: "needs a decision" }, { card: "Plan" });
+    assert.deepEqual(appended(), []);
+    assert.deepEqual(chat.view().ending, { status: "halted", reason: "needs a decision" });
+    assert.deepEqual([chat.view().phase, chat.view().afterRun, chat.view().card], ["waiting", true, "Plan"]);
+    assert.deepEqual(waiting, []);
+  });
+
+  it("opens read-only when there is no session to talk to", () => {
+    const { chat } = setup(undefined, undefined, undefined, past);
+    chat.reopened({ status: "stopped" });
+    assert.deepEqual([chat.view().phase, chat.view().afterRun], ["ended", undefined]);
   });
 });

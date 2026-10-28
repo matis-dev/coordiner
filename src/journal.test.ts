@@ -65,6 +65,20 @@ describe("createJournal", () => {
     assert.equal(JSON.parse(lines[0]!).line, text);
   });
 
+  it("records what a session said and the turn a reopened chat talks to, as one line each", async () => {
+    const lines: string[] = [];
+    const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);
+    void journal({ type: "entry", entry: { kind: "tool", card: "Plan", name: "Bash", input: "{}" } });
+    await journal({ type: "turn", sessionId: "s-1", model: "claude-opus-5-5", effort: "high", card: "Plan", reply: "the plan" });
+    assert.deepEqual(
+      lines.map((l) => JSON.parse(l)),
+      [
+        { at: "2026-10-10T19:51:03.123Z", type: "entry", entry: { kind: "tool", card: "Plan", name: "Bash", input: "{}" } },
+        { at: "2026-10-10T19:51:03.123Z", type: "turn", sessionId: "s-1", model: "claude-opus-5-5", effort: "high", card: "Plan", reply: "the plan" },
+      ],
+    );
+  });
+
   it("reports a failing writer once and still tries the later records", async () => {
     const errors: unknown[] = [];
     let attempts = 0;

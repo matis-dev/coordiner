@@ -40,7 +40,7 @@ Because the sessions run your `claude`, its version decides which models they ca
 
 3. In that window, open the git repository you want to work on, and trust it when asked. Coordiner does not run in untrusted workspaces.
 
-A **Coordiner** icon appears in the activity bar.
+A **Coordiner** icon appears in the activity bar. It opens the **Sessions** view.
 
 ## Install a packaged `.vsix`
 
@@ -101,7 +101,7 @@ A story says what should change and for whom. The **Story** template plans it, i
    - **Run, never wait**: the Recommended option is taken at once.
 
    A question with no Recommended option always waits for you, whichever button you chose. When the run ends, the **Coordiner** output lists every answer taken without you under **Decided without you**.
-4. Follow the steps in the **Run** view. Keep VS Code open and the computer awake: closing VS Code stops the run. The Stop button in the **Run** view's title bar, or **Coordiner: Stop Run**, stops it by hand; once the run has ended, it ends the chat after the run.
+4. Follow the steps in the **Sessions** view, where the running session is on top. Keep VS Code open and the computer awake: closing VS Code stops the run. The Stop button in the **Sessions** view's title bar, or **Coordiner: Stop Run**, stops it by hand; once the run has ended, it ends the chat after the run.
 
    While a turn runs, its background processes (a test run, a Monitor, a subagent) are listed under its step, with their latest progress line. **Stop Process**, the stop button on the row or in its context menu (**Shift+F10**), stops one. The list clears when the turn ends.
 
@@ -118,13 +118,22 @@ git branch -D coordiner/<story-slug>
 
 When a run finishes without changing any file (an audit, say), the **Coordiner** output prints these two commands with the run's own paths, ready to paste. Coordiner never removes a worktree or a branch itself. A run that ends in rolling-history puts its commit brief in the output; any other run puts its result there.
 
+### Go back to an earlier session
+
+Earlier sessions of the open repository are listed under the running one in the **Sessions** view, newest first, with how each ended (done, halted, failed, stopped, or closed mid-run if VS Code was closed while it ran). Expand one to see its steps. Click it to open its transcript in the chains editor's chat.
+
+- If its worktree and its last session still exist, the chat is live: you can keep talking to the session, copy its resume command, or start the next chain in its worktree, as after any run.
+- If the worktree is gone, the transcript is read-only and a warning says so.
+- Opening a session is refused while a run or a turn of the chat is going; stop it first. Opening one ends the chat after the run that was open.
+- The transcript is rebuilt from the run journal. Journals written before this list existed hold only your messages and answers, so their rows say "replies not recorded". Journals over 5 MB are left out, and the **Coordiner** output says which.
+
 For what each step does, the unattended rules, and where the run journal is kept, see **Current state** in [CHANGELOG.md](CHANGELOG.md).
 
 ## Build and run a chain
 
-To run something without opening the editor, run **Coordiner: Start…** (the ▶ button in the **Run** view's title bar, or **Start…** in the view before your first run) and pick a template, a single skill or one of your chains.
+To run something without opening the editor, run **Coordiner: Start…** (the ▶ button in the **Sessions** view's title bar, or **Start…** in the view before your first session) and pick a template, a single skill or one of your chains.
 
-Run **Coordiner: Open Chains** (or the list button in the **Run** view's title bar). Templates, single skills and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
+Run **Coordiner: Open Chains** (or the list button in the **Sessions** view's title bar). Templates, single skills and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
 
 Each template is named after what you bring to it, and **Run** asks for exactly that:
 
@@ -172,7 +181,7 @@ Each card has a **Model** and an **Effort** list, and a **Pause for me** checkbo
 - Pick a model to pin the card to it for every turn, loop turns and reminders included.
 - **Effort** lists the levels the card's model takes; on **By tier**, only the levels all three tier models take. **Model default** leaves it to the model.
 
-The lists come from the same session that lists the skills. If it cannot list its models, the editor says so: cards on **By tier** run on their tier's model, and a pinned card keeps its model, which the session checks when it starts. A card set to a model or effort the session does not offer is marked, and **Run** stays off until you change it. The **Run** view shows each step's model and effort. Sessions always run in auto mode with Coordiner's git guard; there is no other permission mode.
+The lists come from the same session that lists the skills. If it cannot list its models, the editor says so: cards on **By tier** run on their tier's model, and a pinned card keeps its model, which the session checks when it starts. A card set to a model or effort the session does not offer is marked, and **Run** stays off until you change it. The **Sessions** view shows each step's model and effort. Sessions always run in auto mode with Coordiner's git guard; there is no other permission mode.
 
 ### Talk to a run in the chat
 

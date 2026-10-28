@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
-import { finishedMessage, nothingToReviewMessage, pickedChain, processItem, startItems, stepItem, type StepView } from "./view.ts";
+import type { PastRun } from "./history.ts";
+import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, processItem, sessionItem, startItems, stepItem, when, type StepView } from "./view.ts";
 
 const step = (overrides: Partial<StepView> = {}): StepView => ({ label: "Plan", tier: "strong", model: "m-strong", status: "running", ...overrides });
 
@@ -68,6 +69,63 @@ describe("processItem", () => {
     assert.equal(item.label.startsWith("run x"), true);
     assert.equal(item.description.length, 121);
     assert.match(item.accessibleLabel, /under Implement/);
+  });
+});
+
+describe("when", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+
+  it("says how long ago, in the words a row has room for", () => {
+    assert.deepEqual([0.5, 1, 59, 60, 23 * 60 + 59, 24 * 60, 47 * 60].map((m) => when(ago(m), now)), ["just now", "1 min ago", "59 min ago", "1 h ago", "23 h ago", "yesterday", "yesterday"]);
+  });
+
+  it("gives the date once it is two days back or more", () => {
+    assert.equal(when(new Date(2026, 9, 25, 20, 36).toISOString(), now), "Oct 25");
+  });
+
+  it("does not guess a time it cannot read", () => {
+    assert.equal(when("", now), "unknown time");
+  });
+});
+
+describe("sessionItem", () => {
+  const now = new Date("2026-10-28T12:00:00.000Z").getTime();
+  const past = (overrides: Partial<PastRun> = {}): PastRun => ({
+    file: "11.jsonl", chain: "Story", story: "11", repo: "/r", worktree: "/w", branch: "coordiner/11", questions: "timed",
+    lastAt: "2026-10-28T10:00:00.000Z", steps: [], entries: [], ending: { status: "stopped" }, userOnly: false, ...overrides,
+  });
+
+  it("names the chain and story, and says how it ended in words and by icon", () => {
+    const outcomes = [{ status: "done", text: "" }, { status: "no-changes" }, { status: "halted", reason: "r" }, { status: "failed", error: "e" }, { status: "stopped" }, { status: "refused", reason: "r" }] as const;
+    assert.deepEqual(
+      [...outcomes.map((outcome) => sessionItem(past({ outcome }), now)), sessionItem(past(), now)].map((i) => [i.description, i.icon]),
+      [
+        ["done · 2 h ago", "check"],
+        ["nothing to review · 2 h ago", "circle-large-outline"],
+        ["halted · 2 h ago", "debug-stop"],
+        ["failed · 2 h ago", "error"],
+        ["stopped · 2 h ago", "circle-slash"],
+        ["refused · 2 h ago", "warning"],
+        ["closed mid-run · 2 h ago", "history"],
+      ],
+    );
+    assert.deepEqual(sessionItem(past({ outcome: { status: "done", text: "" } }), now), { label: "Story · 11", description: "done · 2 h ago", icon: "check", accessibleLabel: "Story · 11, done, 2 h ago" });
+  });
+
+  it("says when the journal holds only the user's side", () => {
+    const item = sessionItem(past({ userOnly: true }), now);
+    assert.equal(item.description, "closed mid-run · 2 h ago · replies not recorded");
+    assert.equal(item.accessibleLabel, "Story · 11, closed mid-run, 2 h ago, replies not recorded");
+  });
+});
+
+describe("currentItem", () => {
+  it("shows the open session's state in words, with an icon for each", () => {
+    assert.deepEqual(currentItem("Story · 11", "running"), { label: "Story · 11", description: "running", icon: "loading~spin", accessibleLabel: "Story · 11, running" });
+    assert.equal(currentItem("Story · 11", "chat open").icon, "comment-discussion");
+    assert.equal(currentItem("Story · 1\u001b1", "ended").label, "Story · 11");
+    assert.equal(currentItem("x", "ended").icon, "comment");
   });
 });
 

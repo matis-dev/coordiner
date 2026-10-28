@@ -24,7 +24,7 @@ export const REQUIRED_COMMANDS = [
 ];
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage> & Pick<Query, "stopTask">;
-// What the Run view needs to list a turn's background processes: the live set, and each one's latest progress line.
+// What the Sessions view needs to list a turn's background processes: the live set, and each one's latest progress line.
 export type TaskMessage = SDKTaskProgressMessage | SDKBackgroundTasksChangedMessage;
 // `inject` writes a user message into the running turn: false when the turn cannot take one (its session does not report what
 // becomes of a message, or the turn is ending), and the caller keeps the message for the next turn.

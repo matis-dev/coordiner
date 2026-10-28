@@ -1,6 +1,14 @@
+import type { Effort } from "./chains.ts";
 import type { Models } from "./environment.ts";
 import type { Outcome, RunEvent } from "./run.ts";
+import type { Entry } from "./transcript.ts";
 import type { DecidedAfter, QuestionWait } from "./unattended.ts";
+
+// The session the run's latest turn ran in, on its model and effort, and the reply it gave: what a reopened chat talks to.
+export type LastTurn = { sessionId: string; model: string; effort?: Effort; card: string; reply: string };
+
+// The transcript entries no other record carries, so a reopened chat shows what the sessions said.
+export type JournaledEntry = Extract<Entry, { kind: "assistant" | "tool" | "divider" | "failed" }>;
 
 export type JournalRecord =
   | { type: "run-started"; chain: string; story: string; repo: string; worktree: string; branch: string; models: Models; questions: QuestionWait }
@@ -11,6 +19,8 @@ export type JournalRecord =
   | { type: "answer"; card: string; question: string; answer: string }
   // A question answered with its Recommended option without the user.
   | { type: "decided"; card: string; question: string; answer: string; after: DecidedAfter }
+  | { type: "entry"; entry: JournaledEntry }
+  | ({ type: "turn" } & LastTurn)
   | { type: "outcome"; outcome: Outcome };
 
 // One JSON line per record, written in call order. A failed write is reported once and the run goes on: the journal is a record, not a control.

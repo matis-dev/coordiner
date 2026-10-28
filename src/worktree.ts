@@ -10,6 +10,8 @@ export type RepoCheck = ({ kind: "ready" } & RepoInfo) | { kind: "no-repo" } | {
 export type WorktreeResult = { ok: true; path: string; branch: string } | { ok: false; reason: string; detail?: string };
 
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
+// A session id as resume takes it; also the check on one read back from a journal.
+export const SESSION_ID = /^[A-Za-z0-9-]{1,100}$/;
 
 const detailOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -126,7 +128,7 @@ export function removalCommands(root: string, path: string, branch: string): str
 // The line that takes over a session by hand, for the user to paste. None for a path with a control character, or a session id
 // that is not the plain id claude gives.
 export function resumeCommand(path: string, sessionId: string): string | undefined {
-  if (/[\u0000-\u001f\u007f-\u009f]/.test(path) || !/^[A-Za-z0-9-]{1,100}$/.test(sessionId)) return undefined;
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(path) || !SESSION_ID.test(sessionId)) return undefined;
   return `cd ${quote(path)} && claude --resume ${sessionId}`;
 }
 

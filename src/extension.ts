@@ -1,19 +1,20 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { parseStories, slugify, storyText, wholeFileStory, type Story } from "./backlog.ts";
 import { ChainStore, type StoreFs } from "./chain-store.ts";
-import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type Effort, type InputKind } from "./chains.ts";
+import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
 import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
-import { createJournal, journalFileName, type JournalRecord } from "./journal.ts";
+import { MAX_JOURNAL_BYTES, parseJournal, readNewest, type PastRun } from "./history.ts";
+import { createJournal, journalFileName, type JournalRecord, type LastTurn } from "./journal.ts";
 import { replyOf } from "./protocol.ts";
 import { fillInput, remainingCommands, runChain, talkOn, type AfterAsk, type Outcome, type RunEvent } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
@@ -24,21 +25,28 @@ import { commonEfforts, modelOptions, mskillsPresent, palette, type ModelOption,
 import { plain } from "./text.ts";
 import type { QuestionWait } from "./unattended.ts";
 import { applyTask, liveProcess, stopLine, type Process } from "./processes.ts";
-import { finishedMessage, nothingToReviewMessage, pickedChain, processItem, startItems, stepItem, type StepView } from "./view.ts";
+import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, processItem, sessionItem, startItems, stepItem, type ItemView, type StepView } from "./view.ts";
 import { addWorktree, prepareReview, removalNote, resumeCommand, setUpRepo, type Exec, type RepoInfo, type SetupPrompt, type Worktree } from "./worktree.ts";
 
 const run = promisify(execFile);
 const exec: Exec = (file, args, options) => run(file, args, options);
 
-// The run's steps, and under the running one the background processes of its turn.
-type RunItem = StepView | Process;
-const isProcess = (item: RunItem): item is Process => "id" in item;
+// The Sessions list: the session open now at the top, with its steps and, under the running one, the background processes of its
+// turn; under it the earlier sessions of this repo, each with the steps it ran.
+type OpenRow = { kind: "open" };
+type PastRow = { kind: "past"; run: PastRun };
+type PastStep = { kind: "past-step"; step: StepView; index: number; parent: PastRow };
+type RunItem = OpenRow | PastRow | PastStep | StepView | Process;
+const OPEN: OpenRow = { kind: "open" };
+const isProcess = (item: RunItem): item is Process => "id" in item && !("kind" in item);
 
-class StepsProvider implements vscode.TreeDataProvider<RunItem> {
+class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
   steps: StepView[] = [];
   processes: Process[] = [];
+  private open?: { title: string; phase: "running" | "chat open" | "ended" };
+  private past: PastRow[] = [];
 
   update(steps: StepView[]): void {
     this.steps = steps;
@@ -50,30 +58,81 @@ class StepsProvider implements vscode.TreeDataProvider<RunItem> {
     this.changed.fire();
   }
 
+  setOpen(open: SessionsProvider["open"]): void {
+    this.open = open;
+    this.changed.fire();
+  }
+
+  setPast(runs: readonly PastRun[]): void {
+    this.past = runs.map((run) => ({ kind: "past", run }));
+    this.changed.fire();
+  }
+
+  // The argument of a row's open command is a key into this list, never a path.
+  pastRun(file: unknown): PastRun | undefined {
+    return this.past.find((row) => row.run.file === file)?.run;
+  }
+
   private running(): StepView | undefined {
     return this.steps.findLast((s) => s.status === "running");
   }
 
   getTreeItem(element: RunItem): vscode.TreeItem {
+    if ("kind" in element) return this.sessionTreeItem(element);
     const view = isProcess(element) ? processItem(element, this.running()?.label ?? "") : stepItem(element);
-    const item = new vscode.TreeItem(view.label);
-    item.description = view.description;
-    item.iconPath = new vscode.ThemeIcon(view.icon);
-    item.accessibilityInformation = { label: view.accessibleLabel, role: "treeitem" };
+    const item = treeItem(view);
     // The Stop process action (inline, and in the context menu for the keyboard) shows on these items only.
     if (isProcess(element)) item.contextValue = "process";
     else if (element === this.running() && this.processes.length > 0) item.collapsibleState = vscode.TreeItemCollapsibleState.Expanded;
     return item;
   }
 
+  private sessionTreeItem(element: OpenRow | PastRow | PastStep): vscode.TreeItem {
+    const { Collapsed, Expanded, None } = vscode.TreeItemCollapsibleState;
+    switch (element.kind) {
+      case "open": {
+        const item = treeItem(currentItem(this.open?.title ?? "", this.open?.phase ?? "ended"));
+        item.id = "open";
+        item.collapsibleState = this.steps.length > 0 ? Expanded : None;
+        item.command = { command: "coordiner.openChains", title: "Open Chains" };
+        return item;
+      }
+      case "past": {
+        const item = treeItem(sessionItem(element.run, Date.now()));
+        // Ids keep a row expanded across refreshes.
+        item.id = `past:${element.run.file}`;
+        item.collapsibleState = element.run.steps.length > 0 ? Collapsed : None;
+        item.command = { command: "coordiner.openSession", title: "Open Session", arguments: [element.run.file] };
+        return item;
+      }
+      case "past-step": {
+        const item = treeItem(stepItem(element.step));
+        item.id = `past:${element.parent.run.file}:${element.index}`;
+        return item;
+      }
+    }
+  }
+
   getChildren(element?: RunItem): vscode.ProviderResult<RunItem[]> {
-    if (!element) return this.steps;
+    if (!element) return [...(this.open ? [OPEN] : []), ...this.past];
+    if (element === OPEN) return this.steps;
+    if ("kind" in element) return element.kind === "past" ? element.run.steps.map((step, index): PastStep => ({ kind: "past-step", step, index, parent: element })) : [];
     return !isProcess(element) && element === this.running() ? this.processes : [];
   }
 
   getParent(element: RunItem): RunItem | undefined {
-    return isProcess(element) ? this.running() : undefined;
+    if (isProcess(element)) return this.running();
+    if (!("kind" in element)) return OPEN;
+    return element.kind === "past-step" ? element.parent : undefined;
   }
+}
+
+function treeItem(view: ItemView): vscode.TreeItem {
+  const item = new vscode.TreeItem(view.label);
+  item.description = view.description;
+  item.iconPath = new vscode.ThemeIcon(view.icon);
+  item.accessibilityInformation = { label: view.accessibleLabel, role: "treeitem" };
+  return item;
 }
 
 function readModels(config: vscode.WorkspaceConfiguration): Models {
@@ -246,9 +305,11 @@ async function announce(outcome: Outcome, heading: string, worktree: Worktree, c
   }
 }
 
-// The run's chat outlives the run, so the editor still shows the last transcript after it ends, until the next run starts.
-// `stopProcess` exists while a turn can run; it acts on the turn running at the time. `after` is the chat after the run.
-type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat; stopProcess?: (process: Process) => Promise<void>; after?: After };
+// The run's chat outlives the run, so the editor still shows the last transcript after it ends, until the next run starts or an
+// earlier session is reopened. `stopProcess` exists while a turn can run; it acts on the turn running at the time. `after` is the
+// chat after the run. `open` is the session the chat belongs to: its row title and its journal file; `opening` is the journal file
+// of an earlier session being reopened.
+type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat; stopProcess?: (process: Process) => Promise<void>; after?: After; open?: { title: string; file: string }; opening?: string };
 
 // Where a next chain runs: the worktree of the run before, that run's name, and its last reply, which becomes the input.
 type Here = { worktree: Worktree; name: string; slug: string; card: string; input: string };
@@ -256,21 +317,18 @@ type Here = { worktree: Worktree; name: string; slug: string; card: string; inpu
 // The run's last session, which the user keeps talking to after the run until they end the chat or confirm a new run.
 type After = { abort: AbortController; chat: RunChat; here: Here; sessionId: string };
 
-// The session the run's last turn ran in, on its model and effort, and the latest reply it gave.
-type LastTurn = { sessionId: string; model: string; effort?: Effort; card: string; reply: string };
-
 type Journal = (record: JournalRecord) => Promise<void>;
 
 // A run the user confirmed: the filled chain, its name, and a worktree whose setup is done.
 // `questions`: how the run treats a question from a card that runs unattended, chosen with the run's confirmation.
-type Place = { chain: Chain; name: string; slug: string; worktree: Worktree; models: Models; journal: Journal; questions: QuestionWait };
+type Place = { chain: Chain; name: string; slug: string; worktree: Worktree; models: Models; journal: Journal; journalFile: string; questions: QuestionWait };
 
 type RunContext = {
   state: RunState;
   // Held from the moment Run is pressed until the run ends, and by each turn of the chat after it; `state.abort` only exists
   // once the sessions start.
   slot: OneRun;
-  provider: StepsProvider;
+  provider: SessionsProvider;
   reveal: (step: RunItem) => void;
   output: vscode.OutputChannel;
   storage: vscode.Uri;
@@ -279,6 +337,8 @@ type RunContext = {
   postChat: (message: ChatMessage) => void;
   // A card waits for the user, or asked them something: bring the editor up without taking focus.
   needsYou: (card: string) => void;
+  // The open session changed: list the earlier ones again, without it.
+  sessionsChanged: () => void;
 };
 
 // The run's announcement waits on a notification, so it comes after the slot is given back: the chat after the run needs the slot.
@@ -378,22 +438,30 @@ function runNotes(chain: Chain): string[] {
   ];
 }
 
+const journalDir = (ctx: RunContext) => join(ctx.storage.fsPath, "journal");
+
 // A new run's journal file, which begins with where the run happens.
-function startJournal(ctx: RunContext, slug: string, start: Extract<JournalRecord, { type: "run-started" }>): Journal {
-  const { storage, output } = ctx;
-  const journalDir = join(storage.fsPath, "journal");
-  const journalFile = join(journalDir, journalFileName(slug, new Date()));
-  const journal = createJournal(
+function startJournal(ctx: RunContext, slug: string, start: Extract<JournalRecord, { type: "run-started" }>): { journal: Journal; file: string } {
+  const file = journalFileName(slug, new Date());
+  const journal = journalAt(ctx, file);
+  void journal(start);
+  ctx.output.appendLine(`Journal: ${join(journalDir(ctx), file)}`);
+  return { journal, file };
+}
+
+// Appends to the journal file of that name: a new run's, or a reopened session's own.
+function journalAt(ctx: RunContext, file: string): Journal {
+  const { output } = ctx;
+  const dir = journalDir(ctx);
+  const journalFile = join(dir, file);
+  return createJournal(
     async (line) => {
-      await mkdir(journalDir, { recursive: true });
+      await mkdir(dir, { recursive: true });
       await appendFile(journalFile, line, "utf8");
     },
     () => new Date(),
     (error) => output.appendLine(`Journal not written to ${journalFile}: ${error instanceof Error ? error.message : String(error)}`),
   );
-  void journal(start);
-  output.appendLine(`Journal: ${journalFile}`);
-  return journal;
 }
 
 // Returns the run's announcement, for after the slot is given back; nothing when the run never started. Its messages are not
@@ -460,7 +528,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   }
   output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
   const worktree = { root: repo.root, path: added.path, branch: added.branch };
-  const journal = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models: tools.models, questions });
+  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models: tools.models, questions });
   if (setup) {
     const result = await runSetup(setup, added.path, tools.env, exec);
     if (!result.ok) {
@@ -470,7 +538,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
       return undefined;
     }
   }
-  return { chain: filled.chain, name: input.name, slug, worktree, models: tools.models, journal, questions };
+  return { chain: filled.chain, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
 }
 
 // A next chain in the worktree of the run before: no new worktree and no setup, and its input is that run's last reply.
@@ -500,41 +568,17 @@ async function confirmHere(chain: Chain, here: Here, ctx: RunContext): Promise<P
   const questions = await confirmRun(`Run ${plain(chain.name)} in the same worktree?`, detail);
   if (!questions) return undefined;
   endAfter(ctx.state);
-  const journal = startJournal(ctx, here.slug, { type: "run-started", chain: chain.name, story: here.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models, questions });
-  return { chain: filled.chain, name: here.name, slug: here.slug, worktree, models: tools.models, journal, questions };
+  const { journal, file: journalFile } = startJournal(ctx, here.slug, { type: "run-started", chain: chain.name, story: here.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models, questions });
+  return { chain: filled.chain, name: here.name, slug: here.slug, worktree, models: tools.models, journal, journalFile, questions };
 }
 
-// Runs the chain in its place, then leaves the chat open on the last session. Returns the run's announcement.
-async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>> {
-  const { state, provider, reveal, output } = ctx;
-  const { chain, name, worktree, models, journal, questions } = place;
-  const abort = new AbortController();
-  const log = (line: string) => {
-    output.appendLine(line);
-    void journal({ type: "log", line });
-  };
-  const chat = createRunChat({
-    title: `${plain(chain.name)} · ${plain(name)}`,
-    post: ctx.postChat,
-    record: (r) => void journal(r),
-    moved: ctx.onRunChange,
-    needsYou: ctx.needsYou,
-    log,
-    questions,
-  });
-  Object.assign(state, { abort, chainId: chain.id, chat });
-  ctx.onRunChange();
-  provider.update([]);
-  const emit = (event: RunEvent) => {
-    void journal(event);
-    if (event.type === "step-started") {
-      provider.update([...provider.steps, { label: event.label, tier: event.tier, model: event.model, ...(event.effort ? { effort: event.effort } : {}), status: "running" }]);
-      reveal(provider.steps[event.index]!);
-      return;
-    }
-    provider.update(provider.steps.map((step, i) => (i === event.index ? { ...step, status: event.status, detail: event.detail } : step)));
-  };
-  const required = requiredSkills(chain);
+type Turn = (request: AfterAsk & { mode: TurnMode }, signal: AbortSignal) => Promise<TurnResult>;
+type Turns = { turn: Turn; stopProcess: (process: Process) => Promise<void>; last: () => LastTurn | undefined };
+
+// The turns of a run's sessions, or of a reopened session's, in its worktree. Each turn's session, model and reply is journaled, so
+// the chat can be reopened on it after VS Code closes.
+function sessionTurns(chat: RunChat, worktree: Worktree, required: readonly string[], journal: Journal, ctx: RunContext, log: (line: string) => void): Turns {
+  const { provider, output } = ctx;
   // What can act on the turn that is running; the turn's processes are listed only while it runs.
   let control: TurnControl | undefined;
   const stopProcess = async (process: Process) => {
@@ -546,9 +590,8 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
       output.appendLine("Coordiner: that process had already ended.");
     }
   };
-  state.stopProcess = stopProcess;
   let last: LastTurn | undefined;
-  const turn = async ({ mode, ...request }: AfterAsk & { mode: TurnMode }, signal: AbortSignal): Promise<TurnResult> => {
+  const turn: Turn = async ({ mode, ...request }, signal) => {
     const card = chat.talk.snapshot().card ?? "";
     let result: TurnResult;
     const tools = await turnTools();
@@ -577,9 +620,47 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     if (result.sessionId) {
       const reply = result.ok ? replyOf(result.resultText) : (last?.reply ?? "");
       last = { sessionId: result.sessionId, model: request.model, ...(request.effort ? { effort: request.effort } : {}), card, reply };
+      void journal({ type: "turn", ...last });
     }
     return result;
   };
+  return { turn, stopProcess, last: () => last };
+}
+
+// Runs the chain in its place, then leaves the chat open on the last session. Returns the run's announcement.
+async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>> {
+  const { state, provider, reveal, output } = ctx;
+  const { chain, name, worktree, models, journal, questions } = place;
+  const abort = new AbortController();
+  const log = (line: string) => {
+    output.appendLine(line);
+    void journal({ type: "log", line });
+  };
+  const title = `${plain(chain.name)} · ${plain(name)}`;
+  const chat = createRunChat({
+    title,
+    post: ctx.postChat,
+    record: (r) => void journal(r),
+    moved: ctx.onRunChange,
+    needsYou: ctx.needsYou,
+    log,
+    questions,
+  });
+  Object.assign(state, { abort, chainId: chain.id, chat, open: { title, file: place.journalFile } });
+  provider.update([]);
+  ctx.onRunChange();
+  ctx.sessionsChanged();
+  const emit = (event: RunEvent) => {
+    void journal(event);
+    if (event.type === "step-started") {
+      provider.update([...provider.steps, { label: event.label, tier: event.tier, model: event.model, ...(event.effort ? { effort: event.effort } : {}), status: "running" }]);
+      reveal(provider.steps[event.index]!);
+      return;
+    }
+    provider.update(provider.steps.map((step, i) => (i === event.index ? { ...step, status: event.status, detail: event.detail } : step)));
+  };
+  const { turn, stopProcess, last } = sessionTurns(chat, worktree, requiredSkills(chain), journal, ctx, log);
+  state.stopProcess = stopProcess;
   let outcome: Outcome | undefined;
   try {
     outcome = await runChain(chain, {
@@ -597,8 +678,9 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     ctx.onRunChange();
   }
   void journal({ type: "outcome", outcome });
-  chat.ended(outcome, last && { card: last.card });
-  if (last) talkAfter(last, { chat, place, ctx, stopProcess, turn });
+  const lastTurn = last();
+  chat.ended(outcome, lastTurn && { card: lastTurn.card });
+  if (lastTurn) talkAfter(lastTurn, { chat, place, ctx, stopProcess, turn });
   const ended = outcome;
   return () => announce(ended, name, worktree, chain, output, chat.decided());
 }
@@ -607,12 +689,13 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
 // for it. A failed turn is shown in the transcript and the chat stays open.
 function talkAfter(
   last: LastTurn,
-  { chat, place, ctx, stopProcess, turn }: { chat: RunChat; place: Place; ctx: RunContext; stopProcess: RunState["stopProcess"]; turn: (request: AfterAsk & { mode: TurnMode }, signal: AbortSignal) => Promise<TurnResult> },
+  { chat, place, ctx, stopProcess, turn }: { chat: RunChat; place: Pick<Place, "worktree" | "name" | "slug">; ctx: RunContext; stopProcess: RunState["stopProcess"]; turn: Turn },
 ): void {
   const abort = new AbortController();
   const here: Here = { worktree: place.worktree, name: place.name, slug: place.slug, card: last.card, input: last.reply };
   const after: After = { abort, chat, here, sessionId: last.sessionId };
   Object.assign(ctx.state, { after, stopProcess });
+  ctx.onRunChange();
   const runAfterTurn = async (request: AfterAsk): Promise<TurnResult> => {
     let ran: TurnResult | undefined;
     await ctx.slot.run(async () => void (ran = await turn({ ...request, mode: "after" }, abort.signal)));
@@ -626,6 +709,115 @@ function talkAfter(
     return result;
   };
   void talkOn({ runTurn: runAfterTurn, talk: chat.talk, signal: abort.signal, card: last.card, sessionId: last.sessionId, model: last.model, ...(last.effort ? { effort: last.effort } : {}) });
+}
+
+// Reopens an earlier session from its journal: its transcript, and, while its worktree and session are still there, the chat after
+// the run on that session. The slot is held while it reads, so a run cannot start meanwhile; a second click on the row being opened
+// is ignored.
+async function openSession(file: unknown, editor: ChainsEditor, ctx: RunContext): Promise<void> {
+  const { state, slot, provider } = ctx;
+  const listedRun = provider.pastRun(file);
+  if (!listedRun) {
+    if (state.open?.file === file) await editor.open();
+    return;
+  }
+  if (state.opening === listedRun.file) return;
+  state.opening = listedRun.file;
+  let opened = false;
+  try {
+    const took = await slot.run(async () => void (opened = await reopen(listedRun.file, ctx)));
+    if (!took) void vscode.window.showWarningMessage("Coordiner: a run or a turn of the chat is going. Stop it first, then open the session.");
+  } finally {
+    state.opening = undefined;
+  }
+  if (opened) await editor.open();
+}
+
+// Whether the session was reopened: false when its journal can no longer be read.
+async function reopen(file: string, ctx: RunContext): Promise<boolean> {
+  const { state, provider, output } = ctx;
+  const path = join(journalDir(ctx), file);
+  let run: PastRun | undefined;
+  try {
+    run = (await stat(path)).size <= MAX_JOURNAL_BYTES ? parseJournal(await readFile(path, "utf8"), file) : undefined;
+  } catch (error) {
+    output.appendLine(`Coordiner: could not read ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!run) {
+    void vscode.window.showErrorMessage("Coordiner: that session's journal can no longer be read. See the Coordiner output.");
+    return false;
+  }
+  endAfter(state);
+  const journal = journalAt(ctx, run.file);
+  const log = (line: string) => {
+    output.appendLine(line);
+    void journal({ type: "log", line });
+  };
+  const title = `${run.chain} · ${run.story}`;
+  const chat = createRunChat({ title, post: ctx.postChat, record: (r) => void journal(r), moved: ctx.onRunChange, needsYou: ctx.needsYou, log, questions: run.questions, past: run.entries });
+  Object.assign(state, { chat, chainId: undefined, open: { title, file: run.file } });
+  provider.update(run.steps);
+  const there = await exists(run.worktree);
+  if (run.last && there) {
+    const worktree: Worktree = { root: run.repo, path: run.worktree, branch: run.branch };
+    // A chat turn runs no skill of its own, so no skill is required of the session.
+    const { turn, stopProcess } = sessionTurns(chat, worktree, [], journal, ctx, log);
+    chat.reopened(run.ending, { card: run.last.card });
+    talkAfter(run.last, { chat, place: { worktree, name: run.story, slug: slugOf(run.worktree) }, ctx, stopProcess, turn });
+  } else {
+    chat.reopened(run.ending);
+    ctx.onRunChange();
+    if (!there) void vscode.window.showWarningMessage(`Coordiner: ${plain(run.worktree)} no longer exists, so the session's chat is read-only.`);
+  }
+  ctx.sessionsChanged();
+  return true;
+}
+
+// The worktree folder is named after the run's slug; a folder renamed by hand gets a plain one, used only to name the next journal.
+function slugOf(path: string): string {
+  try {
+    return slugify(basename(path));
+  } catch {
+    return "session";
+  }
+}
+
+// The earlier sessions of the open folder's repo. A journal that cannot be read, or is too large, is skipped and said once.
+async function loadSessions(ctx: RunContext, skipped: Set<string>): Promise<PastRun[]> {
+  const folder = openFolder();
+  if (folder === undefined) return [];
+  let root;
+  try {
+    root = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder })).stdout.trim();
+  } catch {
+    return [];
+  }
+  const dir = journalDir(ctx);
+  const names = await readdir(dir).catch(() => [] as string[]);
+  const skip = (name: string, why: string) => {
+    if (!skipped.has(name)) ctx.output.appendLine(`Coordiner: left ${join(dir, name)} out of Sessions: ${why}`);
+    skipped.add(name);
+  };
+  const files = await Promise.all(
+    names.filter((name) => name.endsWith(".jsonl")).map(async (name) => {
+      try {
+        const { size, mtimeMs } = await stat(join(dir, name));
+        return size > MAX_JOURNAL_BYTES ? void skip(name, "it is too large to read back.") : { name, mtimeMs };
+      } catch (error) {
+        return void skip(name, error instanceof Error ? error.message : String(error));
+      }
+    }),
+  );
+  const read = async (name: string): Promise<PastRun | undefined> => {
+    try {
+      const run = parseJournal(await readFile(join(dir, name), "utf8"), name);
+      if (!run) skip(name, "it does not start with a run.");
+      return run;
+    } catch (error) {
+      return void skip(name, error instanceof Error ? error.message : String(error));
+    }
+  };
+  return readNewest(files.filter((f) => f !== undefined), read, root, ctx.state.open?.file);
 }
 
 // ── Chains editor ─────────────────────────────────────────────────────────────
@@ -863,16 +1055,24 @@ async function startCommand(editor: ChainsEditor, here?: Here): Promise<void> {
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Coordiner");
-  const provider = new StepsProvider();
+  const provider = new SessionsProvider();
   const view = vscode.window.createTreeView("coordiner.run", { treeDataProvider: provider });
   const state: RunState = {};
   // Reveal without stealing focus; a hidden view just rejects, which is fine.
   const reveal = (step: RunItem) => void view.reveal(step, { focus: false, select: false }).then(undefined, () => undefined);
   let editor: ChainsEditor | undefined;
-  // The Run view's Stop button shows while the slot is held and while the chat after a run is open.
+  // The Sessions view's Stop button shows while the slot is held and while the chat after a run is open.
   const changed = () => {
     editor?.post();
+    provider.setOpen(state.open && { title: state.open.title, phase: state.abort ? "running" : state.after ? "chat open" : "ended" });
     void vscode.commands.executeCommand("setContext", "coordiner.busy", ctx.slot.busy() || state.after !== undefined);
+  };
+  // Only the newest listing is shown, so a slow one cannot replace a later one.
+  const skipped = new Set<string>();
+  let listing = 0;
+  const sessionsChanged = () => {
+    const mine = ++listing;
+    void loadSessions(ctx, skipped).then((runs) => mine === listing && provider.setPast(runs));
   };
   const ctx: RunContext = {
     state,
@@ -884,14 +1084,20 @@ export function activate(context: vscode.ExtensionContext): void {
     onRunChange: changed,
     postChat: (message) => editor?.postChat(message),
     needsYou: (card) => editor?.needsYou(card),
+    sessionsChanged,
   };
   editor = new ChainsEditor(context.extensionUri, join(context.globalStorageUri.fsPath, "chains.json"), ctx);
   const story = TEMPLATES.find((t) => t.id === "story")!;
+  sessionsChanged();
 
   context.subscriptions.push(
     output,
     view,
+    // Another window may have run something meanwhile.
+    view.onDidChangeVisibility(({ visible }) => visible && sessionsChanged()),
     vscode.commands.registerCommand("coordiner.checkEnvironment", () => checkEnvironmentCommand(output)),
+    // The argument is the row's journal file name, looked up in the listing.
+    vscode.commands.registerCommand("coordiner.openSession", (file: unknown) => openSession(file, editor, ctx)),
     vscode.commands.registerCommand("coordiner.runStory", () => runChainCommand(story, ctx)),
     vscode.commands.registerCommand("coordiner.start", () => startCommand(editor)),
     vscode.commands.registerCommand("coordiner.openChains", () => editor.open()),

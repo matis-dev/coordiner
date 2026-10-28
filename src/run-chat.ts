@@ -1,7 +1,7 @@
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { CacheClock, TurnClock } from "./chat-logic.ts";
 import type { ChatMessage, ChatView, EditorMessage, Ending } from "./editor-protocol.ts";
-import type { JournalRecord } from "./journal.ts";
+import type { JournaledEntry, JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
 import type { Outcome } from "./run.ts";
 import { Talk, type TalkSnapshot } from "./talk.ts";
@@ -27,6 +27,8 @@ export type RunChatDeps = {
   questions: QuestionWait;
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  // A reopened session's transcript, read back from its journal; shown first and not recorded again.
+  past?: Entry[];
 };
 
 // A question the run answered with its Recommended option, without the user.
@@ -57,18 +59,26 @@ export type RunChat = {
   forTurn(mode: TurnMode): TurnSetup;
   // The run is over: the transcript says how it ended. With `after`, the chat stays open on the run's last session.
   ended(outcome: Outcome, after?: { card: string }): void;
+  // A reopened session's chat, whose transcript already says how it ended. With `after`, it stays open on that session.
+  reopened(ending: Ending, after?: { card: string }): void;
   // A turn of the chat after the run failed.
   failed(card: string, error: string): void;
   // The questions answered without the user so far, in order.
   decided(): Decision[];
 };
 
-export function createRunChat({ title, post, record, moved, needsYou, log, questions, now = Date.now, sleep = realSleep }: RunChatDeps): RunChat {
+const JOURNALED = new Set<Entry["kind"]>(["assistant", "tool", "divider", "failed"]);
+const isJournaled = (entry: Entry): entry is JournaledEntry => JOURNALED.has(entry.kind);
+
+export function createRunChat({ title, post, record, moved, needsYou, log, questions, now = Date.now, sleep = realSleep, past = [] }: RunChatDeps): RunChat {
   const transcript = new Transcript();
+  transcript.add(past);
+  // What the user said and answered is recorded where it is handled, below; the rest of the transcript is recorded here.
   const add = (entries: Entry[]) => {
     if (entries.length === 0) return;
     transcript.add(entries);
     post({ type: "chatAppend", entries });
+    for (const entry of entries.filter(isJournaled)) record({ type: "entry", entry });
   };
   let shown: TalkSnapshot | undefined;
   let cache: CacheClock | undefined;
@@ -117,7 +127,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
     record({ type: "decided", card, question, answer, after });
   };
   const ask = (asked: Parameters<Talk["ask"]>[0], signal: AbortSignal, expiresAt?: number) => talk.ask(asked, signal, expiresAt);
-  post({ type: "chat", chat: view(), entries: [] });
+  post({ type: "chat", chat: view(), entries: transcript.entries() });
   return {
     talk,
     view,
@@ -140,6 +150,10 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
       const entry = endEntry(outcome);
       add([entry]);
       const { kind: _end, ...how } = entry;
+      ending = how;
+      talk.end(after ? { after } : {});
+    },
+    reopened: (how, after) => {
       ending = how;
       talk.end(after ? { after } : {});
     },

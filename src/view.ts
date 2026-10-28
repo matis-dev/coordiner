@@ -1,7 +1,8 @@
 import { cardPrompt, singleSkill, type Chain, type Effort } from "./chains.ts";
 import type { Tier } from "./environment.ts";
+import type { PastRun } from "./history.ts";
 import type { Process } from "./processes.ts";
-import type { StepStatus } from "./run.ts";
+import type { Outcome, StepStatus } from "./run.ts";
 import { clip, plain } from "./text.ts";
 
 export type StepView = { label: string; tier: Tier; model: string; effort?: Effort; status: "running" | StepStatus; detail?: string };
@@ -38,6 +39,46 @@ export function processItem(process: Process, step: string): ItemView {
     icon: process.type === "local_bash" ? "terminal" : "pulse",
     accessibleLabel: `${label}, running, under ${plain(step)}${summary ? `, ${summary}` : ""}`,
   };
+}
+
+const ENDING: Record<Outcome["status"] | "closed", [words: string, icon: string]> = {
+  done: ["done", "check"],
+  "no-changes": ["nothing to review", "circle-large-outline"],
+  halted: ["halted", "debug-stop"],
+  failed: ["failed", "error"],
+  stopped: ["stopped", "circle-slash"],
+  refused: ["refused", "warning"],
+  closed: ["closed mid-run", "history"],
+};
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// How long ago a session was last active, in the words a list row has room for.
+export function when(at: string, now: number): string {
+  const then = new Date(at);
+  const minutes = Math.floor((now - then.getTime()) / 60_000);
+  if (Number.isNaN(minutes)) return "unknown time";
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} h ago`;
+  if (minutes < 48 * 60) return "yesterday";
+  return `${MONTHS[then.getMonth()]} ${then.getDate()}`;
+}
+
+// An earlier session in the Sessions list; how it ended is spoken in words, never by the icon alone.
+export function sessionItem(past: PastRun, now: number): ItemView {
+  const label = `${past.chain} · ${past.story}`;
+  const [ending, icon] = ENDING[past.outcome?.status ?? "closed"];
+  const ago = when(past.lastAt, now);
+  const parts = [ending, ago, ...(past.userOnly ? ["replies not recorded"] : [])];
+  return { label, description: parts.join(" · "), icon, accessibleLabel: `${label}, ${parts.join(", ")}` };
+}
+
+// The session open now, at the top of the list: its run going, or the chat after it.
+export function currentItem(title: string, phase: "running" | "chat open" | "ended"): ItemView {
+  const icon = phase === "running" ? "loading~spin" : phase === "chat open" ? "comment-discussion" : "comment";
+  const label = plain(title);
+  return { label, description: phase, icon, accessibleLabel: `${label}, ${phase}` };
 }
 
 export type StartItem = { separator: string } | { label: string; description: string; id: string };

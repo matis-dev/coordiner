@@ -70,12 +70,20 @@
         "command": "coordiner.stopProcess",
         "title": "Stop Process",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "coordiner.openSession",
+        "title": "Coordiner: Open Session"
       }
     ],
     "menus": {
       "commandPalette": [
         {
           "command": "coordiner.stopProcess",
+          "when": "false"
+        },
+        {
+          "command": "coordiner.openSession",
           "when": "false"
         }
       ],
@@ -157,14 +165,14 @@
       "coordiner": [
         {
           "id": "coordiner.run",
-          "name": "Run"
+          "name": "Sessions"
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "coordiner.run",
-        "contents": "No run yet.\n[Start…](command:coordiner.start)\n[Open Chains](command:coordiner.openChains)\n[Run Story…](command:coordiner.runStory)"
+        "contents": "No sessions yet.\n[Start…](command:coordiner.start)\n[Open Chains](command:coordiner.openChains)"
       }
     ]
   },
