@@ -22,6 +22,9 @@ body {
   overflow: hidden;
 }
 
+/* A class that sets display (the run chip's inline-flex) would otherwise beat the hidden attribute. */
+[hidden] { display: none !important; }
+
 /* The rail runs the full height; the chains scroll on their own above the run's chat, which stays in view under them. */
 .layout {
   display: grid;
@@ -113,6 +116,9 @@ body {
 
 #rail > button:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
 
+/* Upkeep for the whole window, so it sits at the foot of the list rather than among a chain's actions. */
+#rail > button.refresh { margin-top: var(--gap-l); border-color: transparent; }
+
 /* Quiet, so four of them in a column read as a tag, not a row of lights. */
 .badge {
   font-size: 0.8em;
@@ -143,10 +149,38 @@ body {
   margin-bottom: var(--gap-l);
 }
 
+/* Delete chain, set apart at the far end. */
+.toolbar .end { margin-left: auto; }
+
+.name-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap);
+  margin-top: var(--gap);
+}
+
+.name-row input { flex: 0 1 24em; min-width: 0; }
+
 #detail > .toolbar {
   margin-top: var(--gap-l);
   padding-bottom: var(--gap-l);
   border-bottom: 1px solid var(--rule);
+}
+
+/* What the last edit did, under the toolbar: the banner's left rule at the size of a note. */
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap);
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 var(--gap);
+  padding: 4px var(--gap);
+  border-left: 2px solid var(--anchor);
+  background: var(--vscode-textBlockQuote-background, transparent);
 }
 
 .note, .reason {
@@ -454,7 +488,8 @@ textarea {
 }
 
 .entry { margin: 0 0 var(--gap); }
-.entry .who { font-weight: 600; }
+/* Quieter than a reply's own headings, so "Plan" the speaker never reads as "## Plan" the heading. */
+.entry .who { font-size: 0.9em; font-weight: 600; color: var(--vscode-descriptionForeground); }
 
 .entry .text, .queued .text {
   white-space: pre-wrap;

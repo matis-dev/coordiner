@@ -36,7 +36,7 @@ export const pinNote = (card: Card): string | undefined =>
   card.model !== undefined && skillDefault(card.skill).kind === "loop" ? "Pinned: NEXT <tier> does not change this card's model." : undefined;
 
 export function runReason(chain: Chain, view: EditorView): string | undefined {
-  if (view.running) return "A run is in progress. To run another, stop it first: Stop run or End chat in its chat, the Stop button in the Sessions view, or Coordiner: Stop Run.";
+  if (view.running) return "A run is in progress. Stop it in the chat below or with Coordiner: Stop Run to start another.";
   if (view.mskills === false && usesMskills(chain)) return "Needs m-skills, which is not installed.";
   const result = runnable(chain, view.palette?.map((p) => p.skill));
   if (!result.ok) return result.reason;

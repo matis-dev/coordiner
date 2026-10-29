@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
-import { parseStories, slugify, storyText, wholeFileStory, type Story } from "./backlog.ts";
+import { lastFirst, parseStories, slugify, storyText, wholeFileStory, type Story } from "./backlog.ts";
 import { ChainStore, type StoreFs } from "./chain-store.ts";
 import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
@@ -181,6 +181,17 @@ function treeItem(view: ItemView): vscode.TreeItem {
   return item;
 }
 
+const SHOW_OUTPUT = "Show Output";
+const OPEN_WORKTREE = "Open Worktree";
+
+// A message about what the output holds offers to show it, and a finished run offers its worktree, rather than telling the user
+// where to look.
+async function pointTo(show: (message: string, ...items: string[]) => Thenable<string | undefined>, message: string, output: vscode.OutputChannel, worktree?: string): Promise<void> {
+  const choice = await show(message, ...(worktree ? [OPEN_WORKTREE] : []), SHOW_OUTPUT);
+  if (choice === SHOW_OUTPUT) output.show();
+  else if (choice === OPEN_WORKTREE && worktree) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(worktree), { forceNewWindow: true });
+}
+
 function readModels(config: vscode.WorkspaceConfiguration): Models {
   return {
     strong: config.get<string>("models.strong", "claude-opus-5-5"),
@@ -225,12 +236,16 @@ async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<vo
   for (const r of results) output.appendLine(`${r.ok ? "ok  " : "FAIL"} ${r.name}: ${r.detail}`);
   const failed = results.filter((r) => !r.ok);
   if (failed.length === 0) await vscode.window.showInformationMessage("Coordiner: every environment check passed.");
-  else await vscode.window.showErrorMessage(`Coordiner: ${failed.length} environment check(s) failed. See the Coordiner output.`);
+  else await pointTo(vscode.window.showErrorMessage, `Coordiner: ${failed.length} environment check(s) failed.`, output);
 }
 
 // "type" means the user chose to type a story instead of picking one from a file.
-async function pickStory(): Promise<Story | "type" | undefined> {
-  const files = await vscode.workspace.findFiles("**/*.md", "**/node_modules/**", 200);
+const LAST_BACKLOG = "coordiner.lastBacklog";
+const LAST_WAIT = "coordiner.lastQuestionWait";
+
+async function pickStory(memory: vscode.Memento): Promise<Story | "type" | undefined> {
+  const last = memory.get<unknown>(LAST_BACKLOG);
+  const files = lastFirst(await vscode.workspace.findFiles("**/*.md", "**/node_modules/**", 200), (uri) => uri.fsPath === last);
   const picked = await vscode.window.showQuickPick(
     [
       { label: "$(edit) Type a story…", description: "no backlog file needed", uri: undefined },
@@ -240,6 +255,7 @@ async function pickStory(): Promise<Story | "type" | undefined> {
   );
   if (!picked) return undefined;
   if (!picked.uri) return "type";
+  void memory.update(LAST_BACKLOG, picked.uri.fsPath);
   const markdown = await readFile(picked.uri.fsPath, "utf8");
   if (markdown.trim() === "") {
     void vscode.window.showInformationMessage(`Coordiner: ${picked.label} is empty. Write the story in it, or choose "Type a story…".`);
@@ -278,13 +294,13 @@ type RunInput = { name: string; text: string };
 
 // Run asks for what the chain starts from; a typed input also suggests the run's name. A run in an existing worktree has its
 // name already (`named`), since it makes no folder or branch: only a picked story names it after its heading.
-async function askInput(kind: InputKind | undefined, named?: string): Promise<RunInput | undefined> {
+async function askInput(memory: vscode.Memento, kind: InputKind | undefined, named?: string): Promise<RunInput | undefined> {
   if (kind === undefined) {
     const name = named ?? (await nameRun());
     return name === undefined ? undefined : { name, text: "" };
   }
   if (kind === "story") {
-    const story = await pickStory();
+    const story = await pickStory(memory);
     if (story !== "type") return story && { name: story.heading, text: storyText(story) };
   }
   const { title, ask } = INPUTS[kind];
@@ -330,17 +346,18 @@ async function announce(outcome: Outcome, heading: string, worktree: Worktree, c
       output.appendLine(plain(outcome.text) || `(the session returned no ${brief.toLowerCase()})`);
       const unchanged = await offerRemoval(worktree, output);
       output.show(true);
-      await vscode.window.showInformationMessage(finishedMessage(name, brief, unchanged ? undefined : worktree.path));
+      await pointTo(vscode.window.showInformationMessage, finishedMessage(name, brief, unchanged ? undefined : worktree.path), output, unchanged ? undefined : worktree.path);
       return;
     }
     case "no-changes": {
       const removable = await offerRemoval(worktree, output);
       if (removable) output.show(true);
-      await vscode.window.showInformationMessage(nothingToReviewMessage(name, removable));
+      if (removable) await pointTo(vscode.window.showInformationMessage, nothingToReviewMessage(name, removable), output);
+      else await vscode.window.showInformationMessage(nothingToReviewMessage(name, removable));
       return;
     }
     case "halted":
-      await vscode.window.showWarningMessage(`Coordiner: ${name} halted: ${plain(outcome.reason)} See the Coordiner output.`);
+      await pointTo(vscode.window.showWarningMessage, `Coordiner: ${name} halted: ${plain(outcome.reason)}`, output);
       return;
     case "stopped":
       await vscode.window.showInformationMessage(`Coordiner: ${name} was stopped.`);
@@ -349,7 +366,7 @@ async function announce(outcome: Outcome, heading: string, worktree: Worktree, c
       await vscode.window.showErrorMessage(`Coordiner: ${plain(outcome.reason)}`);
       return;
     case "failed":
-      await vscode.window.showErrorMessage(`Coordiner: ${name} failed: ${plain(outcome.error)} See the Coordiner output.`);
+      await pointTo(vscode.window.showErrorMessage, `Coordiner: ${name} failed: ${plain(outcome.error)}`, output);
   }
 }
 
@@ -396,6 +413,8 @@ type RunContext = {
   reveal: (step: RunItem) => void;
   output: vscode.OutputChannel;
   storage: vscode.Uri;
+  // This workspace's memory: the wait choice and the backlog file used last, each put first next time.
+  memory: vscode.Memento;
   onRunChange: () => void;
   // Sends the run's chat to the chains editor, if it is open.
   postChat: (message: ChatMessage) => void;
@@ -450,7 +469,8 @@ async function readyRepo(folder: string, output: vscode.OutputChannel): Promise<
       output.appendLine(setup.detail);
       output.show(true);
     }
-    void vscode.window.showErrorMessage(`Coordiner: ${setup.reason}${setup.detail ? " See the Coordiner output." : ""}`);
+    if (setup.detail) void pointTo(vscode.window.showErrorMessage, `Coordiner: ${setup.reason}`, output);
+    else void vscode.window.showErrorMessage(`Coordiner: ${setup.reason}`);
   }
   return undefined;
 }
@@ -470,9 +490,14 @@ const RUN_CHOICES: ReadonlyArray<readonly [string, QuestionWait]> = [
   ["Run, never wait", "never"],
 ];
 
-async function confirmRun(message: string, detail: string): Promise<QuestionWait | undefined> {
-  const choice = await vscode.window.showWarningMessage(message, { modal: true, detail }, ...RUN_CHOICES.map(([label]) => label));
-  return RUN_CHOICES.find(([label]) => label === choice)?.[1];
+// The choice made last in this workspace comes first, so it is the default button; a stored value that is no choice is ignored.
+async function confirmRun(message: string, detail: string, memory: vscode.Memento): Promise<QuestionWait | undefined> {
+  const last = memory.get<unknown>(LAST_WAIT);
+  const choices = lastFirst(RUN_CHOICES, ([, wait]) => wait === last);
+  const choice = await vscode.window.showWarningMessage(message, { modal: true, detail }, ...choices.map(([label]) => label));
+  const wait = RUN_CHOICES.find(([label]) => label === choice)?.[1];
+  if (wait) await memory.update(LAST_WAIT, wait);
+  return wait;
 }
 
 // What the sessions run with: the editor's environment and the claude to start.
@@ -564,7 +589,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   if (!repo) return undefined;
   const tools = await sessionTools();
   if (!tools) return undefined;
-  const input = await askInput(inputOf(chain));
+  const input = await askInput(ctx.memory, inputOf(chain));
   if (!input) return undefined;
   const filled = fillInput(chain, input.text);
   if (!filled.ok) {
@@ -586,7 +611,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
     repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
     setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
   ].filter(Boolean).join("\n\n");
-  const questions = await confirmRun(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, detail);
+  const questions = await confirmRun(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, detail, ctx.memory);
   if (!questions) return undefined;
   endAfter(ctx.state);
 
@@ -635,7 +660,7 @@ async function confirmHere(chain: Chain, where: Extract<Where, { kind: "after" |
     input = { name: here.name, text: here.input };
     source = takesInput ? `Input: ${plain(here.card)}'s last reply, ${here.input.length} characters.` : "This chain takes no input.";
   } else {
-    const asked = await askInput(inputOf(chain), slug);
+    const asked = await askInput(ctx.memory, inputOf(chain), slug);
     if (!asked) return undefined;
     input = asked;
     source = takesInput ? `Input: ${input.text.length} characters.` : "This chain takes no input.";
@@ -652,7 +677,7 @@ async function confirmHere(chain: Chain, where: Extract<Where, { kind: "after" |
     source,
     ...runNotes(chain),
   ].join("\n\n");
-  const questions = await confirmRun(where.kind === "after" ? `Run ${plain(chain.name)} in the same worktree?` : `Run ${plain(chain.name)} in ${plain(slug)}?`, detail);
+  const questions = await confirmRun(where.kind === "after" ? `Run ${plain(chain.name)} in the same worktree?` : `Run ${plain(chain.name)} in ${plain(slug)}?`, detail, ctx.memory);
   if (!questions) return undefined;
   endAfter(ctx.state);
   const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models, questions, definition: chain, input: input.text });
@@ -671,7 +696,7 @@ async function confirmContinue({ run, continuation }: Extract<Where, { kind: "co
     from.resume ? `${plain(card)} goes on in the session it ran in.` : `${plain(card)} starts in a new session.`,
     ...runNotes(chain),
   ].join("\n\n");
-  const questions = await confirmRun(`Continue ${plain(run.chain)} · ${plain(run.story)} at ${plain(card)}?`, detail);
+  const questions = await confirmRun(`Continue ${plain(run.chain)} · ${plain(run.story)} at ${plain(card)}?`, detail, ctx.memory);
   if (!questions) return undefined;
   endAfter(ctx.state);
   const journal = journalAt(ctx, run.file);
@@ -857,7 +882,7 @@ async function reopen(file: string, ctx: RunContext): Promise<boolean> {
     output.appendLine(`Coordiner: could not read ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (!run) {
-    void vscode.window.showErrorMessage("Coordiner: that session's journal can no longer be read. See the Coordiner output.");
+    void pointTo(vscode.window.showErrorMessage, "Coordiner: that session's journal can no longer be read.", output);
     return false;
   }
   endAfter(state);
@@ -1011,6 +1036,8 @@ class ChainsEditor {
       { enableScripts: true, localResourceRoots: [media, dist] },
     );
     this.panel = panel;
+    // A tab icon is drawn as an image, so currentColor has nothing to follow: one fixed-colour copy per theme kind.
+    panel.iconPath = { light: vscode.Uri.joinPath(media, "coordiner-light.svg"), dark: vscode.Uri.joinPath(media, "coordiner-dark.svg") };
     const uri = (base: vscode.Uri, name: string) => panel.webview.asWebviewUri(vscode.Uri.joinPath(base, name)).toString();
     panel.webview.html = editorHtml({
       cspSource: panel.webview.cspSource,
@@ -1270,7 +1297,7 @@ async function removeLine({ line, root, head }: WorktreeRow, ctx: RunContext): P
     const state = await worktreeState(root, line, exec);
     if (state.changed === undefined || state.ahead === undefined) {
       output.appendLine(`Coordiner: git could not say what ${line.path} holds (uncommitted files, or commits not in ${head ?? "HEAD"}), so nothing was removed.`);
-      void vscode.window.showErrorMessage(`Coordiner: git could not say what ${name} holds, so nothing was removed. See the Coordiner output.`);
+      void pointTo(vscode.window.showErrorMessage, `Coordiner: git could not say what ${name} holds, so nothing was removed.`, output);
       return;
     }
     const runs = line.runs.length > 0 ? `, and the journals of its ${plural(line.runs.length, "run", "runs")}` : "";
@@ -1286,7 +1313,8 @@ async function removeLine({ line, root, head }: WorktreeRow, ctx: RunContext): P
     const result = await removeWorktree(root, line, { force: state.changed > 0 }, exec);
     if (!result.ok) {
       if (result.detail) output.appendLine(result.detail);
-      void vscode.window.showErrorMessage(`Coordiner: ${result.reason}${result.detail ? " See the Coordiner output." : ""}`);
+      if (result.detail) void pointTo(vscode.window.showErrorMessage, `Coordiner: ${result.reason}`, output);
+      else void vscode.window.showErrorMessage(`Coordiner: ${result.reason}`);
       return;
     }
     removed.push(result.removed.includes("branch") ? `the worktree ${name} and its branch` : `the worktree ${name}`);
@@ -1367,6 +1395,7 @@ export function activate(context: vscode.ExtensionContext): void {
     reveal,
     output,
     storage: context.globalStorageUri,
+    memory: context.workspaceState,
     onRunChange: changed,
     postChat: (message) => editor?.postChat(message),
     needsYou: (card) => editor?.needsYou(card),

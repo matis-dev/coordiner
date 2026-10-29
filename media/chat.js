@@ -62,18 +62,10 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     vscode.postMessage({ type: "chatNextChain" });
     input.focus();
   } }, "Start the next chain here");
-  const body = el(
-    "div",
-    { id: "chat-body" },
-    line,
-    busyLine,
-    cacheLine,
-    transcript,
-    queuedList,
-    form,
-    el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, sendButton, pauseButton, continueButton, copyButton, nextButton, stopButton)),
-  );
-  root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip), el("div", { class: "chat-head-actions" }, maxButton, toggle)), body);
+  const composer = el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, sendButton, pauseButton, continueButton, copyButton, nextButton, stopButton));
+  const headActions = el("div", { class: "chat-head-actions" }, maxButton, toggle);
+  const body = el("div", { id: "chat-body" }, line, busyLine, cacheLine, transcript, queuedList, form, composer);
+  root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip), headActions), body);
 
   // The divider between the chains and the chat: the window-splitter pattern, its value the chat's share of the window.
   const { min, max } = logic.CHAT_HEIGHT;
@@ -117,12 +109,14 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   }
 
   // A hidden chat shrinks to its heading, and a maximized one fills the editor in place of the chains: in neither is there anything
-  // to resize. The saved height stays, so the chat comes back to it.
+  // to resize. Before the first run the chat is folded to its heading and status line, so the chains have the room; a saved height
+  // or maximize waits for the run. The saved height stays, so the chat comes back to it.
   function layout() {
     const open = !body.hidden;
-    splitter.hidden = !open || maximized;
-    root.style.height = open && !maximized ? `${height}vh` : "";
-    document.body.classList.toggle("chat-max", open && maximized);
+    const folded = chat.phase === "idle";
+    splitter.hidden = !open || maximized || folded;
+    root.style.height = open && !maximized && !folded ? `${height}vh` : "";
+    document.body.classList.toggle("chat-max", open && maximized && !folded);
   }
 
   function setOpen(open) {
@@ -388,6 +382,13 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
 
   function render(next, prev) {
     chat = next;
+    // Nothing to send, stop, resize or read before the first run: only the heading and the status line show.
+    const folded = next.phase === "idle";
+    headActions.hidden = folded;
+    composer.hidden = folded;
+    transcript.hidden = folded;
+    queuedList.hidden = folded;
+    layout();
     title.textContent = next.title ? `Run: ${next.title}` : "Run";
     const attention = logic.attention(next);
     chip.hidden = !attention;

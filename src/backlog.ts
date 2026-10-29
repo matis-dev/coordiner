@@ -33,3 +33,6 @@ export function slugify(heading: string): string {
   if (slug === "") throw new Error("The story heading needs at least one letter or digit.");
   return slug;
 }
+
+// What was used last goes first, the rest keep their order; a remembered value that matches nothing changes nothing.
+export const lastFirst = <T>(items: readonly T[], isLast: (item: T) => boolean): T[] => [...items.filter(isLast), ...items.filter((item) => !isLast(item))];

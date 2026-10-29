@@ -39,7 +39,7 @@ describe("runReason", () => {
   it("allows a runnable chain", () => assert.equal(runReason(story, { running: false, mskills: true, palette: palette(REQUIRED_COMMANDS) }), undefined));
   it("allows a chain before discovery has answered", () => assert.equal(runReason(story, { running: false }), undefined));
   it("blocks every chain while a run is in progress, and says how to stop it", () =>
-    assert.equal(runReason(own, { running: true }), "A run is in progress. To run another, stop it first: Stop run or End chat in its chat, the Stop button in the Sessions view, or Coordiner: Stop Run."));
+    assert.equal(runReason(own, { running: true }), "A run is in progress. Stop it in the chat below or with Coordiner: Stop Run to start another."));
   it("blocks an m-skills chain when m-skills is missing", () => assert.equal(runReason(story, { running: false, mskills: false }), "Needs m-skills, which is not installed."));
   it("lets your own skills run without m-skills", () => assert.equal(runReason(own, { running: false, mskills: false, palette: palette(["acme:lint"]) }), undefined));
   it("passes on the chain's own reason", () => assert.match(runReason(own, { running: false, palette: [] })!, /Missing skills: acme:lint/));

@@ -61,6 +61,13 @@ async function open(stored?: Record<string, unknown>) {
   };
 }
 
+// The divider, Hide and Maximize show only once a run has started; before it the chat is folded to its heading.
+async function running(stored?: Record<string, unknown>) {
+  const page = await open(stored);
+  page.reset(view());
+  return page;
+}
+
 afterEach(() => current?.window.close());
 
 describe("run chat: before and during a run", () => {
@@ -73,6 +80,31 @@ describe("run chat: before and during a run", () => {
     page.button("Send").click();
     assert.equal(page.posted.some((m) => m.type === "chatSend"), false);
     assert.match(page.status()!, /No run is going/);
+  });
+
+  it("folds to its heading and status line before the first run, and opens at the saved height when one starts", async () => {
+    const page = await open({ chatHeight: 60 });
+    const shown = () => ({
+      composer: !page.doc.querySelector<HTMLElement>("#chat .composer")!.hidden,
+      transcript: !page.doc.getElementById("transcript")!.hidden,
+      actions: !page.doc.querySelector<HTMLElement>(".chat-head-actions")!.hidden,
+      splitter: !page.splitter().hidden,
+      chip: !page.doc.querySelector<HTMLElement>(".chat-title .run-chip")!.hidden,
+      line: !page.doc.querySelector<HTMLElement>(".chat-status")!.hidden,
+    });
+    assert.deepEqual(shown(), { composer: false, transcript: false, actions: false, splitter: false, chip: false, line: true });
+    assert.equal(page.chat().style.height, "");
+    page.reset(view());
+    assert.deepEqual(shown(), { composer: true, transcript: true, actions: true, splitter: true, chip: true, line: true });
+    assert.equal(page.chat().style.height, "60vh");
+  });
+
+  it("waits for the first run to apply a saved maximize", async () => {
+    const page = await open({ chatMax: true });
+    assert.equal(page.doc.body.classList.contains("chat-max"), false);
+    page.reset(view());
+    assert.equal(page.doc.body.classList.contains("chat-max"), true);
+    assert.equal(page.button("Maximize chat").getAttribute("aria-pressed"), "true");
   });
 
   it("shows the run's title, what it is doing, and every kind of entry", async () => {
@@ -267,7 +299,7 @@ describe("run chat: pause, continue and stop", () => {
   });
 
   it("hides and shows the chat with a disclosure button", async () => {
-    const page = await open();
+    const page = await running();
     page.button("Hide chat").click();
     const toggle = page.button("Show chat");
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
@@ -512,7 +544,7 @@ describe("run chat: the divider above it", () => {
     page.splitter().dispatchEvent(new page.w.KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
 
   it("sits between the chains and the chat as a focusable separator with its value", async () => {
-    const page = await open();
+    const page = await running();
     const splitter = page.splitter();
     assert.equal(splitter.nextElementSibling, page.chat());
     assert.equal(splitter.previousElementSibling, page.doc.querySelector(".pane"));
@@ -524,7 +556,7 @@ describe("run chat: the divider above it", () => {
   });
 
   it("resizes with the arrow keys, Home and End, and remembers the height with what the editor saved", async () => {
-    const page = await open({ selectedId: "own" });
+    const page = await running({ selectedId: "own" });
     press(page, "ArrowUp");
     assert.equal(page.chat().style.height, "40vh");
     assert.equal(page.splitter().getAttribute("aria-valuenow"), "40");
@@ -538,7 +570,7 @@ describe("run chat: the divider above it", () => {
   });
 
   it("leaves other keys to the page", async () => {
-    const page = await open();
+    const page = await running();
     const key = new page.w.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
     page.splitter().dispatchEvent(key);
     assert.equal(key.defaultPrevented, false);
@@ -546,7 +578,7 @@ describe("run chat: the divider above it", () => {
   });
 
   it("follows the pointer while dragging, and saves the height when the drag ends", async () => {
-    const page = await open();
+    const page = await running();
     const at = (y: number) => new page.w.MouseEvent("pointermove", { clientY: y });
     page.splitter().dispatchEvent(new page.w.MouseEvent("pointerdown", { clientY: 500, bubbles: true, cancelable: true }));
     page.w.dispatchEvent(at(page.w.innerHeight / 2));
@@ -559,7 +591,7 @@ describe("run chat: the divider above it", () => {
   });
 
   it("opens at the height saved last time, and keeps the editor's own saved state when it saves", async () => {
-    const page = await open({ selectedId: "own", chatHeight: 60 });
+    const page = await running({ selectedId: "own", chatHeight: 60 });
     assert.equal(page.chat().style.height, "60vh");
     page.state({ chains: [], running: false });
     page.doc.querySelector<HTMLButtonElement>('#rail button[aria-pressed="false"]')!.click();
@@ -567,7 +599,7 @@ describe("run chat: the divider above it", () => {
   });
 
   it("hides with the chat, and the chat shrinks to its heading", async () => {
-    const page = await open();
+    const page = await running();
     page.button("Hide chat").click();
     assert.equal(page.splitter().hidden, true);
     assert.equal(page.chat().style.height, "");
@@ -581,7 +613,7 @@ describe("run chat: maximized", () => {
   const maxed = (page: Awaited<ReturnType<typeof open>>) => page.doc.body.classList.contains("chat-max");
 
   it("fills the editor in place of the chains, keeps focus on its button, and remembers it with what the editor saved", async () => {
-    const page = await open({ selectedId: "own", chatHeight: 60 });
+    const page = await running({ selectedId: "own", chatHeight: 60 });
     const button = page.button("Maximize chat");
     assert.equal(button.getAttribute("aria-pressed"), "false");
     button.focus();
@@ -600,14 +632,14 @@ describe("run chat: maximized", () => {
   });
 
   it("opens maximized when it was saved that way", async () => {
-    const page = await open({ chatMax: true });
+    const page = await running({ chatMax: true });
     assert.equal(page.button("Maximize chat").getAttribute("aria-pressed"), "true");
     assert.equal(maxed(page), true);
     assert.equal(page.splitter().hidden, true);
   });
 
   it("gives the chains their column back when a chain is picked in the rail or a new one is made, with focus on its heading", async () => {
-    const page = await open({ chatMax: true });
+    const page = await running({ chatMax: true });
     page.state();
     page.doc.querySelector<HTMLButtonElement>('[data-focus="rail-idea"]')!.click();
     assert.equal(maxed(page), false);
@@ -623,14 +655,14 @@ describe("run chat: maximized", () => {
   });
 
   it("stays maximized when the run ends", async () => {
-    const page = await open({ chatMax: true });
+    const page = await running({ chatMax: true });
     page.reset(view());
     page.update(view({ phase: "ended" }));
     assert.equal(maxed(page), true);
   });
 
   it("gives the chains their room back when hidden, and shows the chat again when maximized from hidden", async () => {
-    const page = await open({ chatMax: true });
+    const page = await running({ chatMax: true });
     page.button("Hide chat").click();
     assert.equal(maxed(page), false);
     assert.equal(page.button("Maximize chat").getAttribute("aria-pressed"), "false");

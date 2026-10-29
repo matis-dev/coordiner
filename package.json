@@ -1,7 +1,7 @@
 {
   "name": "coordiner",
   "displayName": "Coordiner",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "matis-dev",
   "description": "Runs chains of Claude Code skills in unattended sessions, each run in its own git worktree, up to the commit brief. Nothing is committed for you.",
   "license": "MIT",
@@ -271,7 +271,7 @@
     "@types/vscode": "1.134.0",
     "esbuild": "0.28.2",
     "husky": "9.1.7",
-    "jsdom": "30.1.1",
+    "jsdom": "30.1.3",
     "typescript": "7.0.2"
   },
   "packageManager": "pnpm@12.15.0"

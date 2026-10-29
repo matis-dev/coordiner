@@ -23,6 +23,11 @@ export async function start() {
   // A state that arrived while a field held unsaved typing, not rendered yet.
   let deferred = false;
   let shown;
+  // Where the run was when its card was last scrolled into view; a re-render on the same card leaves the scroll alone.
+  let scrolledTo;
+  // The line under the toolbar saying what the last edit did, with Undo after a remove: { chainId, text, undo? }. Any other edit
+  // or picking a chain clears it; a state from the extension keeps it.
+  let notice;
   // The skill picked in each session's palette, by chain and session: a re-render (a run moving on, say) keeps it.
   const picks = new Map();
 
@@ -53,14 +58,16 @@ export async function start() {
 
   function select(id) {
     chat.showChains();
+    notice = undefined;
     selectedId = id;
     remember({ selectedId });
     pendingFocus = "chain-title";
     render();
   }
 
-  // Optimistic: the edit shows at once, the extension saves it and sends the state back.
-  function save(chain, message, focus) {
+  // Optimistic: the edit shows at once, the extension saves it and sends the state back. `leaves` is the notice the edit leaves.
+  function save(chain, message, focus, leaves) {
+    notice = leaves;
     state = { ...state, chains: state.chains.some((c) => c.id === chain.id) ? state.chains.map((c) => (c.id === chain.id ? chain : c)) : [...state.chains, chain] };
     pendingFocus = focus;
     vscode.postMessage({ type: "save", chain });
@@ -75,7 +82,7 @@ export async function start() {
     if (next.id === chain.id) return save(next, `Saved ${label}`, focus);
     selectedId = next.id;
     remember({ selectedId });
-    save(next, `Copied ${chain.name} to ${next.name} to save this change`, focus);
+    save(next, `Copied ${chain.name} to ${next.name} to save this change`, focus, { chainId: next.id, text: `Saved as ${next.name}. Templates don't change.` });
   }
 
   function copyOf(chain) {
@@ -113,8 +120,9 @@ export async function start() {
         "button",
         { type: "button", "aria-pressed": String(chain.id === selected()?.id), "data-focus": `rail-${chain.id}`, onclick: () => select(chain.id) },
         el("span", {}, chain.name),
-        // The separator keeps the spoken name "Story, m-skills" instead of "Storym-skills".
-        chain.builtIn && chainsModule.usesMskills(chain) ? [el("span", { class: "visually-hidden" }, ", "), el("span", { class: "badge" }, "m-skills")] : undefined,
+        // Only while m-skills is missing does the badge tell one chain from another: it marks the ones that will not run. The separator
+        // keeps the spoken name "Story, needs m-skills" instead of "Storyneeds m-skills".
+        state.mskills === false && chainsModule.usesMskills(chain) ? [el("span", { class: "visually-hidden" }, ", "), el("span", { class: "badge" }, "needs m-skills")] : undefined,
       ),
     );
   }
@@ -138,6 +146,8 @@ export async function start() {
         } },
         "New empty chain",
       ),
+      // The skill list is the window's, not a chain's, so it is refreshed from here.
+      el("button", { type: "button", class: "refresh", "data-focus": "refresh-skills", onclick: () => vscode.postMessage({ type: "refreshPalette" }) }, "Refresh skills"),
     );
   }
 
@@ -175,7 +185,12 @@ export async function start() {
           el("button", { type: "button", "aria-label": `Move ${label} right`, "data-focus": logic.moveKey(s, i, 1), onclick: () => move(1) }, "→"),
           el(
             "button",
-            { type: "button", "data-focus": logic.removeKey(s, i), "aria-label": `Remove ${label}`, onclick: () => save(edit.removeCard(chain, s, i), `Removed ${label}`, logic.afterRemove(s, i, cards.length)) },
+            { type: "button", "data-focus": logic.removeKey(s, i), "aria-label": `Remove ${label}`, onclick: () =>
+              save(edit.removeCard(chain, s, i), `Removed ${label}`, logic.afterRemove(s, i, cards.length), {
+                chainId: chain.id,
+                text: `Removed ${label}`,
+                undo: { chain, name: `Undo remove ${label}`, said: `Restored ${label}`, focus: logic.removeKey(s, i) },
+              }) },
             "Remove",
           ),
         ),
@@ -288,20 +303,20 @@ export async function start() {
     const reason = logic.runReason(chain, state);
     const parts = [el("h2", { tabindex: "-1", "data-focus": "chain-title" }, chain.name)];
 
-    const toolbar = [];
     if (editable) {
-      toolbar.push(
-        el("label", { for: "chain-name" }, "Name"),
-        el("input", { id: "chain-name", "data-focus": "chain-name", value: chain.name, maxlength: chainsModule.MAX_NAME, onchange: (e) => e.target.value.trim() && save(edit.rename(chain, e.target.value.trim()), "Renamed", "chain-title") }),
-        el("button", { type: "button", "data-focus": "duplicate", onclick: () => copyOf(chain) }, "Duplicate"),
-        el("button", { type: "button", "data-focus": "delete-chain", onclick: () => vscode.postMessage({ type: "delete", id: chain.id }) }, "Delete chain"),
+      parts.push(
+        el(
+          "div",
+          { class: "name-row" },
+          el("label", { for: "chain-name" }, "Name"),
+          el("input", { id: "chain-name", "data-focus": "chain-name", value: chain.name, maxlength: chainsModule.MAX_NAME, onchange: (e) => e.target.value.trim() && save(edit.rename(chain, e.target.value.trim()), "Renamed", "chain-title") }),
+        ),
       );
     } else {
       parts.push(el("p", { class: "note" }, "Built-in template. Changing a card's model, effort or pause saves your own copy; duplicate it to edit the rest."));
-      toolbar.push(el("button", { type: "button", "data-focus": "duplicate", onclick: () => copyOf(chain) }, "Duplicate to edit"));
     }
-    toolbar.push(
-      el("button", { type: "button", "data-focus": "refresh-skills", onclick: () => vscode.postMessage({ type: "refreshPalette" }) }, "Refresh skills"),
+    // Run first, the one destructive action last and set apart; the order on screen is the order in the DOM.
+    const toolbar = [
       el(
         "button",
         { type: "button", class: "run", "data-focus": "run", "aria-disabled": String(reason !== undefined), "aria-describedby": reason ? "run-reason" : undefined, title: reason, onclick: () => {
@@ -310,8 +325,22 @@ export async function start() {
         } },
         `Run ${chain.name}`,
       ),
-    );
+      el("button", { type: "button", "data-focus": "duplicate", onclick: () => copyOf(chain) }, editable ? "Duplicate" : "Duplicate to edit"),
+      editable ? el("button", { type: "button", class: "end", "data-focus": "delete-chain", onclick: () => vscode.postMessage({ type: "delete", id: chain.id }) }, "Delete chain") : undefined,
+    ];
     parts.push(el("div", { class: "toolbar" }, toolbar));
+    // Not a live region: the status region already said it once.
+    if (notice?.chainId === chain.id) {
+      const { undo } = notice;
+      parts.push(
+        el(
+          "p",
+          { class: "notice" },
+          el("span", {}, notice.text),
+          undo ? el("button", { type: "button", "aria-label": undo.name, "data-focus": "undo", onclick: () => save(undo.chain, undo.said, undo.focus) }, "Undo") : undefined,
+        ),
+      );
+    }
     if (reason) parts.push(el("p", { id: "run-reason", class: "reason" }, reason));
     parts.push(el("p", { class: "starts" }, logic.startsFrom(chain)));
     if (editable) {
@@ -330,7 +359,12 @@ export async function start() {
           session.cards.length > 0 ? el("ol", { class: "lane" }, session.cards.map((c, i) => card(chain, s, i, c, editable))) : el("p", { class: "note" }, "No skills in this session yet."),
           editable ? addSkill(chain, s) : undefined,
           editable && chain.sessions.length > 1
-            ? el("button", { type: "button", "data-focus": `remove-session-${s}`, onclick: () => save(edit.removeSession(chain, s), `Removed session ${s + 1}`, "add-session") }, `Remove session ${s + 1}`)
+            ? el("button", { type: "button", "data-focus": `remove-session-${s}`, onclick: () =>
+                save(edit.removeSession(chain, s), `Removed session ${s + 1}`, "add-session", {
+                  chainId: chain.id,
+                  text: `Removed session ${s + 1}`,
+                  undo: { chain, name: `Undo remove session ${s + 1}`, said: `Restored session ${s + 1}`, focus: `remove-session-${s}` },
+                }) }, `Remove session ${s + 1}`)
             : undefined,
         ),
       );
@@ -362,6 +396,13 @@ export async function start() {
     renderBanner();
     renderRail();
     renderDetail();
+    // A card that starts running or waiting may be under the chat: scroll its lane just enough to show it. Focus stays put.
+    const at = state.runningAt;
+    const runKey = at && `${at.chainId}:${at.session}:${at.index}:${Boolean(at.waiting)}`;
+    if (runKey !== scrolledTo) {
+      scrolledTo = runKey;
+      detail.querySelector('.card[aria-current="step"]')?.scrollIntoView({ block: "nearest" });
+    }
     if (pendingFocus) {
       [...document.querySelectorAll("[data-focus]")].find((node) => node.dataset.focus === pendingFocus)?.focus();
       pendingFocus = undefined;

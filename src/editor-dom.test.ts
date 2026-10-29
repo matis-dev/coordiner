@@ -34,6 +34,11 @@ async function open(stored?: { selectedId: string }) {
     requestAnimationFrame: (callback: () => void) => callback(),
     acquireVsCodeApi: () => ({ postMessage: (m: Posted) => posted.push(m), getState: () => state, setState: (s: unknown) => (state = s) }),
   });
+  // jsdom has no layout, so no scrollIntoView: record the calls instead.
+  const scrolled: Element[] = [];
+  w.Element.prototype.scrollIntoView = function (this: Element) {
+    scrolled.push(this);
+  };
   if (editor) await editor.start();
   else editor = (await import(SCRIPT)) as { start(): Promise<void> };
 
@@ -48,6 +53,7 @@ async function open(stored?: { selectedId: string }) {
     w,
     doc,
     posted,
+    scrolled,
     stored: () => state,
     all,
     named,
@@ -68,7 +74,7 @@ describe("chains webview: loading", () => {
     assert.deepEqual(page.posted, [{ type: "ready" }]);
   });
 
-  it("lists templates with an m-skills badge and the user's chains in the rail", async () => {
+  it("lists templates and the user's chains in the rail, with no badge while m-skills is installed", async () => {
     const page = await open();
     page.send();
     const rail = page.doc.getElementById("rail")!;
@@ -77,8 +83,19 @@ describe("chains webview: loading", () => {
       [...rail.querySelectorAll("ul")].slice(0, 2).map((ul) => [...ul.querySelectorAll("button > span:first-child")].map((s) => s.textContent)),
       [["Story", "Idea", "Bug", "New project"], ["Kickoff", "Onboard", "Security audit", "UI audit", "Accessibility audit", "Docs audit"]],
     );
-    assert.equal(rail.querySelectorAll(".badge").length, 10);
-    assert.ok(page.named("Story, m-skills"), "the badge is spoken as part of the name, separated");
+    assert.equal(rail.querySelectorAll(".badge").length, 0);
+    assert.ok(page.named("Story"));
+    assert.ok(page.named("Own"));
+  });
+
+  it("marks each chain that needs m-skills while it is not installed, the user's own included, and no other", async () => {
+    const mine: Chain = { id: "mine", name: "Mine", sessions: [{ cards: [defaultCard("m-skills:planning-architect")] }] };
+    const page = await open();
+    page.send({ mskills: false, chains: [own, mine] });
+    const rail = page.doc.getElementById("rail")!;
+    assert.equal(rail.querySelectorAll(".badge").length, 11);
+    assert.ok(page.named("Story, needs m-skills"), "the badge is spoken as part of the name, separated");
+    assert.ok(page.named("Mine, needs m-skills"));
     assert.ok(page.named("Own"));
   });
 
@@ -156,7 +173,7 @@ describe("chains webview: selecting and copying", () => {
   it("duplicates a single skill into a one-card chain of your own", async () => {
     const page = await open();
     page.send();
-    page.select("Security audit, m-skills");
+    page.select("Security audit");
     page.named("Duplicate to edit").click();
     const [copy] = page.saves();
     assert.equal(copy!.name, "Security audit copy");
@@ -347,6 +364,49 @@ describe("chains webview: editing a chain", () => {
     assert.equal(page.focused(), page.named("Add a session"));
   });
 
+  it("says what a removed card was, and Undo puts it back with focus on its Remove button", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send();
+    page.named("Remove b").click();
+    assert.equal(page.doc.querySelector("#detail .notice > span")!.textContent, "Removed b");
+    page.named("Undo remove b").click();
+    assert.deepEqual(page.saves().at(-1)!.sessions[0]!.cards.map((c) => c.skill), ["acme:a", "acme:b", "acme:c"]);
+    assert.deepEqual(page.cardSkills(), ["acme:a", "acme:b", "acme:c"]);
+    assert.equal(page.focused(), page.named("Remove b"));
+    assert.equal(page.status(), "Restored b");
+    assert.equal(page.doc.querySelector("#detail .notice"), null);
+  });
+
+  it("puts a removed session back with Undo, with focus on its Remove session button", async () => {
+    const two: Chain = { ...own, sessions: [own.sessions[0]!, { cards: [defaultCard("acme:lint")] }] };
+    const page = await open({ selectedId: "own" });
+    page.send({ chains: [two, other] });
+    page.named("Remove session 2").click();
+    assert.equal(page.all("#detail section").length, 1);
+    page.named("Undo remove session 2").click();
+    assert.equal(page.all("#detail section").length, 2);
+    assert.deepEqual(page.saves().at(-1)!.sessions[1]!.cards.map((c) => c.skill), ["acme:lint"]);
+    assert.equal(page.focused(), page.named("Remove session 2"));
+    assert.equal(page.status(), "Restored session 2");
+  });
+
+  it("keeps the notice through a state from the extension, and clears it on another edit or when another chain is picked", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send();
+    const notice = () => page.doc.querySelector("#detail .notice");
+    page.named("Remove b").click();
+    page.send({ chains: [page.saves().at(-1)!, other] });
+    assert.ok(notice(), "a state from the extension keeps it");
+    page.named("Add a session").click();
+    assert.equal(notice(), null, "another edit clears it");
+
+    page.named("Remove c").click();
+    assert.ok(notice());
+    page.select("Other");
+    page.select("Own");
+    assert.equal(notice(), null, "picking a chain clears it");
+  });
+
   it("asks the extension to delete a chain and to duplicate it", async () => {
     const page = await open({ selectedId: "own" });
     page.send();
@@ -362,6 +422,19 @@ describe("chains webview: editing a chain", () => {
     page.named("Remove b").focus();
     page.send();
     assert.equal(page.focused(), page.named("Remove b"));
+  });
+
+  it("puts Run first and Delete chain last in the toolbar, the name in its own row, and Refresh skills once at the foot of the rail", async () => {
+    const page = await open({ selectedId: "own" });
+    page.send();
+    const toolbar = () => [...page.doc.querySelectorAll("#detail > .toolbar button")].map((b) => b.textContent);
+    assert.deepEqual(toolbar(), ["Run Own", "Duplicate", "Delete chain"]);
+    assert.ok(page.doc.querySelector("#detail > .name-row #chain-name"));
+    assert.equal(page.doc.querySelector("#rail")!.lastElementChild!.textContent, "Refresh skills");
+    assert.equal(page.all("button").filter((b) => b.textContent === "Refresh skills").length, 1);
+    page.select("Story");
+    assert.deepEqual(toolbar(), ["Run Story", "Duplicate to edit"]);
+    assert.equal(page.doc.querySelector("#chain-name"), null);
   });
 
   it("keeps toolbar buttons focused across a new state", async () => {
@@ -450,6 +523,7 @@ describe("chains webview: model and effort", () => {
     assert.notEqual(copy!.id, "kickoff");
     assert.equal(copy!.sessions[0]!.cards[0]!.model, "m-opus");
     assert.equal(page.status(), "Copied Kickoff to Kickoff copy to save this change");
+    assert.equal(page.doc.querySelector("#detail .notice")!.textContent, "Saved as Kickoff copy. Templates don't change.");
     assert.deepEqual(page.stored(), { selectedId: copy!.id });
     assert.equal(page.doc.querySelector("#detail h2")!.textContent, "Kickoff copy");
     assert.equal(page.focused()?.id, "model-0-0");
@@ -597,7 +671,7 @@ describe("chains webview: running", () => {
   it("runs a template with a pausing card, and flags the card", async () => {
     const page = await open();
     page.send({ palette: palette([...REQUIRED_COMMANDS, "m-skills:kickoff"]) });
-    page.select("New project, m-skills");
+    page.select("New project");
     const run = page.named("Run New project");
     assert.equal(run.getAttribute("aria-disabled"), "false");
     run.click();
@@ -608,7 +682,7 @@ describe("chains webview: running", () => {
   it("runs a single skill from its template", async () => {
     const page = await open();
     page.send({ palette: palette([...REQUIRED_COMMANDS, "m-skills:kickoff"]) });
-    page.select("Kickoff, m-skills");
+    page.select("Kickoff");
     page.named("Run Kickoff").click();
     assert.deepEqual(page.posted.at(-1), { type: "run", id: "kickoff" });
     assert.match(page.doc.getElementById("detail")!.textContent!, /Starts from a name only/);
@@ -635,6 +709,24 @@ describe("chains webview: running", () => {
     assert.equal(current[0]!.querySelector(".flag.running")!.textContent, "Running");
     page.send({ running: true, runningAt: { chainId: "own", session: 0, index: 0 } });
     assert.equal(page.all('.card[aria-current="step"]').length, 0);
+  });
+
+  it("scrolls the card a run is on into view when it starts running or waiting, and not again on the same card", async () => {
+    const page = await open();
+    page.send({ running: true, runningAt: { chainId: "story", session: 0, index: 1 } });
+    assert.deepEqual(page.scrolled.map((c) => c.querySelector(".card-label")!.textContent), ["Implement"]);
+    page.send({ running: true, runningAt: { chainId: "story", session: 0, index: 1 } });
+    assert.equal(page.scrolled.length, 1);
+    page.send({ running: true, runningAt: { chainId: "story", session: 0, index: 1, waiting: true } });
+    assert.equal(page.scrolled.length, 2);
+    page.send({ running: true, runningAt: { chainId: "story", session: 1, index: 0 } });
+    assert.equal(page.scrolled.at(-1)!.querySelector(".card-label")!.textContent, "Review");
+  });
+
+  it("scrolls nothing when the run is on a chain that is not shown", async () => {
+    const page = await open();
+    page.send({ running: true, runningAt: { chainId: "own", session: 0, index: 0 } });
+    assert.equal(page.scrolled.length, 0);
   });
 
   it("marks the second of two cards that share a label when the run is on it", async () => {

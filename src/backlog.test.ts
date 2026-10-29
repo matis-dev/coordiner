@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseStories, slugify, storyText, wholeFileStory } from "./backlog.ts";
+import { lastFirst, parseStories, slugify, storyText, wholeFileStory } from "./backlog.ts";
 
 describe("parseStories", () => {
   it("finds Story N and Slice N headings at any level, case-insensitively", () => {
@@ -57,4 +57,15 @@ describe("slugify", () => {
 
 describe("storyText", () => {
   it("is the heading, a blank line, then the body", () => assert.equal(storyText({ heading: "Story 1: Login", body: "Add a login form." }), "Story 1: Login\n\nAdd a login form."));
+});
+
+describe("lastFirst", () => {
+  it("moves what was used last to the front and keeps the order of the rest", () => {
+    assert.deepEqual(lastFirst(["a.md", "b.md", "c.md"], (p) => p === "c.md"), ["c.md", "a.md", "b.md"]);
+  });
+
+  it("leaves the list as it was when nothing matches", () => {
+    assert.deepEqual(lastFirst(["a.md", "b.md"], (p) => p === "gone.md"), ["a.md", "b.md"]);
+    assert.deepEqual(lastFirst([], () => true), []);
+  });
 });
