@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { storyText } from "./backlog.ts";
 import { defaultCard, MAX_INPUT_CHARS, TEMPLATES, type Chain } from "./chains.ts";
-import { continueAfter, fillInput, MAX_TURNS, remainingCommands, runChain, runSession, talkOn, type AfterAsk, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
+import { continueAfter, fillInput, pickUpAfter, restateAfter, MAX_TURNS, remainingCommands, runChain, runSession, talkOn, type AfterAsk, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
 import type { TurnResult } from "./session.ts";
 import { Talk, type Move, type WaitRequest } from "./talk.ts";
 import type { ReviewPrep } from "./worktree.ts";
@@ -60,9 +60,9 @@ describe("runSession: session one", () => {
     assert.equal(requests[0]!.prompt, "/m-skills:planning-architect Story 1: Login\n\nAdd a login form.");
     assert.equal(requests[1]!.prompt, "/m-skills:implementing-architect Implement the approved plan above.");
     assert.deepEqual(events, [
-      { type: "step-started", index: 0, label: "Plan", tier: "strong", model: "m-strong" },
+      { type: "step-started", index: 0, label: "Plan", tier: "strong", model: "m-strong", position: { session: 0, card: 0 } },
       { type: "step-finished", index: 0, status: "done", detail: "next: Light", sessionId: "sess-1" },
-      { type: "step-started", index: 1, label: "Implement", tier: "weak", model: "m-weak" },
+      { type: "step-started", index: 1, label: "Implement", tier: "weak", model: "m-weak", position: { session: 0, card: 1 } },
       { type: "step-finished", index: 1, status: "done", detail: "done", sessionId: "sess-2" },
     ]);
   });
@@ -393,6 +393,74 @@ describe("runChain: the Story template", () => {
     const { deps } = storyHarness([...authored, reply("COORDINER: NEXT Light", 3), reply("COORDINER: HALT one-way door", 4)]);
     const outcome = await runChain(chain, deps);
     assert.deepEqual(outcome, { status: "halted", reason: "one-way door", sessionId: "sess-4", at: { session: 1, card: 1 } });
+  });
+});
+
+describe("runChain: continuing at a card", () => {
+  function chainHarness(script: TurnResult[]) {
+    const h = harness(script);
+    let prepared = 0;
+    const deps: ChainDeps = { ...h.deps, prepareReview: async () => (prepared++, { kind: "ready", marked: 0 }) };
+    return { ...h, deps, prepared: () => prepared };
+  }
+
+  it("marks every started step with its session and card, across sessions", async () => {
+    const { deps, events } = chainHarness([reply("COORDINER: NEXT Light", 1), reply("COORDINER: DONE", 2), reply("COORDINER: DONE", 3), reply("brief\nCOORDINER: DONE", 4)]);
+    await runChain(chain, deps);
+    assert.deepEqual(events.flatMap((e) => (e.type === "step-started" ? [e.position] : [])), [
+      { session: 0, card: 0 },
+      { session: 0, card: 1 },
+      { session: 1, card: 0 },
+      // The review's DONE skips the Fix card.
+      { session: 1, card: 2 },
+    ]);
+  });
+
+  it("resumes the stopped card's session with the given prompt, then runs the next session fresh", async () => {
+    const { deps, requests, events, prepared } = chainHarness([reply("COORDINER: DONE", 5), reply("COORDINER: DONE", 6), reply("brief\nCOORDINER: DONE", 7)]);
+    const from = { at: { session: 0, card: 1 }, tier: "weak" as const, resume: "sess-2", prompt: pickUpAfter("the user stopped the run") };
+    assert.deepEqual(await runChain(chain, deps, from), { status: "done", text: "brief" });
+    assert.deepEqual(requests.map((r) => [r.prompt, r.resume, r.model]), [
+      [from.prompt, "sess-2", "m-weak"],
+      ["/m-skills:code-review-architect-uncommitted", undefined, "m-strong"],
+      ["/m-skills:rolling-history", "sess-6", "m-medium"],
+    ]);
+    assert.equal(prepared(), 1);
+    assert.deepEqual(events.find((e) => e.type === "step-started"), { type: "step-started", index: 0, label: "Implement", tier: "weak", model: "m-weak", position: { session: 0, card: 1 } });
+  });
+
+  it("skips the sessions before the card, and prepares the review when it starts the session", async () => {
+    const { deps, requests, prepared } = chainHarness([reply("COORDINER: DONE", 1), reply("brief\nCOORDINER: DONE", 2)]);
+    await runChain(chain, deps, { at: { session: 1, card: 0 }, prompt: "/m-skills:code-review-architect-uncommitted" });
+    assert.equal(prepared(), 1);
+    assert.deepEqual(requests.map((r) => r.resume), [undefined, "sess-1"]);
+  });
+
+  it("does not prepare the review again when it picks up later in the review session", async () => {
+    const { deps, requests, prepared } = chainHarness([reply("brief\nCOORDINER: DONE", 9)]);
+    assert.deepEqual(await runChain(chain, deps, { at: { session: 1, card: 2 }, resume: "sess-8", prompt: "/m-skills:rolling-history" }), { status: "done", text: "brief" });
+    assert.equal(prepared(), 0);
+    assert.deepEqual(requests.map((r) => [r.prompt, r.resume]), [["/m-skills:rolling-history", "sess-8"]]);
+  });
+
+  it("starts the card fresh, on its skill's tier, when no session or tier is given", async () => {
+    const { deps, requests } = chainHarness([reply("COORDINER: DONE", 1), reply("COORDINER: DONE", 2), reply("brief\nCOORDINER: DONE", 3)]);
+    await runChain(chain, deps, { at: { session: 0, card: 1 }, prompt: "/m-skills:implementing-architect Implement the approved plan above." });
+    assert.deepEqual([requests[0]!.resume, requests[0]!.model], [undefined, "m-medium"]);
+  });
+
+  it("refuses a card the session does not have", async () => {
+    const { deps, requests } = chainHarness([]);
+    assert.deepEqual(await runChain(chain, deps, { at: { session: 0, card: 9 }, prompt: "x" }), { status: "refused", reason: "This session has no such card to continue at." });
+    assert.equal(requests.length, 0);
+  });
+
+  it("asks the card to check where it left off", () => {
+    assert.match(pickUpAfter("VS Code closed while it ran"), /interrupted \(VS Code closed while it ran\).*COORDINER status line/);
+  });
+
+  it("asks a card that had finished for its status line again, not for the work", () => {
+    assert.match(restateAfter("the user stopped the run"), /had finished.*\(the user stopped the run\)\. Do not redo it.*COORDINER status line/);
   });
 });
 

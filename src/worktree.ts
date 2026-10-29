@@ -10,8 +10,9 @@ export type RepoCheck = ({ kind: "ready" } & RepoInfo) | { kind: "no-repo" } | {
 export type WorktreeResult = { ok: true; path: string; branch: string } | { ok: false; reason: string; detail?: string };
 
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
-// A session id as resume takes it; also the check on one read back from a journal.
-export const SESSION_ID = /^[A-Za-z0-9-]{1,100}$/;
+// A session id as resume takes it; also the check on one read back from a journal. It never starts with a dash, so it cannot
+// read as an option to `claude --resume`.
+export const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/;
 
 const detailOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -130,6 +131,84 @@ export function removalCommands(root: string, path: string, branch: string): str
 export function resumeCommand(path: string, sessionId: string): string | undefined {
   if (/[\u0000-\u001f\u007f-\u009f]/.test(path) || !SESSION_ID.test(sessionId)) return undefined;
   return `cd ${quote(path)} && claude --resume ${sessionId}`;
+}
+
+export type Listed = { path: string; branch: string };
+// `main`: the main worktree's path, which is the repo's root even when git is asked from a linked worktree.
+export type WorktreeList = { ok: true; main: string; worktrees: Listed[] } | { ok: false; detail: string };
+
+const COORDINER_REF = /^refs\/heads\/(coordiner\/[a-z0-9][a-z0-9-]*)$/;
+const COORDINER_BRANCH = /^coordiner\/[a-z0-9][a-z0-9-]*$/;
+
+// The repo's worktrees on a coordiner/<slug> branch, asked from any of its worktrees. The main worktree (always listed first) is
+// never one of them, whatever it has checked out. `-z` ends every field with a NUL, so a path with a newline cannot split a record.
+export async function listWorktrees(root: string, exec: Exec): Promise<WorktreeList> {
+  let stdout;
+  try {
+    ({ stdout } = await exec("git", ["worktree", "list", "--porcelain", "-z"], { cwd: root }));
+  } catch (error) {
+    return { ok: false, detail: detailOf(error) };
+  }
+  const records: Map<string, string>[] = [new Map()];
+  for (const field of stdout.split("\0")) {
+    if (field === "") {
+      if (records.at(-1)!.size > 0) records.push(new Map());
+      continue;
+    }
+    const space = field.indexOf(" ");
+    records.at(-1)!.set(space < 0 ? field : field.slice(0, space), space < 0 ? "" : field.slice(space + 1));
+  }
+  const worktrees = records.slice(1).flatMap((r): Listed[] => {
+    const branch = COORDINER_REF.exec(r.get("branch") ?? "")?.[1];
+    const path = r.get("worktree");
+    return branch && path ? [{ path, branch }] : [];
+  });
+  return { ok: true, main: records[0]!.get("worktree") || root, worktrees };
+}
+
+// What a worktree holds that its removal would lose: uncommitted files, and commits on its branch that the main checkout's HEAD
+// does not have. Either is undefined when git could not say, which is never read as none.
+export type WorktreeState = { changed?: number; ahead?: number };
+
+export async function worktreeState(root: string, worktree: Listed, exec: Exec): Promise<WorktreeState> {
+  const changed = exec("git", ["status", "--porcelain"], { cwd: worktree.path }).then(
+    (r) => r.stdout.split("\n").filter((line) => line.trim() !== "").length,
+    () => undefined,
+  );
+  const ahead = COORDINER_BRANCH.test(worktree.branch)
+    ? exec("git", ["rev-list", "--count", `HEAD..refs/heads/${worktree.branch}`], { cwd: root }).then((r) => (/^\d+$/.test(r.stdout.trim()) ? Number(r.stdout.trim()) : undefined), () => undefined)
+    : undefined;
+  const [c, a] = await Promise.all([changed, ahead]);
+  return { ...(c !== undefined ? { changed: c } : {}), ...(a !== undefined ? { ahead: a } : {}) };
+}
+
+// The branch the main checkout is on, for "commits ahead of <branch>"; undefined when git could not say.
+export const currentBranch = (root: string, exec: Exec): Promise<string | undefined> =>
+  exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root }).then((r) => r.stdout.trim() || undefined, () => undefined);
+
+export type Removal = { ok: true; removed: ("worktree" | "branch")[]; left: string[] } | { ok: false; reason: string; detail?: string };
+
+// Removes a worktree and its branch, only once the caller has the user's confirmation. It acts only on a worktree git lists now
+// for this repo on a coordiner/<slug> branch, so neither a stale listing nor a tampered journal can aim it elsewhere. `force` is
+// passed only after the user agreed to lose what the worktree holds; without it git keeps a worktree with changes.
+export async function removeWorktree(root: string, worktree: Listed, { force }: { force: boolean }, exec: Exec): Promise<Removal> {
+  if (!COORDINER_BRANCH.test(worktree.branch)) return { ok: false, reason: `${plain(worktree.branch)} is not a branch Coordiner made.` };
+  const listed = await listWorktrees(root, exec);
+  if (!listed.ok) return { ok: false, reason: "Git could not list the worktrees, so nothing was removed.", detail: listed.detail };
+  if (!listed.worktrees.some((w) => w.path === worktree.path && w.branch === worktree.branch)) {
+    return { ok: false, reason: `Git no longer lists ${plain(worktree.path)} as a worktree on ${plain(worktree.branch)}, so nothing was removed.` };
+  }
+  try {
+    await exec("git", ["worktree", "remove", ...(force ? ["--force"] : []), "--", worktree.path], { cwd: root });
+  } catch (error) {
+    return { ok: false, reason: "Git could not remove the worktree.", detail: detailOf(error) };
+  }
+  try {
+    await exec("git", ["branch", "-D", worktree.branch], { cwd: root });
+  } catch {
+    return { ok: true, removed: ["worktree"], left: removalCommands(root, worktree.path, worktree.branch)?.slice(1) ?? [] };
+  }
+  return { ok: true, removed: ["worktree", "branch"], left: [] };
 }
 
 // Git is called with argument arrays only, and the slug is re-checked here so a caller bug cannot reach git as an option or a path.

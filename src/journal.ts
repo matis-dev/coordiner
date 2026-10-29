@@ -1,6 +1,6 @@
-import type { Effort } from "./chains.ts";
+import type { Chain, Effort } from "./chains.ts";
 import type { Models } from "./environment.ts";
-import type { Outcome, RunEvent } from "./run.ts";
+import type { At, Outcome, RunEvent } from "./run.ts";
 import type { Entry } from "./transcript.ts";
 import type { DecidedAfter, QuestionWait } from "./unattended.ts";
 
@@ -10,8 +10,11 @@ export type LastTurn = { sessionId: string; model: string; effort?: Effort; card
 // The transcript entries no other record carries, so a reopened chat shows what the sessions said.
 export type JournaledEntry = Extract<Entry, { kind: "assistant" | "tool" | "divider" | "failed" }>;
 
+// `definition` is the chain as picked, before `input` filled its placeholder, so a stopped run can be continued from it.
 export type JournalRecord =
-  | { type: "run-started"; chain: string; story: string; repo: string; worktree: string; branch: string; models: Models; questions: QuestionWait }
+  | { type: "run-started"; chain: string; story: string; repo: string; worktree: string; branch: string; models: Models; questions: QuestionWait; definition: Chain; input: string }
+  // The run was continued at that card; what follows belongs to it, up to its own outcome.
+  | { type: "continued"; position: At; questions: QuestionWait }
   | RunEvent
   | { type: "log"; line: string }
   // What the user said in the run's chat, and how they answered a skill's question.

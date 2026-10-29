@@ -120,7 +120,18 @@ When a run finishes without changing any file (an audit, say), the **Coordiner**
 
 ### Go back to an earlier session
 
-Earlier sessions of the open repository are listed under the running one in the **Sessions** view, newest first, with how each ended (done, halted, failed, stopped, or closed mid-run if VS Code was closed while it ran). Expand one to see its steps. Click it to open its transcript in the chains editor's chat.
+The **Sessions** view lists the open repository's lines of work under the running session, one row per worktree: the worktrees git lists on a `coordiner/<slug>` branch, and those earlier sessions ran in. The most recently active comes first. A row says how its latest run ended (done, halted, failed, stopped, or closed mid-run if VS Code was closed while it ran) and at which card, how many files are changed in the worktree, how many commits its branch has that the main checkout's current branch does not, and when it was last active. A row whose folder is gone, or that git no longer lists as a worktree, says so.
+
+Expand a row to see its sessions, newest first, and a session to see its steps. Click a session to open its transcript in the chains editor's chat.
+
+Each row has these actions, as buttons and in its right-click menu:
+
+- **Continue** — shown when the row's latest run halted, failed, was stopped, or was cut off by VS Code closing. After a confirm, the run picks up at the card it stopped at, in the session that card ran in, and writes on in the same journal. A card that had already replied is asked for its status line again rather than its work; a run that halted while the review was being prepared picks up at the review. Runs journaled before Continue existed cannot be continued.
+- **Start a Chain Here** — pick a chain, as with **Start…**, and run it in that worktree: no new worktree and no setup. It asks for the chain's input as usual and is named after the worktree.
+- **Open in New Window** — opens the worktree's folder in a new VS Code window. Its **Sessions** view lists the same rows as the repository's window.
+- **Remove Worktree…** — deletes the worktree's folder, its branch, and the journals of its sessions, after a confirm. A second confirm names what would be lost when the worktree has uncommitted files or commits that branch does not have. It is refused while a run or a turn of the chat is going, while the chat on that worktree is open, and in the window that has the worktree open. For a row whose folder is gone or that git no longer lists, only the journals are removed; git's own record and the branch are left for you, and the **Coordiner** output says so.
+
+When you open a session:
 
 - If its worktree and its last session still exist, the chat is live: you can keep talking to the session, copy its resume command, or start the next chain in its worktree, as after any run.
 - If the worktree is gone, the transcript is read-only and a warning says so.

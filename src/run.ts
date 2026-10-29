@@ -9,12 +9,18 @@ import { MAX_NEW_FILES, type ReviewPrep } from "./worktree.ts";
 export const MAX_TURNS = 20;
 
 export type StepStatus = "done" | "failed" | "halted" | "stopped";
+
+// Where a run is, or where it stopped: the session and the card within it.
+export type At = { session: number; card: number };
+
 export type RunEvent =
-  | { type: "step-started"; index: number; label: string; tier: Tier; model: string; effort?: Effort }
+  // `position`, not `at`: the journal stamps each record with its time as `at`.
+  | { type: "step-started"; index: number; label: string; tier: Tier; model: string; effort?: Effort; position: At }
   | { type: "step-finished"; index: number; status: StepStatus; detail: string; sessionId?: string };
 
-// Where a run stopped: the session and the card within it.
-export type At = { session: number; card: number };
+// Where a continued run picks up: the card, the tier it was on (none takes the skill's default), the session to resume (none
+// starts it fresh), and the prompt its first turn sends.
+export type StartPoint = { at: At; tier?: Tier; resume?: string; prompt: string };
 
 export type Outcome =
   | { status: "done"; text: string }
@@ -44,6 +50,15 @@ const NUDGE = "End your reply with your COORDINER status line.";
 export const continueAfter = (reason: string): string =>
   `The user has handled what stopped you (${reason}). Check that it is fixed, then carry on with the step, and end your reply with your COORDINER status line.`;
 
+// What a card is sent when a run that was stopped, or cut off by VS Code closing, is continued in the session it ran in.
+export const pickUpAfter = (reason: string): string =>
+  `This step was interrupted (${reason}). Check where you left off, then carry on with it, and end your reply with your COORDINER status line.`;
+
+// What a card is sent when its run is continued after the card had given its reply: it waited for the user, or the run stopped
+// before the card after it began. Its status line was not acted on, so it is asked for again rather than the work.
+export const restateAfter = (reason: string): string =>
+  `This step had finished when the run was interrupted (${reason}). Do not redo it: end your reply with your COORDINER status line for it again.`;
+
 // Why a card stopped, and the outcome the run ends with if the user stops it there.
 type Parking = { outcome: Extract<Outcome, { status: "halted" | "failed" }>; reason: string };
 
@@ -62,16 +77,18 @@ type Parking = { outcome: Extract<Outcome, { status: "halted" | "failed" }>; rea
 //
 // A card with its own model runs every turn on it, loop turns and the reminder included: NEXT <tier> then only picks the tier the
 // card after it starts on.
-async function runSessionAt(session: ChainSession, deps: RunDeps, place: SessionPlace = { session: 0 }): Promise<{ outcome: Outcome; card: number }> {
+// `start` begins at a later card instead, resuming the session it names with its prompt.
+async function runSessionAt(session: ChainSession, deps: RunDeps, place: SessionPlace = { session: 0 }, start?: Omit<StartPoint, "at"> & { card: number }): Promise<{ outcome: Outcome; card: number }> {
   const { cards } = session;
   if (cards.length === 0) return { outcome: { status: "refused", reason: "This session has no skills." }, card: 0 };
-  let card = 0;
-  let { label } = cards[0]!;
-  let prompt = cardPrompt(cards[0]!);
-  let tier = skillDefault(cards[0]!.skill).tier;
-  let attended = cards[0]!.pause;
+  let card = start?.card ?? 0;
+  if (!cards[card]) return { outcome: { status: "refused", reason: "This session has no such card to continue at." }, card: 0 };
+  let { label } = cards[card]!;
+  let prompt = start?.prompt ?? cardPrompt(cards[card]!);
+  let tier = start?.tier ?? skillDefault(cards[card]!.skill).tier;
+  let attended = cards[card]!.pause;
   let chat = false;
-  let resume: string | undefined;
+  let resume: string | undefined = start?.resume;
   let nudged = false;
   let unattendedTurns = 0;
   // The latest status line the card gave since it started waiting for the user; Continue applies it.
@@ -158,7 +175,7 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     const shown = chat ? `${label} · chat` : label;
     const { model = deps.models[tier], effort } = cards[card]!;
     const effortSet = effort ? { effort } : {};
-    deps.emit({ type: "step-started", index, label: shown, tier, model, ...effortSet });
+    deps.emit({ type: "step-started", index, label: shown, tier, model, ...effortSet, position: { session: place.session, card } });
     const result = await deps.runTurn({ prompt: queued ? `${queued}\n\n${prompt}` : prompt, model, ...effortSet, interactive: attended, ...(resume ? { resume } : {}) });
     const sessionId = result.sessionId;
     const finish = ([status, detail]: [StepStatus, string]) => deps.emit({ type: "step-finished", index, status, detail, ...(sessionId ? { sessionId } : {}) });
@@ -261,13 +278,16 @@ export function fillInput(chain: Chain, text: string): FilledChain {
 export type ChainDeps = RunDeps & { prepareReview(): Promise<ReviewPrep> };
 
 // Each session is fresh (never a resume), so a reviewer does not share the author's context. A session that opens with the
-// uncommitted review first marks the new files so the review sees them.
-export async function runChain(chain: Chain, deps: ChainDeps): Promise<Outcome> {
+// uncommitted review first marks the new files so the review sees them. With `from`, the chain picks up at that card: the sessions
+// before it are skipped, and a session entered at a later card has its review already prepared.
+export async function runChain(chain: Chain, deps: ChainDeps, from?: StartPoint): Promise<Outcome> {
   let steps = 0;
   let last: Outcome = { status: "refused", reason: "This chain has no sessions." };
   for (const [s, session] of chain.sessions.entries()) {
+    if (from && s < from.at.session) continue;
     if (s > 0 && deps.signal.aborted) return { status: "stopped" };
-    if (session.cards[0]?.skill === REVIEW) {
+    const start = from?.at.session === s ? { ...from, card: from.at.card } : undefined;
+    if (session.cards[0]?.skill === REVIEW && (start?.card ?? 0) === 0) {
       const prep = await deps.prepareReview();
       const at = { session: s, card: 0 };
       if (prep.kind === "no-changes") return { status: "no-changes" };
@@ -280,7 +300,7 @@ export async function runChain(chain: Chain, deps: ChainDeps): Promise<Outcome> 
       deps.emit({ ...event, index: event.index + offset });
     };
     const nextSession = chain.sessions[s + 1]?.cards[0]?.label;
-    const { outcome, card } = await runSessionAt(session, { ...deps, emit }, { session: s, ...(nextSession ? { nextSession } : {}) });
+    const { outcome, card } = await runSessionAt(session, { ...deps, emit }, { session: s, ...(nextSession ? { nextSession } : {}) }, start);
     if (outcome.status === "halted" || outcome.status === "failed") return { ...outcome, at: { session: s, card } };
     if (outcome.status !== "done") return outcome;
     last = outcome;

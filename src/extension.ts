@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { access, appendFile, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -14,10 +14,10 @@ import { needsYou } from "./chat-logic.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
 import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
-import { MAX_JOURNAL_BYTES, parseJournal, readNewest, type PastRun } from "./history.ts";
+import { byWorktree, continuePoint, journalsOf, MAX_JOURNAL_BYTES, parseJournal, readNewest, type Continuation, type Line, type PastRun } from "./history.ts";
 import { createJournal, journalFileName, type JournalRecord, type LastTurn } from "./journal.ts";
 import { replyOf } from "./protocol.ts";
-import { fillInput, remainingCommands, runChain, talkOn, type AfterAsk, type Outcome, type RunEvent } from "./run.ts";
+import { fillInput, remainingCommands, runChain, talkOn, type AfterAsk, type Outcome, type RunEvent, type StartPoint } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
 import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type Decision, type RunChat, type TurnMode } from "./run-chat.ts";
 import { listCommands, runTurn, type TurnControl, type TurnResult } from "./session.ts";
@@ -26,18 +26,38 @@ import { commonEfforts, modelOptions, mskillsPresent, palette, type ModelOption,
 import { plain } from "./text.ts";
 import type { QuestionWait } from "./unattended.ts";
 import { applyTask, liveProcess, stopLine, type Process } from "./processes.ts";
-import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, processItem, sessionItem, startItems, stepItem, type ItemView, type StepView } from "./view.ts";
-import { addWorktree, prepareReview, removalNote, resumeCommand, setUpRepo, type Exec, type RepoInfo, type SetupPrompt, type Worktree } from "./worktree.ts";
+import type { Entry } from "./transcript.ts";
+import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, plural, processItem, sessionItem, startItems, stepItem, worktreeItem, type ItemView, type StepView } from "./view.ts";
+import {
+  addWorktree,
+  currentBranch,
+  listWorktrees,
+  prepareReview,
+  removalNote,
+  removeWorktree,
+  resumeCommand,
+  setUpRepo,
+  worktreeState,
+  type Exec,
+  type Listed,
+  type RepoInfo,
+  type SetupPrompt,
+  type Worktree,
+  type WorktreeState,
+} from "./worktree.ts";
 
 const run = promisify(execFile);
 const exec: Exec = (file, args, options) => run(file, args, options);
 
 // The Sessions list: the session open now at the top, with its steps and, under the running one, the background processes of its
-// turn; under it the earlier sessions of this repo, each with the steps it ran.
+// turn; under it this repo's lines of work, one per worktree, each with its earlier sessions and the steps they ran.
 type OpenRow = { kind: "open" };
-type PastRow = { kind: "past"; run: PastRun };
+// `continuation` is set when the line's latest run can be continued; `root` is the repo the worktree belongs to; `open`, that this
+// window has the worktree open.
+type WorktreeRow = { kind: "worktree"; line: Line; root: string; open: boolean; state: WorktreeState; head?: string; continuation?: Continuation };
+type PastRow = { kind: "past"; run: PastRun; parent: WorktreeRow };
 type PastStep = { kind: "past-step"; step: StepView; index: number; parent: PastRow };
-type RunItem = OpenRow | PastRow | PastStep | StepView | Process;
+type RunItem = OpenRow | WorktreeRow | PastRow | PastStep | StepView | Process;
 const OPEN: OpenRow = { kind: "open" };
 const isProcess = (item: RunItem): item is Process => "id" in item && !("kind" in item);
 
@@ -47,7 +67,9 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
   steps: StepView[] = [];
   processes: Process[] = [];
   private open?: { title: string; phase: "running" | "waiting for you" | "chat open" | "ended" };
-  private past: PastRow[] = [];
+  private lines: WorktreeRow[] = [];
+  // The journal file whose chat is open; its run shows in the open row, not again under its worktree.
+  private openFile?: string;
 
   update(steps: StepView[]): void {
     this.steps = steps;
@@ -64,14 +86,20 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
     this.changed.fire();
   }
 
-  setPast(runs: readonly PastRun[]): void {
-    this.past = runs.map((run) => ({ kind: "past", run }));
+  setLines(lines: readonly WorktreeRow[], openFile: string | undefined): void {
+    this.lines = [...lines];
+    this.openFile = openFile;
     this.changed.fire();
   }
 
   // The argument of a row's open command is a key into this list, never a path.
   pastRun(file: unknown): PastRun | undefined {
-    return this.past.find((row) => row.run.file === file)?.run;
+    return file === this.openFile ? undefined : this.lines.flatMap((row) => row.line.runs).find((run) => run.file === file);
+  }
+
+  // A worktree action gets the row it sits on; only a row in the current listing is acted on.
+  worktreeRow(item: unknown): WorktreeRow | undefined {
+    return this.lines.find((row) => row === item);
   }
 
   private running(): StepView | undefined {
@@ -89,7 +117,7 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
     return item;
   }
 
-  private sessionTreeItem(element: OpenRow | PastRow | PastStep): vscode.TreeItem {
+  private sessionTreeItem(element: OpenRow | WorktreeRow | PastRow | PastStep): vscode.TreeItem {
     const { Collapsed, Expanded, None } = vscode.TreeItemCollapsibleState;
     switch (element.kind) {
       case "open": {
@@ -97,6 +125,15 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
         item.id = "open";
         item.collapsibleState = this.steps.length > 0 ? Expanded : None;
         item.command = { command: "coordiner.openChains", title: "Open Chains" };
+        return item;
+      }
+      case "worktree": {
+        const { line, state, head, continuation } = element;
+        const item = treeItem(worktreeItem(line, state, head, Date.now()));
+        item.id = `wt:${line.path}`;
+        item.collapsibleState = this.runsOf(element).length > 0 ? Collapsed : None;
+        // The actions each kind offers, inline and in the context menu (package.json).
+        item.contextValue = line.where !== "here" ? "gone" : continuation ? "worktree-continue" : "worktree";
         return item;
       }
       case "past": {
@@ -115,17 +152,24 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
     }
   }
 
+  private runsOf(row: WorktreeRow): PastRow[] {
+    return row.line.runs.filter((run) => run.file !== this.openFile).map((run) => ({ kind: "past", run, parent: row }));
+  }
+
   getChildren(element?: RunItem): vscode.ProviderResult<RunItem[]> {
-    if (!element) return [...(this.open ? [OPEN] : []), ...this.past];
+    if (!element) return [...(this.open ? [OPEN] : []), ...this.lines];
     if (element === OPEN) return this.steps;
-    if ("kind" in element) return element.kind === "past" ? element.run.steps.map((step, index): PastStep => ({ kind: "past-step", step, index, parent: element })) : [];
+    if ("kind" in element) {
+      if (element.kind === "worktree") return this.runsOf(element);
+      return element.kind === "past" ? element.run.steps.map((step, index): PastStep => ({ kind: "past-step", step, index, parent: element })) : [];
+    }
     return !isProcess(element) && element === this.running() ? this.processes : [];
   }
 
   getParent(element: RunItem): RunItem | undefined {
     if (isProcess(element)) return this.running();
     if (!("kind" in element)) return OPEN;
-    return element.kind === "past-step" ? element.parent : undefined;
+    return element.kind === "past-step" || element.kind === "past" ? element.parent : undefined;
   }
 }
 
@@ -232,10 +276,11 @@ async function nameRun(value = ""): Promise<string | undefined> {
 
 type RunInput = { name: string; text: string };
 
-// Run asks for what the chain starts from; a typed input also suggests the run's name.
-async function askInput(kind: InputKind | undefined): Promise<RunInput | undefined> {
+// Run asks for what the chain starts from; a typed input also suggests the run's name. A run in an existing worktree has its
+// name already (`named`), since it makes no folder or branch: only a picked story names it after its heading.
+async function askInput(kind: InputKind | undefined, named?: string): Promise<RunInput | undefined> {
   if (kind === undefined) {
-    const name = await nameRun();
+    const name = named ?? (await nameRun());
     return name === undefined ? undefined : { name, text: "" };
   }
   if (kind === "story") {
@@ -252,6 +297,7 @@ async function askInput(kind: InputKind | undefined): Promise<RunInput | undefin
     })
   )?.trim();
   if (!text) return undefined;
+  if (named !== undefined) return { name: named, text };
   // Text in any script is fine; only the suggested name needs a letter or digit from [a-z0-9].
   const name = await nameRun(nameProblem(text) ? "" : slugify(text));
   return name === undefined ? undefined : { name, text };
@@ -316,6 +362,10 @@ type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat; sto
 // Where a next chain runs: the worktree of the run before, that run's name, and its last reply, which becomes the input.
 type Here = { worktree: Worktree; name: string; slug: string; card: string; input: string };
 
+// Where a run goes, when not in a new worktree: after a run, on its last reply; in an existing worktree, on an input asked for as
+// usual; or a stopped run continued at its card.
+type Where = { kind: "after"; here: Here } | { kind: "in"; worktree: Worktree; slug: string } | { kind: "continue"; run: PastRun; continuation: Continuation };
+
 // The run's last session, which the user keeps talking to after the run until they end the chat or confirm a new run.
 type After = { abort: AbortController; chat: RunChat; here: Here; sessionId: string };
 
@@ -323,7 +373,19 @@ type Journal = (record: JournalRecord) => Promise<void>;
 
 // A run the user confirmed: the filled chain, its name, and a worktree whose setup is done.
 // `questions`: how the run treats a question from a card that runs unattended, chosen with the run's confirmation.
-type Place = { chain: Chain; name: string; slug: string; worktree: Worktree; models: Models; journal: Journal; journalFile: string; questions: QuestionWait };
+// A continued run also has where it picks up, and the steps and transcript it had, which the list and the chat start from.
+type Place = {
+  chain: Chain;
+  name: string;
+  slug: string;
+  worktree: Worktree;
+  models: Models;
+  journal: Journal;
+  journalFile: string;
+  questions: QuestionWait;
+  from?: StartPoint;
+  past?: { steps: StepView[]; entries: Entry[] };
+};
 
 type RunContext = {
   state: RunState;
@@ -344,9 +406,9 @@ type RunContext = {
 };
 
 // The run's announcement waits on a notification, so it comes after the slot is given back: the chat after the run needs the slot.
-async function runChainCommand(chain: Chain, ctx: RunContext, here?: Here): Promise<void> {
+async function runChainCommand(chain: Chain, ctx: RunContext, where?: Where): Promise<void> {
   let announce: (() => Promise<void>) | undefined;
-  if (!(await ctx.slot.run(async () => void (announce = await startRun(chain, ctx, here))))) {
+  if (!(await ctx.slot.run(async () => void (announce = await startRun(chain, ctx, where))))) {
     await vscode.window.showWarningMessage("Coordiner: a run is already in progress. Stop it first.");
     return;
   }
@@ -466,14 +528,22 @@ function journalAt(ctx: RunContext, file: string): Journal {
 
 // Returns the run's announcement, for after the slot is given back; nothing when the run never started. Its messages are not
 // awaited: a notification that slides into the notification center never settles, and the slot would stay taken.
-async function startRun(chain: Chain, ctx: RunContext, here?: Here): Promise<(() => Promise<void>) | undefined> {
+async function startRun(chain: Chain, ctx: RunContext, where?: Where): Promise<(() => Promise<void>) | undefined> {
   const check = runnable(chain);
   if (!check.ok) {
     void vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${check.reason}`);
     return undefined;
   }
-  const place = here ? await confirmHere(chain, here, ctx) : await prepareWorktree(chain, ctx);
+  const place = !where ? await prepareWorktree(chain, ctx) : where.kind === "continue" ? await confirmContinue(where, ctx) : await confirmHere(chain, where, ctx);
   return place && runIn(place, ctx);
+}
+
+// A worktree read from a listing or a journal is run in only while git lists it now for its repo, on the same branch.
+async function stillListed(worktree: Worktree): Promise<boolean> {
+  const listed = await listWorktrees(worktree.root, exec);
+  if (listed.ok && listed.worktrees.some((w) => w.path === worktree.path && w.branch === worktree.branch)) return true;
+  void vscode.window.showErrorMessage(`Coordiner: git does not list ${plain(worktree.path)} as a worktree on ${plain(worktree.branch)} now, so nothing runs there.`);
+  return false;
 }
 
 // A new worktree for the run: the repo, the chain's input, the confirm modal, then the worktree and its setup.
@@ -528,7 +598,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   }
   output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
   const worktree = { root: repo.root, path: added.path, branch: added.branch };
-  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models: tools.models, questions });
+  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models: tools.models, questions, definition: chain, input: input.text });
   if (setup) {
     const result = await runSetup(setup, added.path, tools.env, exec);
     if (!result.ok) {
@@ -541,35 +611,73 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   return { chain: filled.chain, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
 }
 
-// A next chain in the worktree of the run before: no new worktree and no setup, and its input is that run's last reply.
-async function confirmHere(chain: Chain, here: Here, ctx: RunContext): Promise<Place | undefined> {
-  const { worktree, card } = here;
+// A chain in a worktree that is already there: no new worktree and no setup. After a run, its input is that run's last reply; in a
+// worktree picked from the Sessions list, it is asked for as usual, and the run is named after the worktree.
+async function confirmHere(chain: Chain, where: Extract<Where, { kind: "after" | "in" }>, ctx: RunContext): Promise<Place | undefined> {
+  const worktree = where.kind === "after" ? where.here.worktree : where.worktree;
+  const slug = where.kind === "after" ? where.here.slug : where.slug;
   if (!(await exists(worktree.path))) {
     void vscode.window.showErrorMessage(`Coordiner: ${plain(worktree.path)} no longer exists, so ${plain(chain.name)} cannot run there.`);
     return undefined;
   }
+  if (where.kind === "in" && !(await stillListed(worktree))) return undefined;
   const tools = await sessionTools();
   if (!tools) return undefined;
   const takesInput = inputOf(chain) !== undefined;
-  if (takesInput && here.input.trim() === "") {
-    void vscode.window.showErrorMessage(`Coordiner: ${plain(card)} gave no reply to start ${plain(chain.name)} from.`);
-    return undefined;
+  let input: RunInput;
+  let source: string;
+  if (where.kind === "after") {
+    const { here } = where;
+    if (takesInput && here.input.trim() === "") {
+      void vscode.window.showErrorMessage(`Coordiner: ${plain(here.card)} gave no reply to start ${plain(chain.name)} from.`);
+      return undefined;
+    }
+    input = { name: here.name, text: here.input };
+    source = takesInput ? `Input: ${plain(here.card)}'s last reply, ${here.input.length} characters.` : "This chain takes no input.";
+  } else {
+    const asked = await askInput(inputOf(chain), slug);
+    if (!asked) return undefined;
+    input = asked;
+    source = takesInput ? `Input: ${input.text.length} characters.` : "This chain takes no input.";
   }
-  const filled = fillInput(chain, here.input);
+  const filled = fillInput(chain, input.text);
   if (!filled.ok) {
     void vscode.window.showErrorMessage(`Coordiner: ${filled.reason}`);
     return undefined;
   }
   const detail = [
-    `In the same worktree, ${worktree.path}. It keeps the run before's changes, uncommitted, and its setup is already done.`,
-    takesInput ? `Input: ${plain(card)}'s last reply, ${here.input.length} characters.` : "This chain takes no input.",
+    where.kind === "after"
+      ? `In the same worktree, ${worktree.path}. It keeps the run before's changes, uncommitted, and its setup is already done.`
+      : `In the worktree ${worktree.path}. It keeps what is there, uncommitted, and its setup is already done.`,
+    source,
     ...runNotes(chain),
   ].join("\n\n");
-  const questions = await confirmRun(`Run ${plain(chain.name)} in the same worktree?`, detail);
+  const questions = await confirmRun(where.kind === "after" ? `Run ${plain(chain.name)} in the same worktree?` : `Run ${plain(chain.name)} in ${plain(slug)}?`, detail);
   if (!questions) return undefined;
   endAfter(ctx.state);
-  const { journal, file: journalFile } = startJournal(ctx, here.slug, { type: "run-started", chain: chain.name, story: here.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models, questions });
-  return { chain: filled.chain, name: here.name, slug: here.slug, worktree, models: tools.models, journal, journalFile, questions };
+  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models, questions, definition: chain, input: input.text });
+  return { chain: filled.chain, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
+}
+
+// A stopped run, continued at its card in its own worktree. It goes on in the same journal, so reopening it later shows all of it.
+async function confirmContinue({ run, continuation }: Extract<Where, { kind: "continue" }>, ctx: RunContext): Promise<Place | undefined> {
+  const worktree: Worktree = { root: run.repo, path: run.worktree, branch: run.branch };
+  if (!(await stillListed(worktree))) return undefined;
+  const tools = await sessionTools();
+  if (!tools) return undefined;
+  const { chain, from, card, reason } = continuation;
+  const detail = [
+    `In its worktree, ${worktree.path}, which keeps what the run did. It picks up at ${plain(card)}, which stopped: ${plain(reason)}.`,
+    from.resume ? `${plain(card)} goes on in the session it ran in.` : `${plain(card)} starts in a new session.`,
+    ...runNotes(chain),
+  ].join("\n\n");
+  const questions = await confirmRun(`Continue ${plain(run.chain)} · ${plain(run.story)} at ${plain(card)}?`, detail);
+  if (!questions) return undefined;
+  endAfter(ctx.state);
+  const journal = journalAt(ctx, run.file);
+  void journal({ type: "continued", position: from.at, questions });
+  ctx.output.appendLine(`Journal: ${join(journalDir(ctx), run.file)}`);
+  return { chain, name: run.story, slug: slugOf(run.worktree), worktree, models: tools.models, journal, journalFile: run.file, questions, from, past: { steps: run.steps, entries: run.entries } };
 }
 
 type Turn = (request: AfterAsk & { mode: TurnMode }, signal: AbortSignal) => Promise<TurnResult>;
@@ -645,12 +753,16 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     needsYou: ctx.needsYou,
     log,
     questions,
+    ...(place.past ? { past: place.past.entries } : {}),
   });
   Object.assign(state, { abort, chainId: chain.id, chat, open: { title, file: place.journalFile } });
-  provider.update([]);
+  provider.update(place.past?.steps ?? []);
   ctx.onRunChange();
   ctx.sessionsChanged();
-  const emit = (event: RunEvent) => {
+  // A continued run's steps follow the ones it had, in the list and in its journal.
+  const offset = place.past?.steps.length ?? 0;
+  const emit = (raw: RunEvent) => {
+    const event = { ...raw, index: raw.index + offset };
     void journal(event);
     if (event.type === "step-started") {
       provider.update([...provider.steps, { label: event.label, tier: event.tier, model: event.model, ...(event.effort ? { effort: event.effort } : {}), status: "running" }]);
@@ -670,14 +782,15 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
       signal: abort.signal,
       talk: chat.talk,
       prepareReview: () => prepareReview(worktree.path, exec),
-    });
+    }, place.from);
   } finally {
     if (!outcome) chat.talk.end();
     state.abort = undefined;
     state.stopProcess = undefined;
     ctx.onRunChange();
   }
-  void journal({ type: "outcome", outcome });
+  // Its line in the Sessions list reads the outcome from the journal, once it is written.
+  void journal({ type: "outcome", outcome }).then(ctx.sessionsChanged);
   const lastTurn = last();
   chat.ended(outcome, lastTurn && { card: lastTurn.card });
   if (lastTurn) talkAfter(lastTurn, { chat, place, ctx, stopProcess, turn });
@@ -782,16 +895,46 @@ function slugOf(path: string): string {
   }
 }
 
-// The earlier sessions of the open folder's repo. A journal that cannot be read, or is too large, is skipped and said once.
-async function loadSessions(ctx: RunContext, skipped: Set<string>): Promise<PastRun[]> {
+// The open folder's repo's lines of work: the worktrees git lists on a coordiner branch and those its earlier sessions ran in, each
+// with what it holds. When git cannot list the worktrees, the folders the runs name that are still there are taken as worktrees,
+// so their rows do not read as gone; every action on one checks git's list again first.
+async function loadLines(ctx: RunContext, skipped: Set<string>): Promise<WorktreeRow[]> {
   const folder = openFolder();
   if (folder === undefined) return [];
-  let root;
+  let top: string;
   try {
-    root = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder })).stdout.trim();
+    top = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder })).stdout.trim();
   } catch {
     return [];
   }
+  // A linked worktree's window lists the main checkout's lines, its own among them, against the main checkout's HEAD.
+  const listed = await listWorktrees(top, exec);
+  const root = listed.ok ? listed.main : top;
+  const [all, head] = await Promise.all([loadSessions(ctx, skipped, root), currentBranch(root, exec)]);
+  // A run still going has no outcome in its journal yet; it shows in the open row, and its line reads from the runs before it.
+  const going = ctx.state.abort ? ctx.state.open?.file : undefined;
+  const runs = all.filter((r) => r.file !== going);
+  const paths = [...new Set([...(listed.ok ? listed.worktrees.map((w) => w.path) : []), ...runs.map((r) => r.worktree)])];
+  const present = new Set((await Promise.all(paths.map(async (p) => ((await exists(p)) ? [p] : [])))).flat());
+  let worktrees: Listed[];
+  if (listed.ok) worktrees = listed.worktrees;
+  else {
+    if (!skipped.has("worktree list")) ctx.output.appendLine(`Coordiner: git could not list the worktrees: ${listed.detail}`);
+    skipped.add("worktree list");
+    worktrees = [...new Map(runs.filter((r) => present.has(r.worktree)).map((r) => [r.worktree, { path: r.worktree, branch: r.branch }])).values()];
+  }
+  const lines = byWorktree(runs, worktrees, (p) => present.has(p));
+  return Promise.all(
+    lines.map(async (line): Promise<WorktreeRow> => {
+      const state = line.where === "here" ? await worktreeState(root, line, exec) : {};
+      const continuation = line.where === "here" && line.runs[0] ? continuePoint(line.runs[0]) : undefined;
+      return { kind: "worktree", line, root, open: line.path === top, state, ...(head ? { head } : {}), ...(continuation ? { continuation } : {}) };
+    }),
+  );
+}
+
+// The earlier sessions of the repo, the open one included. A journal that cannot be read, or is too large, is skipped and said once.
+async function loadSessions(ctx: RunContext, skipped: Set<string>, root: string): Promise<PastRun[]> {
   const dir = journalDir(ctx);
   const names = await readdir(dir).catch(() => [] as string[]);
   const skip = (name: string, why: string) => {
@@ -817,7 +960,7 @@ async function loadSessions(ctx: RunContext, skipped: Set<string>): Promise<Past
       return void skip(name, error instanceof Error ? error.message : String(error));
     }
   };
-  return readNewest(files.filter((f) => f !== undefined), read, root, ctx.state.open?.file);
+  return readNewest(files.filter((f) => f !== undefined), read, root);
 }
 
 // ── Chains editor ─────────────────────────────────────────────────────────────
@@ -895,7 +1038,8 @@ class ChainsEditor {
 
   // The same checks for Run in the editor and for Start…. Start… can come before the editor was ever opened, so the skills are
   // listed first: a missing one is caught here, not after the worktree and its setup. If listing fails, the session checks them.
-  async run(chain: Chain, here?: Here): Promise<void> {
+  // Continue and Start a chain here go through these checks too.
+  async run(chain: Chain, where?: Where): Promise<void> {
     if (!this.palette) await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: "Coordiner: listing skills" }, () => this.discover());
     // The webview disables Run on its own, but its state is not trusted.
     const reason = runReason(chain, { running: this.ctx.slot.busy(), ...this.discovered() });
@@ -903,7 +1047,7 @@ class ChainsEditor {
       await vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${reason}`);
       return;
     }
-    await runChainCommand(structuredClone(chain), this.ctx, here);
+    await runChainCommand(structuredClone(chain), this.ctx, where);
   }
 
   // What discovery found, for the Run checks here and in the webview. The tier efforts follow the settings as they are now.
@@ -1003,7 +1147,7 @@ class ChainsEditor {
       copyResume: () => void (after && this.copyResume(after)),
       // The user runs it, if they choose to; coordiner only puts it on the clipboard.
       copyText: (text: string) => void vscode.env.clipboard.writeText(text),
-      nextChain: () => void (after && startCommand(this, after.here)),
+      nextChain: () => void (after && startCommand(this, { kind: "after", here: after.here })),
     };
     if (!actOnChat(chat.talk, actions, message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);
   }
@@ -1044,15 +1188,151 @@ class ChainsEditor {
   }
 }
 
-// With `here`, the picked chain runs in that worktree instead of a new one.
-async function startCommand(editor: ChainsEditor, here?: Here): Promise<void> {
+// With `where`, the picked chain runs in that worktree instead of a new one.
+async function startCommand(editor: ChainsEditor, where?: Extract<Where, { kind: "after" | "in" }>): Promise<void> {
   const { templates, chains } = await editor.startable();
   const items = startItems(templates, chains).map((i): vscode.QuickPickItem & { id?: string } =>
     "separator" in i ? { label: i.separator, kind: vscode.QuickPickItemKind.Separator } : i,
   );
-  const picked = await vscode.window.showQuickPick(items, { title: "Start", placeHolder: "A template, a single skill, or one of your chains" });
+  const title = where?.kind === "in" ? `Start in ${plain(where.slug)}` : "Start";
+  const picked = await vscode.window.showQuickPick(items, { title, placeHolder: "A template, a single skill, or one of your chains" });
   const chain = pickedChain(picked?.id, templates, chains);
-  if (chain) await editor.run(chain, here);
+  if (chain) await editor.run(chain, where);
+}
+
+// ── Lines of work ─────────────────────────────────────────────────────────────
+
+// A row from the Sessions list, or nothing when the list changed since its menu opened; then the user is told to try again.
+function rowOf(item: unknown, ctx: RunContext): WorktreeRow | undefined {
+  const row = ctx.provider.worktreeRow(item);
+  if (!row) void vscode.window.showWarningMessage("Coordiner: the Sessions list changed since you opened that menu. Try again.");
+  return row;
+}
+
+// The line's latest run, read again from its journal, so a chat with it since the list was made is taken into account.
+async function continueCommand(item: unknown, editor: ChainsEditor, ctx: RunContext): Promise<void> {
+  const latest = rowOf(item, ctx)?.line.runs[0];
+  if (!latest) return;
+  let run: PastRun | undefined;
+  try {
+    const path = join(journalDir(ctx), latest.file);
+    run = (await stat(path)).size <= MAX_JOURNAL_BYTES ? parseJournal(await readFile(path, "utf8"), latest.file) : undefined;
+  } catch (error) {
+    ctx.output.appendLine(`Coordiner: could not read ${latest.file}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const continuation = run && continuePoint(run);
+  if (!run || !continuation) {
+    void vscode.window.showInformationMessage("Coordiner: that run can no longer be continued. Start a chain in its worktree instead.");
+    ctx.sessionsChanged();
+    return;
+  }
+  await editor.run(continuation.chain, { kind: "continue", run, continuation });
+}
+
+async function startHereCommand(item: unknown, editor: ChainsEditor, ctx: RunContext): Promise<void> {
+  const row = rowOf(item, ctx);
+  if (row?.line.where !== "here") return;
+  const { line, root } = row;
+  await startCommand(editor, { kind: "in", worktree: { root, path: line.path, branch: line.branch }, slug: line.slug });
+}
+
+async function openWorktreeCommand(item: unknown, ctx: RunContext): Promise<void> {
+  const row = rowOf(item, ctx);
+  if (row?.line.where !== "here") return;
+  await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(row.line.path), { forceNewWindow: true });
+}
+
+// Removes a line of work: its worktree and branch when they are there, and its runs' journals. Held in the run slot, so no run
+// starts meanwhile; refused while the chat on that worktree is open.
+async function removeCommand(item: unknown, ctx: RunContext): Promise<void> {
+  const row = rowOf(item, ctx);
+  if (!row) return;
+  if (row.open) {
+    void vscode.window.showWarningMessage(`Coordiner: ${plain(row.line.slug)} is open in this window. Remove it from the window of its repository.`);
+    return;
+  }
+  if (ctx.state.after?.here.worktree.path === row.line.path) {
+    void vscode.window.showWarningMessage(`Coordiner: the chat on ${plain(row.line.slug)} is open. End the chat first, then remove the worktree.`);
+    return;
+  }
+  const took = await ctx.slot.run(() => removeLine(row, ctx));
+  if (!took) void vscode.window.showWarningMessage("Coordiner: a run or a turn of the chat is going. Stop it first, then remove the worktree.");
+  ctx.sessionsChanged();
+}
+
+async function removeLine({ line, root, head }: WorktreeRow, ctx: RunContext): Promise<void> {
+  const { output } = ctx;
+  const name = plain(line.slug);
+  const ask = async (message: string, detail: string, button: string) => (await vscode.window.showWarningMessage(message, { modal: true, detail }, button)) === button;
+  const removed: string[] = [];
+  if (line.where === "here") {
+    // Read again now: what the list showed may be out of date, and a count git cannot give is never taken for none.
+    const state = await worktreeState(root, line, exec);
+    if (state.changed === undefined || state.ahead === undefined) {
+      output.appendLine(`Coordiner: git could not say what ${line.path} holds (uncommitted files, or commits not in ${head ?? "HEAD"}), so nothing was removed.`);
+      void vscode.window.showErrorMessage(`Coordiner: git could not say what ${name} holds, so nothing was removed. See the Coordiner output.`);
+      return;
+    }
+    const runs = line.runs.length > 0 ? `, and the journals of its ${plural(line.runs.length, "run", "runs")}` : "";
+    if (!(await ask(`Remove the worktree ${name}?`, `Deletes the folder ${plain(line.path)}, its branch ${plain(line.branch)}${runs}. This cannot be undone.`, "Remove"))) return;
+    const loses = state.changed > 0 || state.ahead > 0;
+    if (loses) {
+      const lost = [
+        ...(state.changed > 0 ? [`${plural(state.changed, "uncommitted file", "uncommitted files")}`] : []),
+        ...(state.ahead > 0 ? [`${plural(state.ahead, "commit", "commits")} not in ${plain(head ?? "HEAD")}`] : []),
+      ].join(" and ");
+      if (!(await ask(`${name} still holds work.`, `${lost} will be deleted with it. Commit or copy anything you want to keep first.`, "Delete anyway"))) return;
+    }
+    const result = await removeWorktree(root, line, { force: state.changed > 0 }, exec);
+    if (!result.ok) {
+      if (result.detail) output.appendLine(result.detail);
+      void vscode.window.showErrorMessage(`Coordiner: ${result.reason}${result.detail ? " See the Coordiner output." : ""}`);
+      return;
+    }
+    removed.push(result.removed.includes("branch") ? `the worktree ${name} and its branch` : `the worktree ${name}`);
+    if (result.left.length > 0) output.appendLine([`Coordiner: removed ${line.path}, but not its branch. To delete it, run:`, ...result.left.map((c) => `  ${c}`)].join("\n"));
+  } else {
+    const folder = line.where === "gone" ? "Its folder is gone." : `Its folder ${plain(line.path)} is no longer a git worktree, and is left as it is.`;
+    if (!(await ask(`Remove ${name} from Sessions?`, `${folder} Deletes the journals of its ${plural(line.runs.length, "run", "runs")}.`, "Remove"))) return;
+    if (line.where === "gone") output.appendLine(`Coordiner: if git still lists ${line.path} or its branch ${line.branch}, they are left for you to remove.`);
+  }
+  const deleted = await deleteJournals(line.path, ctx);
+  if (deleted > 0) removed.push(plural(deleted, "run journal", "run journals"));
+  void vscode.window.showInformationMessage(removed.length > 0 ? `Coordiner: removed ${removed.join(" and ")}.` : `Coordiner: nothing of ${name} was left to remove.`);
+}
+
+// Deletes the journals whose first record ran in that worktree; names come from the journal directory, never from a journal.
+// A journal over the size cap, or one that cannot be read or deleted, is kept, and the output says which.
+async function deleteJournals(path: string, ctx: RunContext): Promise<number> {
+  const dir = journalDir(ctx);
+  const names = (await readdir(dir).catch(() => [] as string[])).filter((name) => name.endsWith(".jsonl"));
+  // shortcut: reads every journal once per removal; fine for hundreds of runs, index them by worktree past that.
+  const journals = (
+    await Promise.all(
+      names.map(async (name) => {
+        try {
+          if ((await stat(join(dir, name))).size > MAX_JOURNAL_BYTES) {
+            ctx.output.appendLine(`Coordiner: ${join(dir, name)} is too large to read, so it was kept even if it belongs to the removed worktree.`);
+            return [];
+          }
+          return [{ name, text: await readFile(join(dir, name), "utf8") }];
+        } catch (error) {
+          ctx.output.appendLine(`Coordiner: could not read ${join(dir, name)}, so it was kept: ${error instanceof Error ? error.message : String(error)}`);
+          return [];
+        }
+      }),
+    )
+  ).flat();
+  let deleted = 0;
+  for (const name of journalsOf(journals, path)) {
+    try {
+      await unlink(join(dir, name));
+      deleted++;
+    } catch (error) {
+      ctx.output.appendLine(`Coordiner: could not delete ${join(dir, name)}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return deleted;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -1078,7 +1358,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let listing = 0;
   const sessionsChanged = () => {
     const mine = ++listing;
-    void loadSessions(ctx, skipped).then((runs) => mine === listing && provider.setPast(runs));
+    void loadLines(ctx, skipped).then((lines) => mine === listing && provider.setLines(lines, state.open?.file));
   };
   const ctx: RunContext = {
     state,
@@ -1104,6 +1384,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("coordiner.checkEnvironment", () => checkEnvironmentCommand(output)),
     // The argument is the row's journal file name, looked up in the listing.
     vscode.commands.registerCommand("coordiner.openSession", (file: unknown) => openSession(file, editor, ctx)),
+    // The worktree actions get the row they sit on, looked up in the listing.
+    vscode.commands.registerCommand("coordiner.continueWorktree", (item: unknown) => continueCommand(item, editor, ctx)),
+    vscode.commands.registerCommand("coordiner.startHere", (item: unknown) => startHereCommand(item, editor, ctx)),
+    vscode.commands.registerCommand("coordiner.openWorktree", (item: unknown) => openWorktreeCommand(item, ctx)),
+    vscode.commands.registerCommand("coordiner.removeWorktree", (item: unknown) => removeCommand(item, ctx)),
     vscode.commands.registerCommand("coordiner.runStory", () => runChainCommand(story, ctx)),
     vscode.commands.registerCommand("coordiner.start", () => startCommand(editor)),
     vscode.commands.registerCommand("coordiner.openChains", () => editor.open()),

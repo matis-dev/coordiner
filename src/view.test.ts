@@ -1,8 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
-import type { PastRun } from "./history.ts";
-import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, processItem, sessionItem, startItems, stepItem, when, type StepView } from "./view.ts";
+import type { Line, PastRun } from "./history.ts";
+import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, processItem, sessionItem, startItems, stepItem, when, worktreeItem, type StepView } from "./view.ts";
 
 const step = (overrides: Partial<StepView> = {}): StepView => ({ label: "Plan", tier: "strong", model: "m-strong", status: "running", ...overrides });
 
@@ -188,4 +188,49 @@ describe("nothingToReviewMessage", () => {
     assert.equal(nothingToReviewMessage("Story 1", true), "Coordiner: Story 1 finished without changing any file, so there is nothing to review; the Coordiner output says how to remove the worktree."));
   it("says only that nothing changed when git could not say whether the worktree is clean", () =>
     assert.equal(nothingToReviewMessage("Story 1", false), "Coordiner: Story 1 finished without changing any file, so there is nothing to review."));
+});
+
+describe("worktreeItem", () => {
+  const now = Date.parse("2026-10-28T12:00:00.000Z");
+  const story = TEMPLATES.find((t) => t.id === "story")!;
+  const stopped = { lastAt: "2026-10-28T10:00:00.000Z", outcome: { status: "stopped" }, definition: story, lastCard: { at: { session: 0, card: 1 }, tier: "weak", reached: true, finished: false } } as PastRun;
+  const line = (runs: PastRun[], where: Line["where"] = "here"): Line => ({ path: "/r.coordiner/my-app", branch: "coordiner/my-app", slug: "my-app", where, runs });
+
+  it("says how the latest run ended and at which card, what the worktree holds, and when", () => {
+    const item = worktreeItem(line([stopped]), { changed: 12, ahead: 2 }, "main", now);
+    assert.deepEqual(item, {
+      label: "my-app",
+      description: "stopped at Implement · 12 files changed · 2 commits ahead of main · 2 h ago",
+      icon: "git-branch",
+      accessibleLabel: "my-app, worktree, stopped at Implement, 12 files changed, 2 commits ahead of main, 2 h ago",
+    });
+  });
+
+  it("names no card for a run that finished, and counts one in the singular", () => {
+    const done = { ...stopped, outcome: { status: "done", text: "" } } as PastRun;
+    assert.equal(worktreeItem(line([done]), { changed: 1, ahead: 1 }, "main", now).description, "done · 1 file changed · 1 commit ahead of main · 2 h ago");
+    const closed = { ...stopped, outcome: undefined } as PastRun;
+    assert.match(worktreeItem(line([closed]), { changed: 0, ahead: 0 }, "main", now).description, /^closed mid-run at Implement · 0 files changed · 0 commits ahead of main/);
+  });
+
+  it("says no runs for a worktree with none, and HEAD when the branch is not known", () => {
+    assert.equal(worktreeItem(line([]), { changed: 0, ahead: 0 }, undefined, now).description, "no runs · 0 files changed · 0 commits ahead of HEAD");
+  });
+
+  it("reads what git could not count as unknown, never as zero", () => {
+    assert.equal(worktreeItem(line([]), {}, "main", now).description, "no runs · state unknown");
+    assert.equal(worktreeItem(line([]), { changed: 3 }, "main", now).description, "no runs · 3 files changed · commits unknown");
+    assert.equal(worktreeItem(line([]), { ahead: 0 }, "main", now).description, "no runs · changed files unknown · 0 commits ahead of main");
+  });
+
+  it("marks a worktree that is gone, or no longer a worktree, without counts", () => {
+    assert.deepEqual([worktreeItem(line([stopped], "gone"), { changed: 5 }, "main", now).description, worktreeItem(line([stopped], "gone"), {}, "main", now).icon], ["stopped at Implement · gone · 2 h ago", "warning"]);
+    assert.equal(worktreeItem(line([], "unregistered"), {}, "main", now).description, "no runs · not a worktree any more");
+  });
+
+  it("strips control characters from the name and the branch", () => {
+    const odd = { ...line([]), slug: "a\u001bb" };
+    assert.equal(worktreeItem(odd, { changed: 0, ahead: 0 }, "ma\u0007in", now).label, "ab");
+    assert.match(worktreeItem(odd, { changed: 0, ahead: 0 }, "ma\u0007in", now).description, /ahead of main$/);
+  });
 });

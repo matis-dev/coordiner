@@ -1,9 +1,10 @@
 import { cardPrompt, singleSkill, type Chain, type Effort } from "./chains.ts";
 import type { Tier } from "./environment.ts";
-import type { PastRun } from "./history.ts";
+import type { Line, PastRun } from "./history.ts";
 import type { Process } from "./processes.ts";
 import type { Outcome, StepStatus } from "./run.ts";
 import { clip, plain } from "./text.ts";
+import type { WorktreeState } from "./worktree.ts";
 
 // "waiting": the running card waits for the user, or asked them something; only the open session shows it.
 export type StepView = { label: string; tier: Tier; model: string; effort?: Effort; status: "running" | "waiting" | StepStatus; detail?: string };
@@ -75,6 +76,32 @@ export function sessionItem(past: PastRun, now: number): ItemView {
   const ago = when(past.lastAt, now);
   const parts = [ending, ago, ...(past.userOnly ? ["replies not recorded"] : [])];
   return { label, description: parts.join(" · "), icon, accessibleLabel: `${label}, ${parts.join(", ")}` };
+}
+
+export const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+// A line of work in the Sessions list: how its latest run ended (and at which card, when it did not finish), what its worktree holds,
+// and when it was last active. Counts git could not give read "state unknown", never zero.
+export function worktreeItem(line: Line, state: WorktreeState, head: string | undefined, now: number): ItemView {
+  const label = plain(line.slug);
+  const latest = line.runs[0];
+  const [ending] = ENDING[latest?.outcome?.status ?? "closed"];
+  const card = latest?.lastCard && latest.definition?.sessions[latest.lastCard.at.session]?.cards[latest.lastCard.at.card]?.label;
+  const finished = latest?.outcome?.status === "done" || latest?.outcome?.status === "no-changes";
+  const ran = !latest ? "no runs" : card && !finished ? `${ending} at ${plain(card)}` : ending;
+  const held =
+    line.where === "gone"
+      ? ["gone"]
+      : line.where === "unregistered"
+        ? ["not a worktree any more"]
+        : state.changed === undefined && state.ahead === undefined
+          ? ["state unknown"]
+          : [
+              state.changed === undefined ? "changed files unknown" : plural(state.changed, "file changed", "files changed"),
+              state.ahead === undefined ? "commits unknown" : `${plural(state.ahead, "commit", "commits")} ahead of ${plain(head ?? "HEAD")}`,
+            ];
+  const parts = [ran, ...held, ...(latest ? [when(latest.lastAt, now)] : [])];
+  return { label, description: parts.join(" · "), icon: line.where === "here" ? "git-branch" : "warning", accessibleLabel: `${label}, worktree, ${parts.join(", ")}` };
 }
 
 // The session open now, at the top of the list: its run going, or the chat after it.

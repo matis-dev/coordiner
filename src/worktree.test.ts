@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addWorktree, firstCommit, initRepo, inspectRepo, MAX_NEW_FILES, prepareReview, removalCommands, removalNote, resumeCommand, setUpRepo, uncommitted, worktreeClean, type Exec, type SetupPrompt } from "./worktree.ts";
+import { addWorktree, currentBranch, firstCommit, initRepo, inspectRepo, listWorktrees, MAX_NEW_FILES, prepareReview, removalCommands, removalNote, removeWorktree, resumeCommand, setUpRepo, uncommitted, worktreeClean, worktreeState, type Exec, type SetupPrompt } from "./worktree.ts";
 
 type Call = { file: string; args: string[]; cwd: string };
 
@@ -305,6 +305,7 @@ describe("resumeCommand", () => {
     assert.equal(resumeCommand("/home/u/a\nrm -rf ~", "abc-1"), undefined);
     assert.equal(resumeCommand("/home/u/a", "abc; rm -rf ~"), undefined);
     assert.equal(resumeCommand("/home/u/a", ""), undefined);
+    assert.equal(resumeCommand("/home/u/a", "--dangerously-skip-permissions"), undefined);
   });
 });
 
@@ -439,5 +440,164 @@ describe("prepareReview", () => {
     const args = addArgs(calls);
     assert.equal(args[0], "--literal-pathspecs");
     assert.deepEqual(args.slice(args.indexOf("--") + 1), names);
+  });
+});
+
+// `git worktree list --porcelain -z`: every field ends with a NUL, and every record with one more.
+const porcelain = (...records: string[][]) => records.map((fields) => fields.map((f) => `${f}\0`).join("") + "\0").join("");
+const MAIN = ["worktree /home/u/app", "HEAD 1111", "branch refs/heads/main"];
+const AUDIT = ["worktree /home/u/app.coordiner/audit", "HEAD 2222", "branch refs/heads/coordiner/audit"];
+
+describe("listWorktrees", () => {
+  it("lists the worktrees on a coordiner branch, never the main one", async () => {
+    const stdout = porcelain(
+      MAIN,
+      AUDIT,
+      ["worktree /home/u/elsewhere", "HEAD 3333", "branch refs/heads/feature"],
+      ["worktree /home/u/detached", "HEAD 4444", "detached"],
+      ["worktree /home/u/app.coordiner/gone", "HEAD 5555", "branch refs/heads/coordiner/gone", "prunable gitdir file points to non-existent location"],
+    );
+    const { exec, calls } = fakeExec({ worktree: stdout });
+    assert.deepEqual(await listWorktrees("/home/u/app", exec), {
+      ok: true,
+      main: "/home/u/app",
+      worktrees: [
+        { path: "/home/u/app.coordiner/audit", branch: "coordiner/audit" },
+        { path: "/home/u/app.coordiner/gone", branch: "coordiner/gone" },
+      ],
+    });
+    assert.deepEqual(calls[0], { file: "git", args: ["worktree", "list", "--porcelain", "-z"], cwd: "/home/u/app" });
+  });
+
+  it("skips the main worktree even when it has a coordiner branch checked out", async () => {
+    const { exec } = fakeExec({ worktree: porcelain(["worktree /home/u/app", "HEAD 1", "branch refs/heads/coordiner/audit"]) });
+    assert.deepEqual(await listWorktrees("/home/u/app", exec), { ok: true, main: "/home/u/app", worktrees: [] });
+  });
+
+  // A worktree opened in its own window: git still lists the main worktree first, and the one asked from is one of the others.
+  it("names the main worktree and lists the one it is asked from, when asked from a linked worktree", async () => {
+    const { exec, calls } = fakeExec({ worktree: porcelain(MAIN, AUDIT) });
+    assert.deepEqual(await listWorktrees("/home/u/app.coordiner/audit", exec), {
+      ok: true,
+      main: "/home/u/app",
+      worktrees: [{ path: "/home/u/app.coordiner/audit", branch: "coordiner/audit" }],
+    });
+    assert.equal(calls[0]!.cwd, "/home/u/app.coordiner/audit");
+  });
+
+  it("takes the path it was asked from as the main one when git's first record names none", async () => {
+    assert.deepEqual(await listWorktrees("/r", fakeExec({ worktree: "" }).exec), { ok: true, main: "/r", worktrees: [] });
+  });
+
+  it("keeps a path with a newline whole, and skips a branch outside coordiner/<slug>", async () => {
+    const stdout = porcelain(MAIN, ["worktree /home/u/a\nb", "HEAD 2", "branch refs/heads/coordiner/x"], ["worktree /home/u/c", "HEAD 3", "branch refs/heads/coordiner/Bad Name"], ["worktree /home/u/d", "HEAD 4", "branch refs/heads/coordiner/../main"]);
+    assert.deepEqual(await listWorktrees("/home/u/app", fakeExec({ worktree: stdout }).exec), { ok: true, main: "/home/u/app", worktrees: [{ path: "/home/u/a\nb", branch: "coordiner/x" }] });
+  });
+
+  it("reports git's failure rather than an empty list", async () => {
+    assert.deepEqual(await listWorktrees("/r", fakeExec({}, ["worktree"]).exec), { ok: false, detail: "git worktree list --porcelain -z failed" });
+  });
+});
+
+describe("worktreeState", () => {
+  const audit = { path: "/home/u/app.coordiner/audit", branch: "coordiner/audit" };
+
+  it("counts the uncommitted files in the worktree and the commits its branch has that HEAD does not", async () => {
+    const { exec, calls } = fakeExec({ status: " M a.ts\n?? b.ts\n\n", "rev-list": "2\n" });
+    assert.deepEqual(await worktreeState("/home/u/app", audit, exec), { changed: 2, ahead: 2 });
+    assert.deepEqual(calls.map((c) => [c.args, c.cwd]), [
+      [["status", "--porcelain"], audit.path],
+      [["rev-list", "--count", "HEAD..refs/heads/coordiner/audit"], "/home/u/app"],
+    ]);
+  });
+
+  it("says nothing it could not find out, rather than zero", async () => {
+    assert.deepEqual(await worktreeState("/r", audit, fakeExec({}, ["status", "rev-list"]).exec), {});
+    assert.deepEqual(await worktreeState("/r", audit, fakeExec({ status: "", "rev-list": "lots" }).exec), { changed: 0 });
+  });
+
+  it("does not ask git about a branch Coordiner did not make", async () => {
+    const { exec, calls } = fakeExec({ status: "" });
+    assert.deepEqual(await worktreeState("/r", { ...audit, branch: "--all" }, exec), { changed: 0 });
+    assert.equal(calls.some((c) => c.args[0] === "rev-list"), false);
+  });
+});
+
+describe("currentBranch", () => {
+  it("names the branch the main checkout is on, or nothing when git cannot say", async () => {
+    assert.equal(await currentBranch("/r", fakeExec({ "rev-parse": "main\n" }).exec), "main");
+    assert.equal(await currentBranch("/r", fakeExec({}, ["rev-parse"]).exec), undefined);
+    assert.equal(await currentBranch("/r", fakeExec({ "rev-parse": "\n" }).exec), undefined);
+  });
+});
+
+describe("removeWorktree", () => {
+  const audit = { path: "/home/u/app.coordiner/audit", branch: "coordiner/audit" };
+  const listed = { worktree: porcelain(MAIN, AUDIT) };
+  const DELETE_BRANCH = ["branch", "-D"];
+
+  it("re-lists, removes the worktree, then deletes its branch, from the repository", async () => {
+    const { exec, calls } = fakeExec(listed);
+    assert.deepEqual(await removeWorktree("/home/u/app", audit, { force: false }, exec), { ok: true, removed: ["worktree", "branch"], left: [] });
+    assert.deepEqual(calls.map((c) => [c.args, c.cwd]), [
+      [["worktree", "list", "--porcelain", "-z"], "/home/u/app"],
+      [["worktree", "remove", "--", audit.path], "/home/u/app"],
+      [[...DELETE_BRANCH, "coordiner/audit"], "/home/u/app"],
+    ]);
+  });
+
+  it("forces the removal only when asked", async () => {
+    const { exec, calls } = fakeExec(listed);
+    await removeWorktree("/home/u/app", audit, { force: true }, exec);
+    assert.deepEqual(calls[1]!.args, ["worktree", "remove", "--force", "--", audit.path]);
+  });
+
+  it("says what is left to do when the branch could not be deleted after the worktree was", async () => {
+    const { exec } = fakeExec(listed, [DELETE_BRANCH[0]!]);
+    const result = await removeWorktree("/home/u/app", audit, { force: false }, exec);
+    assert.deepEqual(result, { ok: true, removed: ["worktree"], left: [removalCommands("/home/u/app", audit.path, audit.branch)![1]!] });
+  });
+
+  it("offers no command to paste for a path with a control character", async () => {
+    const odd = { path: "/home/u/a\u0007b", branch: "coordiner/x" };
+    const { exec } = fakeExec({ worktree: porcelain(MAIN, [`worktree ${odd.path}`, "HEAD 2", "branch refs/heads/coordiner/x"]) }, [DELETE_BRANCH[0]!]);
+    assert.deepEqual(await removeWorktree("/home/u/app", odd, { force: false }, exec), { ok: true, removed: ["worktree"], left: [] });
+  });
+
+  it("removes nothing when git refuses to remove the worktree", async () => {
+    const { exec, calls } = fakeExec(listed, ["worktree remove"]);
+    const result = await removeWorktree("/home/u/app", audit, { force: false }, exec);
+    assert.deepEqual(result, { ok: false, reason: "Git could not remove the worktree.", detail: `git worktree remove -- ${audit.path} failed` });
+    assert.equal(calls.some((c) => c.args[0] === DELETE_BRANCH[0]), false);
+  });
+
+  // The path and branch come from a listing or a journal; neither may aim git at anything but a worktree it lists now.
+  it("refuses to remove a path git does not list as a coordiner worktree", async () => {
+    for (const target of [{ path: "/home/u/app", branch: "coordiner/audit" }, { path: "/home/u/important", branch: "coordiner/audit" }, { path: audit.path, branch: "coordiner/other" }]) {
+      const { exec, calls } = fakeExec(listed);
+      assert.equal((await removeWorktree("/home/u/app", target, { force: true }, exec)).ok, false);
+      assert.deepEqual(calls.map((c) => c.args.slice(0, 2)), [["worktree", "list"]]);
+    }
+  });
+
+  it("refuses a branch name outside coordiner/<slug> before calling git", async () => {
+    for (const branch of ["main", "-D", "coordiner/../main", "coordiner/a b"]) {
+      const { exec, calls } = fakeExec(listed);
+      assert.equal((await removeWorktree("/home/u/app", { ...audit, branch }, { force: true }, exec)).ok, false);
+      assert.equal(calls.length, 0);
+    }
+  });
+
+  it("passes the path after --, so a path that looks like an option is still a path", async () => {
+    const odd = { path: "--force", branch: "coordiner/odd" };
+    const { exec, calls } = fakeExec({ worktree: porcelain(MAIN, ["worktree --force", "HEAD 9", "branch refs/heads/coordiner/odd"]) });
+    await removeWorktree("/home/u/app", odd, { force: false }, exec);
+    assert.deepEqual(calls[1]!.args, ["worktree", "remove", "--", "--force"]);
+  });
+
+  it("removes nothing when git cannot list the worktrees", async () => {
+    const { exec, calls } = fakeExec({}, ["worktree list"]);
+    assert.deepEqual(await removeWorktree("/home/u/app", audit, { force: true }, exec), { ok: false, reason: "Git could not list the worktrees, so nothing was removed.", detail: "git worktree list --porcelain -z failed" });
+    assert.equal(calls.length, 1);
   });
 });

@@ -35,6 +35,18 @@ describe("createJournal", () => {
     assert.deepEqual(JSON.parse(lines[0]!), { at: "2026-10-10T19:51:03.123Z", type: "step-finished", index: 2, status: "done", detail: "next: Light", sessionId: "s-1" });
   });
 
+  it("records the chain a run started from and where a continued run picked up", async () => {
+    const lines: string[] = [];
+    const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);
+    const definition = { id: "mine", name: "Mine", sessions: [{ cards: [{ skill: "lint", args: "{{idea}}", label: "Lint", pause: false }] }] };
+    await journal({ type: "run-started", chain: "Mine", story: "s", repo: "/r", worktree: "/w", branch: "coordiner/s", models: { strong: "a", medium: "b", weak: "c" }, questions: "timed", definition, input: "an idea" });
+    await journal({ type: "continued", position: { session: 0, card: 0 }, questions: "never" });
+    assert.deepEqual(JSON.parse(lines[0]!).definition, definition);
+    assert.equal(JSON.parse(lines[0]!).input, "an idea");
+    // The record's time stays `at`; the card it picked up at is `position`.
+    assert.deepEqual(JSON.parse(lines[1]!), { at: "2026-10-10T19:51:03.123Z", type: "continued", position: { session: 0, card: 0 }, questions: "never" });
+  });
+
   it("records what the user said in the chat and how they answered, in call order", async () => {
     const lines: string[] = [];
     const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { briefHeading, cardPrompt, defaultCard, parseChain, parseChains, inputKinds, inputOf, requiredSkills, runnable, serializeChains, singleSkill, skillDefault, TEMPLATES, usesMskills, type Chain } from "./chains.ts";
+import { briefHeading, cardPrompt, defaultCard, parseChain, parseChains, parseChainShape, inputKinds, inputOf, requiredSkills, runnable, serializeChains, singleSkill, skillDefault, TEMPLATES, usesMskills, type Chain } from "./chains.ts";
 
 const story = TEMPLATES.find((t) => t.id === "story")!;
 const mine = (sessions: Chain["sessions"], id = "mine"): Chain => ({ id, name: "Mine", sessions });
@@ -62,6 +62,14 @@ describe("templates", () => {
 
   it("reserves the single-skill template ids", () => {
     assert.equal(parseChain({ id: "security-audit", name: "Mine", sessions: [] }), "chain id security-audit belongs to a built-in template");
+  });
+
+  it("takes a template's shape back as it is, for a journaled run", () => {
+    const template = TEMPLATES.find((t) => t.id === "story")!;
+    const { builtIn: _builtIn, ...shape } = template;
+    assert.deepEqual(parseChainShape(JSON.parse(JSON.stringify(template))), shape);
+    assert.equal(parseChainShape({ ...shape, sessions: [{ cards: [{ skill: "bad skill", args: "", label: "X", pause: false }] }] }), "chain story: a card has an invalid skill name");
+    assert.equal(parseChainShape(null), "a chain is not an object");
   });
 
   it("starts each interactive flow from the input its first skill expects", () => {

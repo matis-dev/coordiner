@@ -74,6 +74,26 @@
       {
         "command": "coordiner.openSession",
         "title": "Coordiner: Open Session"
+      },
+      {
+        "command": "coordiner.continueWorktree",
+        "title": "Continue",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "coordiner.startHere",
+        "title": "Start a Chain Here",
+        "icon": "$(play)"
+      },
+      {
+        "command": "coordiner.openWorktree",
+        "title": "Open in New Window",
+        "icon": "$(empty-window)"
+      },
+      {
+        "command": "coordiner.removeWorktree",
+        "title": "Remove Worktree…",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -85,9 +105,65 @@
         {
           "command": "coordiner.openSession",
           "when": "false"
+        },
+        {
+          "command": "coordiner.continueWorktree",
+          "when": "false"
+        },
+        {
+          "command": "coordiner.startHere",
+          "when": "false"
+        },
+        {
+          "command": "coordiner.openWorktree",
+          "when": "false"
+        },
+        {
+          "command": "coordiner.removeWorktree",
+          "when": "false"
         }
       ],
       "view/item/context": [
+        {
+          "command": "coordiner.continueWorktree",
+          "when": "view == coordiner.run && viewItem == worktree-continue",
+          "group": "inline@1"
+        },
+        {
+          "command": "coordiner.startHere",
+          "when": "view == coordiner.run && viewItem =~ /^worktree/",
+          "group": "inline@2"
+        },
+        {
+          "command": "coordiner.openWorktree",
+          "when": "view == coordiner.run && viewItem =~ /^worktree/",
+          "group": "inline@3"
+        },
+        {
+          "command": "coordiner.removeWorktree",
+          "when": "view == coordiner.run && viewItem =~ /^(worktree|gone)/",
+          "group": "inline@4"
+        },
+        {
+          "command": "coordiner.continueWorktree",
+          "when": "view == coordiner.run && viewItem == worktree-continue",
+          "group": "navigation@1"
+        },
+        {
+          "command": "coordiner.startHere",
+          "when": "view == coordiner.run && viewItem =~ /^worktree/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "coordiner.openWorktree",
+          "when": "view == coordiner.run && viewItem =~ /^worktree/",
+          "group": "navigation@3"
+        },
+        {
+          "command": "coordiner.removeWorktree",
+          "when": "view == coordiner.run && viewItem =~ /^(worktree|gone)/",
+          "group": "remove@1"
+        },
         {
           "command": "coordiner.stopProcess",
           "when": "view == coordiner.run && viewItem == process",

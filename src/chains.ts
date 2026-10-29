@@ -176,10 +176,16 @@ function parseCard(v: unknown): Card | string {
   };
 }
 
+// A stored or edited chain: its shape, and an id no built-in template has.
 export function parseChain(v: unknown): Chain | string {
+  if (isRecord(v) && typeof v.id === "string" && TEMPLATE_IDS.has(v.id)) return `chain id ${v.id} belongs to a built-in template`;
+  return parseChainShape(v);
+}
+
+// The shape alone, field by field: a journaled run's chain may be a built-in template.
+export function parseChainShape(v: unknown): Chain | string {
   if (!isRecord(v)) return "a chain is not an object";
   if (!text(v.id, 64) || !ID.test(v.id)) return "a chain has an invalid id";
-  if (TEMPLATE_IDS.has(v.id)) return `chain id ${v.id} belongs to a built-in template`;
   if (!text(v.name, MAX_NAME, 1)) return `chain ${v.id} has an invalid name`;
   if (!Array.isArray(v.sessions) || v.sessions.length > MAX_SESSIONS) return `chain ${v.id} has invalid sessions`;
   const sessions: ChainSession[] = [];
