@@ -1,4 +1,16 @@
-# Coordiner
+<p align="center">
+  <img src="media/icon.png" alt="Coordiner icon: a butler in a tuxedo and bow tie, wearing a monocle with a targeting reticle" width="160">
+</p>
+
+<h1 align="center">Coordiner</h1>
+
+<p align="center"><strong>Chains of Claude Code skills, run unattended, each in its own git worktree.</strong></p>
+
+<p align="center">
+  <img src="https://img.shields.io/github/package-json/v/matis-dev/coordiner?label=version" alt="Version from package.json">
+  <img src="https://img.shields.io/github/license/matis-dev/coordiner" alt="License: MIT">
+  <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A51.135-007ACC" alt="VS Code 1.135 or newer">
+</p>
 
 A VS Code extension that runs a chain of Claude Code skills on one backlog story without you at the keyboard. It creates a git worktree for the story and runs each session of the chain in it. The default chain, **Story**, is the m-skills story flow: a planning and implementing session, then a fresh review session that fixes its findings and writes a commit brief. Nothing is committed: you review the worktree and commit by hand.
 
@@ -101,13 +113,13 @@ A story says what should change and for whom. The **Story** template plans it, i
    - **Run, never wait**: the Recommended option is taken at once.
 
    A question with no Recommended option always waits for you, whichever button you chose. When the run ends, the **Coordiner** output lists every answer taken without you under **Decided without you**.
-4. Follow the steps in the **Sessions** view, where the running session is on top. Keep VS Code open and the computer awake: closing VS Code stops the run. The Stop button in the **Sessions** view's title bar, or **Coordiner: Stop Run**, stops it by hand; once the run has ended, it ends the chat after the run.
+4. Follow the steps in the **Sessions** view, where the running session is on top. Keep VS Code open and the computer awake: closing VS Code stops the run, and **Continue** on its row in the **Sessions** view picks it up later. The Stop button in the **Sessions** view's title bar, or **Coordiner: Stop Run**, stops it by hand; once the run has ended, it ends the chat after the run.
 
    While a turn runs, its background processes (a test run, a Monitor, a subagent) are listed under its step, with their latest progress line. **Stop Process**, the stop button on the row or in its context menu (**Shift+F10**), stops one. The list clears when the turn ends.
 
 The worktree is created next to your repository at `<repo>.coordiner/<story-slug>`, on branch `coordiner/<story-slug>`. When the run finishes, the commit brief is in the **Coordiner** output. A card that halts or fails does not end the run: it waits for you in the chat (see [Talk to a run in the chat](#talk-to-a-run-in-the-chat)). If you stop the run there, the output prints the `claude --resume` line for the session and the m-skills commands left to run by hand.
 
-To run the same story again, remove its worktree and branch first; Coordiner will not reuse them. From your repository:
+To run the same story again, remove its worktree and branch first; Coordiner will not reuse them. Choose **Remove Worktree…** on its row in the **Sessions** view (see [Go back to an earlier session](#go-back-to-an-earlier-session)), or run these from your repository:
 
 ```sh
 git worktree remove ../<repo>.coordiner/<story-slug>
@@ -116,11 +128,11 @@ git branch -D coordiner/<story-slug>
 
 `git worktree remove` refuses while the worktree has uncommitted changes; add `--force` only if you mean to throw them away.
 
-When a run finishes without changing any file (an audit, say), the **Coordiner** output prints these two commands with the run's own paths, ready to paste. Coordiner never removes a worktree or a branch itself. A run that ends in rolling-history puts its commit brief in the output; any other run puts its result there.
+When a run finishes without changing any file (an audit, say), the **Coordiner** output prints these two commands with the run's own paths, ready to paste. Coordiner removes a worktree or a branch only when you choose **Remove Worktree…**. A run that ends in rolling-history puts its commit brief in the output; any other run puts its result there.
 
 ### Go back to an earlier session
 
-The **Sessions** view lists the open repository's lines of work under the running session, one row per worktree: the worktrees git lists on a `coordiner/<slug>` branch, and those earlier sessions ran in. The most recently active comes first. A row says how its latest run ended (done, halted, failed, stopped, or closed mid-run if VS Code was closed while it ran) and at which card, how many files are changed in the worktree, how many commits its branch has that the main checkout's current branch does not, and when it was last active. A row whose folder is gone, or that git no longer lists as a worktree, says so.
+The **Sessions** view lists the open repository's lines of work under the running session, one row per worktree: the worktrees git lists on a `coordiner/<slug>` branch, and those earlier sessions ran in. The most recently active comes first. A row says how its latest run ended (done, nothing to review, halted, failed, stopped, refused, or closed mid-run if VS Code was closed while it ran) and at which card, how many files are changed in the worktree, how many commits its branch has that the main checkout's current branch does not, and when it was last active. A row whose folder is gone, or that git no longer lists as a worktree, says so.
 
 Expand a row to see its sessions, newest first, and a session to see its steps. Click a session to open its transcript in the chains editor's chat.
 

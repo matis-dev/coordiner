@@ -3,7 +3,7 @@
   "displayName": "Coordiner",
   "version": "0.2.0",
   "publisher": "matis-dev",
-  "description": "Drives the m-skills story flow through headless Claude Code sessions, up to the commit brief.",
+  "description": "Runs chains of Claude Code skills in unattended sessions, each run in its own git worktree, up to the commit brief. Nothing is committed for you.",
   "license": "MIT",
   "author": {
     "name": "Mateusz Kruszona"

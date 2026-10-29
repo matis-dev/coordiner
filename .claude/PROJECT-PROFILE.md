@@ -8,10 +8,10 @@
 ## Identity
 
 - **Project:** coordiner — a VS Code extension that runs chains of Claude Code skills through unattended sessions, each run in its own git worktree, up to the commit brief. The default chain is the user's m-skills story flow; m-skills is recommended, not required.
-- **Stack:** TypeScript on Node ≥24, compiled to ESM JavaScript in `dist/` by tsc (no bundler), running in the VS Code extension host (VSCodium 1.135, a flatpak on the user's machine). Built on the Claude Agent SDK, exact-pinned; it is the only runtime dependency. Dev tooling: TypeScript, the node and vscode type definitions, commitlint (CLI and the conventional preset), husky, and jsdom with its type definitions (for the webview tests), all exact-pinned.
-- **Package manager:** pnpm 12 (`packageManager` pins pnpm@12.11.2 in package.json; lockfile `pnpm-lock.yaml`)
+- **Stack:** TypeScript on Node ≥24, bundled to ESM JavaScript in `dist/` by esbuild (`build.ts`; tsc only type-checks), running in the VS Code extension host (VSCodium 1.135, a flatpak on the user's machine). Built on the Claude Agent SDK, exact-pinned; it is the only runtime dependency. Dev tooling: TypeScript, the node and vscode type definitions, esbuild, commitlint (CLI and the conventional preset), husky, and jsdom with its type definitions (for the webview tests), all exact-pinned.
+- **Package manager:** pnpm 12 (`packageManager` pins pnpm@12.15.0 in package.json; lockfile `pnpm-lock.yaml`)
 - **Repo shape:** single package, a git repository.
-- **Install shape:** run from source through the `Run Coordiner extension` launch config (F5). Packaging as a `.vsix` is a later slice.
+- **Install shape:** run from source through the `Run Coordiner extension` launch config (F5), or installed from a `.vsix` built by `<package>` (§Commands).
 - **Node on PATH:** the flatpak editor has no `node`; gates need the nvm Node folder (~/.nvm/versions/node/v24.21.0/bin) and the pnpm folder (~/.local/share/pnpm) put in front of PATH, and sessions get it through the `coordiner.extraPath` setting.
 
 ## Commands (role → the command this project actually uses)
@@ -87,6 +87,18 @@ source:    profile §Design (VS Code's own vocabulary) — webview direction est
 | Changelog | `CHANGELOG.md` | the one changelog; a **Current state** baseline at the top, then dated entries newest first |
 | README | `README.md` | prerequisites, run from source (F5), running a story, building and running a chain, the develop commands |
 | Architecture / deployment / API / tests docs | n-a | none; the profile carries those facts |
+
+## Documentation Standards
+
+- **Markup flavour:** GFM (tables in README and changelog; fenced blocks tagged `sh` / `markdown`).
+- **Docs site / generator:** none — docs live in the repo.
+- **Docs build / link check command:** n-a
+- **Primary readers, in order:** end users running the extension (the README), then the maintainer (changelog **Current state**, this profile).
+- **Docstring convention on exported symbols:** none — `//` line comments above a function say why or what a caller cannot see; no JSDoc/TSDoc.
+- **Generated reference?** no
+- **Diagram convention:** none yet.
+- **Voice:** second person, active, UI labels in bold, commands by their palette title — "Write the story in a Markdown file in the open repository, your backlog."
+- **Fixed terminology:** a *card* is one skill step in a chain; a *session* is one fresh conversation (a row of cards); a *line of work* is one worktree's row in the Sessions view. The GitHub About description matches `package.json` `description`.
 
 ## Commit Convention
 
