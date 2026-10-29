@@ -62,7 +62,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     vscode.postMessage({ type: "chatNextChain" });
     input.focus();
   } }, "Start the next chain here");
-  const composer = el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, sendButton, pauseButton, continueButton, copyButton, nextButton, stopButton));
+  const composer = el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, pauseButton, copyButton, nextButton, stopButton, el("div", { class: "primary" }, continueButton, sendButton)));
   const headActions = el("div", { class: "chat-head-actions" }, maxButton, toggle);
   const body = el("div", { id: "chat-body" }, line, busyLine, cacheLine, transcript, queuedList, form, composer);
   root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip), headActions), body);

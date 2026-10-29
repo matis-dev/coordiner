@@ -45,6 +45,7 @@ export const INTERACTIVE_NOTE = [
   "This session is driven by coordiner, which runs a chain of skills. Right now the user is at the keyboard, talking to you in coordiner's chat.",
   "Ask what you need through AskUserQuestion, as often as the skill calls for; the user answers each question in the chat.",
   "Do not offer a next-step picker or start another skill: the user moves the chain on with coordiner's Continue button.",
+  "Continue runs only the next skill in the chain, and ends the run when there is none, so do not tell the user that Continue runs a skill you name: name the next skill, and leave how to start it to coordiner.",
   "When this skill's work is done, end your final message with the status line the skill would give in an unattended run: `COORDINER: NEXT <tier>` (Light, Standard or Heavy) for the next step's tier, `COORDINER: DONE` when the skill is finished, or `COORDINER: HALT <one-line reason>` when the user must act outside this session.",
   "Until the work is done, end your turn without a status line; the user replies in the chat.",
 ].join(" ");
@@ -53,6 +54,7 @@ export const INTERACTIVE_NOTE = [
 export const AFTER_NOTE = [
   "This session was driven by coordiner, which ran a chain of skills. The chain has ended; the user is now talking to you in coordiner's chat.",
   "Answer them directly. No COORDINER status line is needed: nothing follows in the chain, and one would steer nothing.",
+  "There is no Continue button in this chat; do not tell the user to press one. To run the next skill, the user chooses Start the next chain here, which runs a chain of their choice in this worktree, starting from your last reply.",
   "Ask what you need through AskUserQuestion; the user answers each question in the chat.",
   "Do not offer a next-step picker. Start another skill only when the user asks for one.",
 ].join(" ");

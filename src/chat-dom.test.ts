@@ -82,6 +82,18 @@ describe("run chat: before and during a run", () => {
     assert.match(page.status()!, /No run is going/);
   });
 
+  it("keeps Send last, at the right end, with Continue just before it when shown, and the other actions on the left", async () => {
+    const page = await running();
+    const shown = (selector: string) =>
+      [...page.doc.querySelectorAll<HTMLElement>(`#chat .composer .toolbar ${selector}`)].filter((b) => !b.hidden).map((b) => b.textContent);
+    page.update(view({ phase: "waiting", card: "Brainstorm", attended: true, nextCard: "Plan", continueReady: true }));
+    assert.deepEqual(shown("button"), ["Pause after this turn", "Stop run", "Continue to Plan", "Send"]);
+    assert.deepEqual(shown(".primary button"), ["Continue to Plan", "Send"]);
+    page.update(view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "stopped" } }));
+    assert.deepEqual(shown("button"), ["Copy resume command", "Start the next chain here", "End chat", "Send"]);
+    assert.deepEqual(shown(".primary button"), ["Send"]);
+  });
+
   it("folds to its heading and status line before the first run, and opens at the saved height when one starts", async () => {
     const page = await open({ chatHeight: 60 });
     const shown = () => ({

@@ -1,7 +1,7 @@
 {
   "name": "coordiner",
   "displayName": "Coordiner",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "matis-dev",
   "description": "Runs chains of Claude Code skills in unattended sessions, each run in its own git worktree, up to the commit brief. Nothing is committed for you.",
   "license": "MIT",

@@ -636,6 +636,8 @@ textarea {
 .question input[type="text"] { margin-left: 1.6em; width: calc(100% - 2em); box-sizing: border-box; }
 
 .composer .toolbar { margin: var(--gap) 0 0; }
+/* Send stays at the right end, so Continue appearing never moves it. */
+.composer .toolbar .primary { display: flex; gap: var(--gap); margin-left: auto; }
 
 .flag.running { color: var(--anchor); font-weight: 600; }
 /* The second pixel is a shadow, so marking the running card never moves the lane. */

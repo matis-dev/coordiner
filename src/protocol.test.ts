@@ -69,6 +69,11 @@ describe("INTERACTIVE_NOTE", () => {
   it("does not claim that nobody is at the keyboard", () => {
     assert.doesNotMatch(INTERACTIVE_NOTE, /Nobody is at the keyboard/);
   });
+
+  it("says Continue ends the run on the chain's last skill, so the reply does not promise it runs the next one", () => {
+    assert.match(INTERACTIVE_NOTE, /Continue runs only the next skill in the chain, and ends the run when there is none/);
+    assert.match(INTERACTIVE_NOTE, /do not tell the user that Continue runs a skill you name/);
+  });
 });
 
 describe("withoutStatus", () => {
@@ -96,5 +101,10 @@ describe("AFTER_NOTE", () => {
   it("says the chain has ended and no status line is needed", () => {
     assert.match(AFTER_NOTE, /chain has ended/);
     assert.match(AFTER_NOTE, /No COORDINER status line is needed/);
+  });
+
+  it("says there is no Continue button, and names the action that starts the next skill", () => {
+    assert.match(AFTER_NOTE, /There is no Continue button in this chat; do not tell the user to press one/);
+    assert.match(AFTER_NOTE, /Start the next chain here/);
   });
 });
