@@ -60,7 +60,7 @@ A **Coordiner** icon appears in the activity bar. It opens the **Sessions** view
 
    ```sh
    pnpm install --frozen-lockfile
-   pnpm dlx @vscode/vsce@4.0.0 package --no-dependencies
+   pnpm dlx @vscode/vsce@4.1.0 package --no-dependencies
    ```
 
    `vsce` runs `pnpm build` first and writes `coordiner-<version>.vsix`.

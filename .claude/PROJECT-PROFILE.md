@@ -23,7 +23,7 @@
 | `<typecheck>` | `pnpm typecheck` | `tsc --noEmit`, strict; includes the vscode types |
 | `<test>` | `pnpm test` | `node --test`, picks up `src/**/*.test.ts` |
 | `<build>` | `pnpm build` | `node build.ts`: esbuild bundles every dependency into `dist/` (only `vscode` external); the webview's modules stay entry points |
-| `<package>` | `pnpm dlx @vscode/vsce@4.0.0 package --no-dependencies` | correct only because `dist/` is a full bundle; `src/bundle.test.ts` guards that; vsce pinned so packaging never runs an unread release |
+| `<package>` | `pnpm dlx @vscode/vsce@4.1.0 package --no-dependencies` | correct only because `dist/` is a full bundle; `src/bundle.test.ts` guards that; vsce pinned so packaging never runs an unread release |
 | `<e2e>` | n-a | no automated extension-host tests yet — the F5 smoke is manual |
 | `<visual>` | n-a | the chains webview is checked by eye in light, dark and high-contrast themes during the F5 smoke |
 | `<a11y>` | n-a | no automated scan; the chains webview gets a manual keyboard-only walk and a screen-reader pass during the F5 smoke |
@@ -113,7 +113,7 @@ source:    profile §Design (VS Code's own vocabulary) — webview direction est
 
 n-a beyond the install shape above — no hosting, environments, or rollback.
 
-- **Versioning scheme:** semver, while in 0.x a `feat` is a minor bump and a `fix` / `perf` a patch (decided 2026-10-28). The version lives only in `package.json` `version`. No git tags: a release is the `.vsix` built from that version (`coordiner-<version>.vsix`), so the last release is the newest `.vsix` built; bump once per release, not once per commit, and mark it in that changelog entry's heading (`## <date> · <version> — <type>: …`). Last release: 0.2.0 (`coordiner-0.2.0.vsix`, built 2026-10-28); 0.3.0 set 2026-10-29, its `.vsix` not built yet.
+- **Versioning scheme:** semver, while in 0.x a `feat` is a minor bump and a `fix` / `perf` a patch (decided 2026-10-28). The version lives only in `package.json` `version`. No git tags: a release is the `.vsix` built from that version (`coordiner-<version>.vsix`), so the last release is the newest `.vsix` built; bump once per release, not once per commit, and mark it in that changelog entry's heading (`## <date> · <version> — <type>: …`). Last release: 0.3.0 (`coordiner-0.3.0.vsix`, built 2026-10-29).
 
 ## Guardrails Specific to This Project
 
