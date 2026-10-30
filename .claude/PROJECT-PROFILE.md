@@ -99,14 +99,14 @@ source:    profile §Design, extended 2026-10-30
 
 ## Distribution
 
-- n-a — personal tool, not built to be found (decided at kickoff).
+- **Channels:** the VS Code Marketplace, `matis-dev.coordiner` (https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner), published 2026-10-31 at the latest; and Open VSX for VSCodium (https://open-vsx.org/extension/matis-dev/coordiner), not live as of 2026-10-31. This reverses the kickoff decision "personal tool, not built to be found". The README's Install section leads with both; the `.vsix` and from-source routes stay for contributors.
 
 ## Documentation Targets
 
 | Doc | Path | Notes |
 |---|---|---|
 | Changelog | `CHANGELOG.md` | the one changelog; a **Current state** baseline at the top, then dated entries newest first |
-| README | `README.md` | prerequisites, run from source (F5), running a story, building and running a chain, the develop commands |
+| README | `README.md` | prerequisites, install from a registry, run from source (F5), build a `.vsix`, running a story, building and running a chain, the develop commands |
 | Architecture / deployment / API / tests docs | n-a | none; the profile carries those facts |
 
 ## Documentation Standards
@@ -133,7 +133,7 @@ source:    profile §Design, extended 2026-10-30
 
 n-a beyond the install shape above — no hosting, environments, or rollback.
 
-- **Versioning scheme:** semver, while in 0.x a `feat` is a minor bump and a `fix` / `perf` a patch (decided 2026-10-28). The version lives only in `package.json` `version`. No git tags: a release is the `.vsix` built from that version (`coordiner-<version>.vsix`), so the last release is the newest `.vsix` built; bump once per release, not once per commit, and mark it in that changelog entry's heading (`## <date> · <version> — <type>: …`). Last release: 0.3.1 (`coordiner-0.3.1.vsix`, built 2026-10-30).
+- **Versioning scheme:** semver, while in 0.x a `feat` is a minor bump and a `fix` / `perf` a patch (decided 2026-10-28). The version lives only in `package.json` `version`. No git tags: a release is the `.vsix` built from that version (`coordiner-<version>.vsix`), so the last release is the newest `.vsix` built; bump once per release, not once per commit, and mark it in that changelog entry's heading (`## <date> · <version> — <type>: …`). Last release: 0.4.0 (`coordiner-0.4.0.vsix`, built 2026-10-30, published to the Marketplace by 2026-10-31).
 
 ## Guardrails Specific to This Project
 

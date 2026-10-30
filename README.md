@@ -7,22 +7,45 @@
 <p align="center"><strong>Chains of Claude Code skills, run unattended, each in its own git worktree.</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/package-json/v/matis-dev/coordiner?label=version" alt="Version from package.json">
+  <a href="https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner"><img src="https://img.shields.io/visual-studio-marketplace/v/matis-dev.coordiner?label=VS%20Code%20Marketplace" alt="VS Code Marketplace version"></a>
+  <a href="https://open-vsx.org/extension/matis-dev/coordiner"><img src="https://img.shields.io/open-vsx/v/matis-dev/coordiner?label=Open%20VSX" alt="Open VSX version"></a>
   <img src="https://img.shields.io/github/license/matis-dev/coordiner" alt="License: MIT">
   <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A51.135-007ACC" alt="VS Code 1.135 or newer">
 </p>
 
 A VS Code extension that runs a chain of Claude Code skills on one backlog story without you at the keyboard. It creates a git worktree for the story and runs each session of the chain in it. The default chain, **Story**, is the m-skills story flow: a planning and implementing session, then a fresh review session that fixes its findings and writes a commit brief. Nothing is committed: you review the worktree and commit by hand.
 
-Coordiner is a personal tool. Run it from source in an Extension Development Host, or [install a packaged `.vsix`](#install-a-packaged-vsix).
+Install it from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner) or [Open VSX](https://open-vsx.org/extension/matis-dev/coordiner) (`matis-dev.coordiner`), [run it from source](#run-the-extension-from-source) in an Extension Development Host, or [install a packaged `.vsix`](#install-a-packaged-vsix).
 
 ## Prerequisites
 
+To use the extension:
+
 - **VS Code or VSCodium 1.135 or newer** (`engines.vscode` in [package.json](package.json)).
-- **Node.js 24 or newer** and **pnpm 12** (pinned in `packageManager` in [package.json](package.json)); `corepack enable` provides it.
 - **git**.
 - **Claude Code, installed and signed in on this machine.** Sessions run your installed `claude` with your existing login: the one set in `coordiner.claudePath`, else the first `claude` on PATH, else `~/.local/bin/claude`, else the one bundled with the Claude Code editor extension.
 - **Recommended: the [m-skills](https://github.com/matis-dev/m-skills) plugin**, enabled in your Claude Code settings. Coordiner is built around it, and every shipped template uses its skills. Chains made only of your own skills run without it. A chain refuses to start when a skill it uses is not available in the session.
+
+To build from source or package a `.vsix` (not needed to use the extension):
+
+- **Node.js 24 or newer** and **pnpm 12** (pinned in `packageManager` in [package.json](package.json)); `corepack enable` provides it.
+
+## Install
+
+1. Install `matis-dev.coordiner` from the registry your editor uses: the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner) for VS Code, [Open VSX](https://open-vsx.org/extension/matis-dev/coordiner) for VSCodium. Search for "Coordiner" in the Extensions view, or from a terminal:
+
+   ```sh
+   code --install-extension matis-dev.coordiner
+   codium --install-extension matis-dev.coordiner
+   ```
+
+   Run the line for your editor.
+
+2. Open the git repository you want to work on and trust it when asked. Coordiner does not run in untrusted workspaces.
+
+3. Run **Coordiner: Check Environment** (below). The `claude executable` line shows which Claude Code the sessions run.
+
+A **Coordiner** icon appears in the activity bar. It opens the **Sessions** view.
 
 ## How sessions run, and who pays for them
 
@@ -55,6 +78,8 @@ Because the sessions run your `claude`, its version decides which models they ca
 A **Coordiner** icon appears in the activity bar. It opens the **Sessions** view.
 
 ## Install a packaged `.vsix`
+
+For a build of your own changes. To use the released extension, [install it from a registry](#install).
 
 1. Build and package it. The bundle in `dist/` carries every dependency, so the package needs none of `node_modules`:
 
