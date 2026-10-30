@@ -8,7 +8,7 @@ import type { DecidedAfter, QuestionWait } from "./unattended.ts";
 export type LastTurn = { sessionId: string; model: string; effort?: Effort; card: string; reply: string };
 
 // The transcript entries no other record carries, so a reopened chat shows what the sessions said.
-export type JournaledEntry = Extract<Entry, { kind: "assistant" | "tool" | "divider" | "failed" }>;
+export type JournaledEntry = Extract<Entry, { kind: "assistant" | "tool" | "divider" | "card-end" | "session-end" | "failed" }>;
 
 // `definition` is the chain as picked, before `input` filled its placeholder, so a stopped run can be continued from it.
 export type JournalRecord =

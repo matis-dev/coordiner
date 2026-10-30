@@ -1,6 +1,6 @@
 import { MAX_INPUT_CHARS } from "./chains.ts";
 import type { ChatView, Ending } from "./editor-protocol.ts";
-import type { Entry } from "./transcript.ts";
+import type { Entry, Worked } from "./transcript.ts";
 import type { Question } from "./unattended.ts";
 
 // The decisions behind the run's chat, kept out of the DOM script so they can be tested. The webview loads this module from dist/,
@@ -36,10 +36,70 @@ export function cacheLabel(cache: CacheClock, now: number): { text: string; expi
 // Elapsed time counts whole seconds up from the clock, and a clock that moved back reads as no time at all.
 const elapsed = (ms: number): string => clock(Math.max(0, Math.floor(ms / 1000) * 1000));
 
-// Worked out from the clock, as cacheLabel is: a turn that streams nothing for minutes still shows it is alive, and for how long.
-export function busyLabel(turn: TurnClock, now: number): string {
-  return `Working ${elapsed(now - turn.since)} · last activity ${elapsed(now - turn.lastAt)} ago${turn.last ? ` · ${turn.last}` : ""}`;
+// Worked out from the clock, as cacheLabel is: a turn that streams nothing for minutes still shows it is alive. How long it has run
+// is in the chip (chipLabel); this is the rest, beside it.
+export function busyMeta(turn: TurnClock, now: number): string {
+  return `last activity ${elapsed(now - turn.lastAt)} ago${turn.last ? ` · ${turn.last}` : ""}`;
 }
+
+// The chip by the chat's title: the working card and how long its turn has run, or what the run waits for.
+export function chipLabel(chat: ChatView, now: number): string | undefined {
+  const state = attention(chat);
+  if (state?.kind !== "working" || !chat.card) return state?.text;
+  return chat.turn ? `${chat.card} · ${elapsed(now - chat.turn.since)}` : chat.card;
+}
+
+export type StationState = "done" | "live" | "stopped" | "todo";
+
+// The line in the chat's head: each session's cards, those before the run's card done, its card live while the run goes on (stopped
+// once a run that did not finish ends there), and those after it still to come. A run that is done has every card done; one whose
+// card is not known (a reopened session) marks none.
+export function lineOf(chat: ChatView): { session: number; cards: { label: string; state: StationState }[] }[] {
+  if (!chat.line || chat.phase === "idle") return [];
+  const going = (chat.phase === "running" || chat.phase === "waiting") && !chat.afterRun;
+  const at = chat.session !== undefined && chat.index !== undefined ? { session: chat.session, index: chat.index } : undefined;
+  const stateOf = (session: number, index: number): StationState => {
+    if (!going && chat.ending?.status === "done") return "done";
+    if (!at) return "todo";
+    if (session < at.session || (session === at.session && index < at.index)) return "done";
+    if (session === at.session && index === at.index) return going ? "live" : "stopped";
+    return "todo";
+  };
+  return chat.line.map((cards, session) => ({ session, cards: cards.map((label, index) => ({ label, state: stateOf(session, index) })) }));
+}
+
+// A token count as a person reads it: 950, 9.8k, 212k, 1.4M.
+export function tokens(n: number): string {
+  const short = (v: number, unit: string) => `${v < 10 ? Math.round(v * 10) / 10 : Math.round(v)}${unit}`;
+  if (n < 1000) return String(Math.round(n));
+  return n < 999_500 ? short(n / 1000, "k") : short(n / 1_000_000, "M");
+}
+
+// The figures on a card's or a session's closing rule. Input counts what was read from the cache, which is most of it in a long
+// session; the cost is the SDK's estimate at API prices, not what a subscription is billed.
+export function workedLine({ ms, turns, usage, partial }: Worked): string {
+  const parts = [`${elapsed(ms)} working`, `${turns} ${turns === 1 ? "turn" : "turns"}`];
+  if (!usage) return [...parts, "tokens not reported"].join(" · ");
+  const read = usage.input + usage.cacheRead + usage.cacheWrite;
+  const cached = read > 0 ? ` (${Math.round((usage.cacheRead / read) * 100)}% cached)` : "";
+  const cost = usage.costUsd < 0.01 ? "under $0.01" : `≈ $${usage.costUsd.toFixed(2)}`;
+  return [...parts, `${tokens(read)} in${cached} / ${tokens(usage.output)} out`, `${cost} API price${partial ? ", some turns not reported" : ""}`].join(" · ");
+}
+
+const ENDED_AS: Record<Extract<Entry, { kind: "card-end" }>["status"], { glyph: string; word: string }> = {
+  done: { glyph: "✓", word: "done" },
+  halted: { glyph: "✕", word: "halted" },
+  failed: { glyph: "✕", word: "failed" },
+  stopped: { glyph: "■", word: "stopped" },
+};
+
+// A card's closing rule: its mark, then the words, which carry the status too (the mark is never the only sign of it).
+export function cardEndLine(entry: Extract<Entry, { kind: "card-end" }>): { glyph: string; text: string } {
+  const { glyph, word } = ENDED_AS[entry.status];
+  return { glyph, text: [`${entry.card} ${word}`, workedLine(entry.worked), entry.model, ...(entry.effort ? [`${entry.effort} effort`] : [])].join(" · ") };
+}
+
+export const sessionEndLine = (entry: Extract<Entry, { kind: "session-end" }>): string => `Session ${entry.session + 1} · ${workedLine(entry.worked)}`;
 
 // A question that takes its Recommended option when the time runs out says how long the user has, from the clock as cacheLabel does.
 export function expiryLabel(expiresAt: number, now: number): string {
@@ -505,6 +565,9 @@ export const needsYou = (chat: ChatView): boolean => attention(chat)?.kind === "
 // waits for the user cannot, and its prompt cache runs out within the hour anyway, so the computer may sleep then.
 export const canGoOnAlone = (chat: ChatView): boolean => (chat.question ? chat.question.expiresAt !== undefined : chat.phase === "running");
 
+// Only a run that is done has work to land; the chat after it exists only while its worktree does.
+export const canMerge = (chat: ChatView): boolean => Boolean(chat.afterRun) && chat.ending?.status === "done";
+
 export const canSend = (chat: ChatView): boolean => chat.phase === "running" || chat.phase === "waiting";
 export const canPause = (chat: ChatView): boolean => chat.phase === "running" && !chat.attended && !chat.pausePending;
 
@@ -524,8 +587,9 @@ export function statusLine(chat: ChatView): string {
   switch (chat.phase) {
     case "idle":
       return "No run yet. A run shows here, and a card that pauses waits for you here.";
+    // The chip by the title says it, with the card and its clock.
     case "running":
-      return chat.attended ? `${chat.card} is working on your message…` : `${chat.card} is working…`;
+      return "";
     case "waiting":
       if (chat.afterRun) return `${chat.ending ? endedLine(chat.ending) : "The run has ended."} You can keep talking to ${chat.card}.`;
       if (chat.parked) return `${chat.card} needs you: ${chat.parked.replace(/[.\s]+$/, "")}. Reply to it, or fix the cause and choose Continue to try again.`;
@@ -566,9 +630,11 @@ export function announcement(prev: ChatView | undefined, next: ChatView): string
   return undefined;
 }
 
-// New transcript entries are not a live region; a reply is announced by who gave it, a message of the user's by where it went (a
-// queued one is announced when it is queued), and tool calls are not announced at all.
+// New transcript entries are not a live region; a session that finished is announced by its number, a reply by who gave it, a message
+// of the user's by where it went (a queued one is announced when it is queued), and tool calls are not announced at all.
 export function entriesAnnouncement(entries: readonly Entry[]): string | undefined {
+  const handed = entries.findLast((e) => e.kind === "session-end");
+  if (handed) return `Session ${handed.session + 1} finished`;
   const reply = entries.findLast((e) => e.kind === "assistant");
   if (reply) return `${reply.card} replied`;
   const decided = entries.findLast((e) => e.kind === "decided");

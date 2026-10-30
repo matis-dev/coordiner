@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { CanUseTool, HookInput, ModelInfo, Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { listCommands, REQUIRED_COMMANDS, runTurn, type ListQueryFn, type QueryFn, type TaskMessage, type TurnControl } from "./session.ts";
+import { listCommands, REQUIRED_COMMANDS, runTurn, spendOf, type ListQueryFn, type QueryFn, type TaskMessage, type TurnControl } from "./session.ts";
 
 // Fixtures carry only the fields runTurn reads; the full SDK message types are far larger.
 const msg = (m: object) => m as unknown as SDKMessage;
@@ -391,6 +391,57 @@ describe("runTurn", () => {
     });
     await runTurn({ ...base, signal: stop.signal, query });
     assert.equal(aborted, true);
+  });
+
+  describe("what the session has spent", () => {
+    const used = (input: number, output = 1, cacheRead = 0, cacheWrite = 0) => ({ inputTokens: input, outputTokens: output, cacheReadInputTokens: cacheRead, cacheCreationInputTokens: cacheWrite });
+    const paid = (cost: number, modelUsage: object) => ({ total_cost_usd: cost, modelUsage });
+
+    it("is the latest result's totals, summed over its models", async () => {
+      const { query } = fakeQuery(async function* () {
+        yield init();
+        yield msg({ ...(success() as object), ...paid(0.5, { "model-a": used(100, 20, 300, 40), "model-b": used(5, 2, 0, 1) }) });
+      });
+      const result = await runTurn({ ...base, query });
+      assert.deepEqual(result.ok && result.usage, { costUsd: 0.5, input: 105, output: 22, cacheRead: 300, cacheWrite: 41 });
+    });
+
+    it("takes the later totals when an injected message ends the turn early", async () => {
+      let control: TurnControl | undefined;
+      const { query, seen } = fakeQuery(async function* () {
+        yield init({ capabilities: ["interrupt_receipt_v1", "msg_lifecycle_v1"] });
+        const stream = seen.prompt![Symbol.asyncIterator]();
+        await stream.next();
+        const next = stream.next();
+        control!.inject("more");
+        const injected = (await next).value as SDKUserMessage;
+        yield msg({ ...(success("") as object), ...paid(0.1, { "model-a": used(10) }) });
+        yield msg({ type: "command_lifecycle", command_uuid: injected.uuid, state: "started" });
+        yield msg({ ...(success("final") as object), ...paid(0.3, { "model-a": used(30) }) });
+      });
+      const result = await runTurn({ ...base, query, onStarted: (c) => (control = c) });
+      assert.equal(result.ok && result.usage?.costUsd, 0.3);
+    });
+
+    it("comes back with a failed turn that got a result, and not with one that got none", async () => {
+      const errored = fakeQuery(async function* () {
+        yield init();
+        yield msg({ type: "result", subtype: "error_max_turns", is_error: true, session_id: "sess-1", ...paid(0.2, { "model-a": used(7) }) });
+      });
+      const failed = await runTurn({ ...base, query: errored.query });
+      assert.equal(!failed.ok && failed.usage?.input, 7);
+      const silent = fakeQuery(async function* () {
+        yield init();
+      });
+      assert.equal(Object.hasOwn(await runTurn({ ...base, query: silent.query }), "usage"), false);
+    });
+
+    it("is dropped when a figure is not a count", () => {
+      assert.equal(spendOf(paid(Number.NaN, { a: used(1) }) as never), undefined);
+      assert.equal(spendOf(paid(0.1, { a: used(-1) }) as never), undefined);
+      assert.equal(spendOf(paid(0.1, { a: null }) as never), undefined);
+      assert.deepEqual(spendOf({ total_cost_usd: 0 } as never), { costUsd: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    });
   });
 });
 

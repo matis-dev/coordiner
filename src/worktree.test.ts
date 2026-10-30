@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addWorktree, currentBranch, firstCommit, initRepo, inspectRepo, listWorktrees, MAX_NEW_FILES, prepareReview, removalCommands, removalNote, removeWorktree, resumeCommand, setUpRepo, uncommitted, worktreeClean, worktreeState, type Exec, type SetupPrompt } from "./worktree.ts";
+import { addWorktree, changedFiles, currentBranch, firstCommit, initRepo, inspectRepo, listWorktrees, MAX_NEW_FILES, mergeSteps, prepareReview, removalCommands, removalNote, removeWorktree, resumeCommand, setUpRepo, uncommitted, worktreeClean, worktreeState, type Exec, type SetupPrompt } from "./worktree.ts";
 
 type Call = { file: string; args: string[]; cwd: string };
 
@@ -508,7 +508,30 @@ describe("worktreeState", () => {
     assert.deepEqual(calls.map((c) => [c.args, c.cwd]), [
       [["status", "--porcelain"], audit.path],
       [["rev-list", "--count", "HEAD..refs/heads/coordiner/audit"], "/home/u/app"],
+      [["merge-tree", "--write-tree", "HEAD", "refs/heads/coordiner/audit"], "/home/u/app"],
+      [["rev-parse", "HEAD^{tree}"], "/home/u/app"],
     ]);
+  });
+
+  it("marks commits as landed when merging them into HEAD gives HEAD's own tree, as after a squash merge", async () => {
+    const tree = "a".repeat(40);
+    const state = await worktreeState("/r", audit, fakeExec({ status: "", "rev-list": "1\n", "merge-tree": `${tree}\n`, "rev-parse": `${tree}\n` }).exec);
+    assert.deepEqual(state, { changed: 0, ahead: 1, landed: true });
+  });
+
+  it("does not mark commits as landed when the merged tree differs, merge-tree fails, or it prints no tree", async () => {
+    const tree = "a".repeat(40);
+    const differs = await worktreeState("/r", audit, fakeExec({ status: "", "rev-list": "1\n", "merge-tree": `${"b".repeat(40)}\n`, "rev-parse": `${tree}\n` }).exec);
+    assert.deepEqual(differs, { changed: 0, ahead: 1 });
+    const conflict = await worktreeState("/r", audit, fakeExec({ status: "", "rev-list": "1\n", "rev-parse": `${tree}\n` }, ["merge-tree"]).exec);
+    assert.deepEqual(conflict, { changed: 0, ahead: 1 });
+    assert.deepEqual(await worktreeState("/r", audit, fakeExec({ status: "", "rev-list": "1\n" }).exec), { changed: 0, ahead: 1 });
+  });
+
+  it("does not ask whether commits landed when the branch has none", async () => {
+    const { exec, calls } = fakeExec({ status: "", "rev-list": "0\n" });
+    assert.deepEqual(await worktreeState("/r", audit, exec), { changed: 0, ahead: 0 });
+    assert.equal(calls.some((c) => c.args[0] === "merge-tree"), false);
   });
 
   it("says nothing it could not find out, rather than zero", async () => {
@@ -520,6 +543,99 @@ describe("worktreeState", () => {
     const { exec, calls } = fakeExec({ status: "" });
     assert.deepEqual(await worktreeState("/r", { ...audit, branch: "--all" }, exec), { changed: 0 });
     assert.equal(calls.some((c) => c.args[0] === "rev-list"), false);
+  });
+});
+
+describe("changedFiles", () => {
+  it("counts the uncommitted files in a checkout, or nothing when git cannot say", async () => {
+    const { exec, calls } = fakeExec({ status: " M a.ts\n?? b.ts\n" });
+    assert.equal(await changedFiles("/r", exec), 2);
+    assert.deepEqual(calls, [{ file: "git", args: ["status", "--porcelain"], cwd: "/r" }]);
+    assert.equal(await changedFiles("/r", fakeExec({ status: "" }).exec), 0);
+    assert.equal(await changedFiles("/r", fakeExec({}, ["status"]).exec), undefined);
+  });
+});
+
+describe("mergeSteps", () => {
+  const base = { root: "/home/u/app", path: "/home/u/app.coordiner/audit", branch: "coordiner/audit", target: "main", mainChanged: 0, changed: 3, ahead: 0 };
+  const commands = (steps: { command?: string }[]) => steps.flatMap((s) => (s.command ? [s.command] : []));
+
+  it("stages the run's changes, then squashes the branch into the main checkout's branch and reuses its commit message", () => {
+    const steps = mergeSteps(base);
+    assert.deepEqual(commands(steps), [
+      "cd '/home/u/app.coordiner/audit' && git add -A",
+      "git -C '/home/u/app' merge --squash 'coordiner/audit'",
+      "git -C '/home/u/app' commit -C 'coordiner/audit'",
+      "git -C '/home/u/app' reset --merge",
+    ]);
+    assert.match(steps[1]!.text, /commit brief's git commit command/);
+    assert.match(steps[2]!.text, /into main as one change/);
+    assert.match(steps.at(-1)!.text, /End chat.*Remove Worktree/);
+  });
+
+  it("skips staging once everything is committed in the worktree", () => {
+    assert.deepEqual(commands(mergeSteps({ ...base, changed: 0, ahead: 1 })), [
+      "git -C '/home/u/app' merge --squash 'coordiner/audit'",
+      "git -C '/home/u/app' commit -C 'coordiner/audit'",
+      "git -C '/home/u/app' reset --merge",
+    ]);
+  });
+
+  it("warns first when the main checkout has uncommitted files", () => {
+    const steps = mergeSteps({ ...base, mainChanged: 1 });
+    assert.equal(steps[0]!.text, "The main checkout has 1 file uncommitted. Commit or stash them first: the merge stops if it would touch them.");
+    assert.equal(steps[0]!.command, undefined);
+    assert.match(mergeSteps({ ...base, mainChanged: 4 })[0]!.text, /has 4 files uncommitted/);
+  });
+
+  it("says there is nothing to merge when the branch has no changes and no commits, or its commits already landed", () => {
+    const none = mergeSteps({ ...base, changed: 0, ahead: 0 });
+    assert.deepEqual(commands(none), []);
+    assert.equal(none[0]!.text, "Nothing to merge: coordiner/audit has no changes and no commits that main lacks.");
+    const landed = mergeSteps({ ...base, changed: 0, ahead: 2, landed: true });
+    assert.deepEqual(commands(landed), []);
+    assert.equal(landed[0]!.text, "Nothing to merge: the changes on coordiner/audit are already in main.");
+    assert.match(landed[1]!.text, /Remove Worktree/);
+  });
+
+  it("still gives the merge commands when landed commits are followed by new uncommitted changes", () => {
+    assert.equal(commands(mergeSteps({ ...base, changed: 1, ahead: 2, landed: true })).length, 4);
+  });
+
+  it("prints no command when git could not say what the worktree or the main checkout holds", () => {
+    for (const unknown of [{ changed: undefined }, { ahead: undefined }, { mainChanged: undefined }]) {
+      const steps = mergeSteps({ ...base, ...unknown });
+      assert.deepEqual(commands(steps), []);
+      assert.match(steps[0]!.text, /^Git could not say/);
+    }
+  });
+
+  it("prints no merge command for a detached main checkout", () => {
+    for (const target of [undefined, "HEAD"]) {
+      const steps = mergeSteps({ ...base, target });
+      assert.deepEqual(commands(steps), []);
+      assert.match(steps[0]!.text, /is not on a branch/);
+    }
+  });
+
+  it("prints no command for a branch Coordiner did not make", () => {
+    const steps = mergeSteps({ ...base, branch: "--upload-pack=evil" });
+    assert.deepEqual(commands(steps), []);
+    assert.match(steps[0]!.text, /is not a branch Coordiner made/);
+  });
+
+  it("prints no command when a path or the target branch carries a control character, so a newline cannot start a second command", () => {
+    for (const bad of [{ path: "/home/u/x\nrm -rf ~" }, { root: "/home/u/a\u001b[2J" }, { target: "main\ncurl evil" }]) {
+      const steps = mergeSteps({ ...base, ...bad });
+      assert.deepEqual(commands(steps), []);
+      assert.match(steps[0]!.text, /control character/);
+      assert.ok(!steps[0]!.text.includes("\u001b"));
+    }
+  });
+
+  it("keeps a worktree path with a single quote inside one quoted argument", () => {
+    const [stage] = commands(mergeSteps({ ...base, path: "/home/u/it's" }));
+    assert.equal(stage, `cd '/home/u/it'\\''s' && git add -A`);
   });
 });
 

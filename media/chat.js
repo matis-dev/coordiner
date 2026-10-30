@@ -27,13 +27,17 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   // Plain text, not a live region: it changes every second. Only the expiry is announced, once.
   const cacheLine = el("p", { class: "chat-cache", hidden: true });
   let cacheTimer;
-  // The same for a running turn: how long it has run, and its last sign of life. Never announced.
-  const busyLine = el("p", { class: "chat-busy", hidden: true });
+  // The same for a running turn: its last sign of life, beside the chip that says how long it has run. Never announced.
+  const busyLine = el("span", { class: "chat-busy", hidden: true });
   let busyTimer;
   // A question the run answers itself when its time runs out shows the time left. Plain text: it changes every second.
   const expiryLine = el("p", { class: "note expiry" });
   let expiryTimer;
   const transcript = el("ol", { id: "transcript", "aria-label": "Run transcript" });
+  // The chain's sessions as numbered stations, each card done, live or to come; a session links to its part of the transcript. In
+  // the head, so it shows while the chat is hidden or the lanes are covered.
+  const lineList = el("ol");
+  const lineNav = el("nav", { class: "chat-line", "aria-label": "Sessions", hidden: true }, lineList);
   const queuedList = el("ul", { class: "queued", "aria-label": "Queued messages" });
   const form = el("form", { class: "question", "aria-labelledby": "question-h", hidden: true, onsubmit: (e) => (e.preventDefault(), submitAnswers()) });
   const inputLabel = el("label", { for: "chat-input" }, "Message");
@@ -62,10 +66,17 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     vscode.postMessage({ type: "chatNextChain" });
     input.focus();
   } }, "Start the next chain here");
-  const composer = el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, pauseButton, copyButton, nextButton, stopButton, el("div", { class: "primary" }, continueButton, sendButton)));
+  // The extension reads git when pressed and sends the steps as an entry; focus goes to it when it comes.
+  let focusMerge = false;
+  let merges = 0;
+  const mergeButton = el("button", { type: "button", hidden: true, onclick: () => {
+    focusMerge = true;
+    vscode.postMessage({ type: "chatMergeSteps" });
+  } }, "Merge steps");
+  const composer = el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, pauseButton, copyButton, mergeButton, nextButton, stopButton, el("div", { class: "primary" }, continueButton, sendButton)));
   const headActions = el("div", { class: "chat-head-actions" }, maxButton, toggle);
-  const body = el("div", { id: "chat-body" }, line, busyLine, cacheLine, transcript, queuedList, form, composer);
-  root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip), headActions), body);
+  const body = el("div", { id: "chat-body" }, line, cacheLine, transcript, queuedList, form, composer);
+  root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip, busyLine), headActions), lineNav, body);
 
   // The divider between the chains and the chat: the window-splitter pattern, its value the chat's share of the window.
   const { min, max } = logic.CHAT_HEIGHT;
@@ -165,7 +176,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   function entry(e) {
     switch (e.kind) {
       case "assistant":
-        return el("li", { class: "entry assistant" }, el("span", { class: "who" }, e.card), el("div", { class: "md" }, markdown(e.text)));
+        return el("li", { class: "entry assistant has-copy" }, el("span", { class: "who" }, e.card), messageCopy(e.text, `message from ${e.card}`), el("div", { class: "md" }, markdown(e.text)));
       // A long input scrolls in its own small box (see scrollable).
       case "tool":
         return el(
@@ -176,17 +187,34 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
           e.input ? el("pre", { class: "tool-input", "data-tool": e.name }, e.input) : undefined,
         );
       case "you":
-        return el("li", { class: "entry you" }, el("span", { class: "who" }, `You to ${e.card}`), el("p", { class: "text" }, e.text));
+        return el("li", { class: "entry you has-copy" }, el("span", { class: "who" }, `You to ${e.card}`), messageCopy(e.text, `your message to ${e.card}`), el("p", { class: "text" }, e.text));
       case "answer":
         return el("li", { class: "entry you" }, el("span", { class: "who" }, `You answered ${e.card}`), el("p", { class: "text" }, `${e.question} → ${e.answer}`));
       case "decided":
         return el("li", { class: "entry" }, el("span", { class: "who" }, `Recommended answer taken for ${e.card}, ${e.after}`), el("p", { class: "text" }, `${e.question} → ${e.answer}`));
-      case "divider":
-        return el("li", { class: "handover" }, `fresh context: session ${e.session + 1}`);
+      case "card-end": {
+        const { glyph, text } = logic.cardEndLine(e);
+        return el("li", { class: "card-end" }, el("span", { class: "glyph", "aria-hidden": "true" }, glyph), el("span", {}, text));
+      }
+      // The signature: a session's figures written on the dashed rule it hands over on.
+      case "session-end":
+        return el("li", { class: "session-end" }, logic.sessionEndLine(e));
       case "end":
         return el("li", { class: "handover" }, logic.endedLine(e));
       case "failed":
         return el("li", { class: "note" }, `${e.card} could not answer: ${e.error}`);
+      // Steps for the user to run, each command with its Copy; named by its heading, so focus on it reads where it lands.
+      case "merge": {
+        merges += 1;
+        const id = `merge-${merges}`;
+        let n = 0;
+        return el(
+          "li",
+          { class: "entry merge", tabindex: "-1", "aria-labelledby": id },
+          el("span", { class: "who", id }, e.target ? `Merge ${e.branch} into ${e.target}` : `Merge ${e.branch}`),
+          el("ol", { class: "steps" }, e.steps.map((s) => el("li", {}, el("p", { class: "text" }, s.text), s.command ? codeBlock(s.command, (n += 1)) : undefined))),
+        );
+      }
       default:
         return el("li", { class: "note", "data-dropped": "true" }, "Earlier messages were dropped to keep the chat short.");
     }
@@ -277,21 +305,43 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   const copyIcon = () => icon(["M5.5 5.5h8v9h-8z", "M3.5 10.5h-1v-9h8v1"]);
   const doneIcon = () => icon(["M3 8.5l3 3 7-7"]);
 
+  // A Copy icon, named "Copy <what>"; the extension writes the clipboard, and the icon shows a check for a moment.
+  function copyIconButton(text, what) {
+    let reset;
+    const button = el("button", { type: "button", class: "copy-code", "aria-label": `Copy ${what}`, title: "Copy", onclick: () => {
+      vscode.postMessage({ type: "chatCopyText", text });
+      announce(`Copied ${what}`);
+      button.replaceChildren(doneIcon());
+      clearTimeout(reset);
+      reset = setTimeout(() => button.replaceChildren(copyIcon()), 1500);
+    } }, copyIcon());
+    return button;
+  }
+
   // The Copy button is an icon in the block's corner, shown when the pointer is over the block or the button has focus.
   function codeBlock(text, index) {
     const pre = el("pre", {}, el("code", {}, text));
     if (logic.hasHidden(text)) return el("div", { class: "code" }, pre, el("p", { class: "note" }, "This command contains hidden characters, so it may not run as it reads. Do not run it."));
     if (!logic.copyable(text)) return el("div", { class: "code" }, pre);
-    let reset;
-    const button = el("button", { type: "button", class: "copy-code", "aria-label": `Copy command ${index}`, title: "Copy", onclick: () => {
-      vscode.postMessage({ type: "chatCopyText", text });
-      announce(`Copied command ${index}`);
-      button.replaceChildren(doneIcon());
-      clearTimeout(reset);
-      reset = setTimeout(() => button.replaceChildren(copyIcon()), 1500);
-    } }, copyIcon());
-    return el("div", { class: "code copyable" }, pre, button);
+    return el("div", { class: "code copyable" }, pre, copyIconButton(text, `command ${index}`));
   }
+
+  // A message's Copy, in its corner like a command's. It is prose, not a command, so hidden characters do not stop it; a message
+  // longer than the extension takes says so instead.
+  function messageCopy(text, what) {
+    if (text.length <= maxChars) return copyIconButton(text, what);
+    return el("button", { type: "button", class: "copy-code", "aria-label": `Copy ${what}`, title: "Copy", onclick: () => announce(`This message is over ${maxChars.toLocaleString("en")} characters, too long to copy with the button.`) }, copyIcon());
+  }
+
+  // Ctrl+C on text selected in the transcript also goes through the extension, for a webview whose own copy does not reach the
+  // clipboard. The page's own copy still runs. The message box and the question form are outside the transcript.
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "c") return;
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed || !transcript.contains(selection.anchorNode) || !transcript.contains(selection.focusNode)) return;
+    const text = selection.toString();
+    if (text.trim() !== "" && text.length <= maxChars) vscode.postMessage({ type: "chatCopyText", text });
+  });
 
   // A tool's input box is a Tab stop, named for its tool, only while it scrolls: one that shows all of its input needs no stop, and
   // with one per tool call the keyboard would pass every call in the transcript on the way to the message box.
@@ -306,16 +356,108 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   // A new width rewraps every box, and a chat shown again after Hide has its first real size.
   if (typeof ResizeObserver === "function") new ResizeObserver(() => transcript.querySelectorAll("pre.tool-input").forEach(scrollable)).observe(transcript);
 
-  // The page keeps the newest entries, as the extension does, so a long run cannot grow it without end.
+  // ── Sessions ────────────────────────────────────────────────────────────────
+
+  // The transcript is grouped by session: a heading whose button folds the session's entries, then the entries. A divider starts the
+  // next group; entries before any divider belong to the first session.
+  let groups = 0;
+  function sessionGroup(session) {
+    groups += 1;
+    const list = el("ol", { id: `session-entries-${groups}`, class: "session-entries" });
+    const pills = el("span", { class: "pills" });
+    const toggle = el("button", { type: "button", class: "session-toggle", "aria-expanded": "true", "aria-controls": list.id, onclick: () => fold(group, toggle.getAttribute("aria-expanded") === "true") },
+      el("span", { class: "chevron", "aria-hidden": "true" }),
+      el("span", { class: "session-name" }, session === 0 ? "Session 1" : `Session ${session + 1} · fresh context`),
+    );
+    // Beside the button, not in it: the button's words stay on one line at any width, and the pills wrap under them.
+    const group = el("li", { class: "session", "data-session": session }, el("h3", { class: "session-h" }, toggle, pills), list);
+    fillPills(group);
+    return group;
+  }
+
+  function fold(group, folded) {
+    group.querySelector(".session-toggle").setAttribute("aria-expanded", String(!folded));
+    group.querySelector(".session-entries").hidden = folded;
+  }
+
+  const GLYPHS = { done: "✓ ", live: "● ", stopped: "■ ", todo: "" };
+  const WORDS = { done: " (done)", live: " (running)", stopped: " (stopped)", todo: "" };
+
+  // The session's cards beside its heading, each marked as the line marks it: its glyph, and its state in words for a screen reader.
+  function fillPills(group) {
+    const session = logic.lineOf(chat).find((s) => String(s.session) === group.dataset.session);
+    group.querySelector(".pills").replaceChildren(...(session?.cards ?? []).map((c) =>
+      el("span", { class: `pill ${c.state}` }, el("span", { "aria-hidden": "true" }, GLYPHS[c.state]), c.label, WORDS[c.state] ? el("span", { class: "visually-hidden" }, WORDS[c.state]) : undefined),
+    ));
+  }
+
+  // The latest group of a session: a continued run starts its session again.
+  const groupOf = (session) => [...transcript.querySelectorAll(`:scope > li.session[data-session="${session}"]`)].at(-1) ?? null;
+
+  function currentGroup() {
+    return transcript.querySelector(":scope > li.session:last-of-type") ?? transcript.appendChild(sessionGroup(0));
+  }
+
+  // The line is built again only when what it draws changes shape, so a button in it keeps focus through every update. The shape is
+  // the stations drawn, not the chain's: an idle chat knows the chain and draws none.
+  let lineShape;
+  function renderLine(next) {
+    const sessions = logic.lineOf(next);
+    lineNav.hidden = sessions.length === 0;
+    const shape = JSON.stringify(sessions.map((s) => s.cards.map((c) => c.label)));
+    if (shape !== lineShape) {
+      lineShape = shape;
+      lineList.replaceChildren(...sessions.map((s) => el("li", {}, el("button", { type: "button", class: "station", "data-session": s.session, onclick: () => goTo(s.session) }))));
+    }
+    sessions.forEach((s, i) => {
+      const button = lineList.children[i].firstElementChild;
+      const started = groupOf(s.session) !== null;
+      const live = s.cards.some((c) => c.state === "live");
+      button.replaceChildren(
+        el("span", { class: "station-n", "aria-hidden": "true" }, String(s.session + 1)),
+        ...s.cards.flatMap((c, k) => [...(k > 0 ? [el("span", { class: "sep", "aria-hidden": "true" }, "›")] : []), el("span", { class: `station-card ${c.state}`, "aria-hidden": "true" }, `${GLYPHS[c.state]}${c.label}`)]),
+      );
+      button.setAttribute("aria-label", `Session ${s.session + 1}: ${s.cards.map((c) => `${c.label}${WORDS[c.state]}`).join(", ")}`);
+      button.setAttribute("aria-disabled", String(!started));
+      button.title = started ? `Go to session ${s.session + 1}` : `Session ${s.session + 1} has not started`;
+      if (live) button.setAttribute("aria-current", "step");
+      else button.removeAttribute("aria-current");
+    });
+    for (const group of transcript.querySelectorAll(":scope > li.session")) fillPills(group);
+  }
+
+  // A session on the line opens its part of the transcript, unfolded, and focus lands on its heading, which reads it out.
+  function goTo(session) {
+    const group = groupOf(session);
+    if (!group) return;
+    if (body.hidden) setOpen(true);
+    fold(group, false);
+    group.querySelector(".session-toggle").focus();
+  }
+
+  // The page keeps the newest entries, as the extension does, so a long run cannot grow it without end. A session's heading stays
+  // when all of its entries are dropped.
   function append(entries) {
     const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
-    const added = entries.map(entry);
-    transcript.append(...added);
-    for (const li of added) li.querySelectorAll("pre.tool-input").forEach(scrollable);
-    const kept = [...transcript.children].filter((li) => !li.dataset.dropped);
+    for (const e of entries) {
+      if (e.kind === "divider") {
+        // A run continued in the session it stopped in goes on under that session's heading.
+        if (transcript.querySelector(":scope > li.session:last-of-type")?.dataset.session !== String(e.session)) transcript.append(sessionGroup(e.session));
+        continue;
+      }
+      const li = entry(e);
+      if (e.kind === "dropped") transcript.prepend(li);
+      else currentGroup().querySelector(".session-entries").append(li);
+      li.querySelectorAll("pre.tool-input").forEach(scrollable);
+      if (e.kind === "merge" && focusMerge) {
+        focusMerge = false;
+        li.focus();
+      }
+    }
+    const kept = [...transcript.querySelectorAll(".session-entries > li")];
     if (kept.length > logic.MAX_ENTRIES) {
       for (const li of kept.slice(0, kept.length - logic.MAX_ENTRIES)) li.remove();
-      if (!transcript.firstElementChild.dataset.dropped) transcript.prepend(entry({ kind: "dropped" }));
+      if (!transcript.firstElementChild?.dataset.dropped) transcript.prepend(entry({ kind: "dropped" }));
     }
     if (atBottom) transcript.scrollTop = transcript.scrollHeight;
   }
@@ -393,8 +535,11 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     const attention = logic.attention(next);
     chip.hidden = !attention;
     chip.className = `run-chip ${attention?.kind ?? ""}`;
-    chipText.textContent = attention?.text ?? "";
+    chipText.textContent = logic.chipLabel(next, Date.now()) ?? "";
     line.textContent = logic.statusLine(next);
+    // A working card is in the chip; the line says only what the chip cannot.
+    line.hidden = line.textContent === "";
+    renderLine(next);
     inputLabel.textContent = next.card ? `Message to ${next.card}` : "Message";
     sendButton.setAttribute("aria-disabled", String(!logic.canSend(next)));
     stopButton.setAttribute("aria-disabled", String(!logic.canSend(next)));
@@ -404,6 +549,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     pauseButton.textContent = next.pausePending ? "Pausing after this turn" : "Pause after this turn";
     continueButton.hidden = next.phase !== "waiting" || Boolean(next.afterRun);
     copyButton.hidden = !next.afterRun;
+    mergeButton.hidden = !logic.canMerge(next);
     nextButton.hidden = !next.afterRun;
     continueButton.textContent = logic.continueLabel(next);
     continueButton.classList.toggle("run", next.continueReady || Boolean(next.parked));
@@ -465,7 +611,10 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     busyTimer = undefined;
     busyLine.hidden = !(next.phase === "running" && next.turn);
     if (busyLine.hidden) return;
-    const tick = () => (busyLine.textContent = logic.busyLabel(next.turn, Date.now()));
+    const tick = () => {
+      busyLine.textContent = logic.busyMeta(next.turn, Date.now());
+      chipText.textContent = logic.chipLabel(next, Date.now());
+    };
     tick();
     busyTimer = setInterval(tick, 1000);
   }

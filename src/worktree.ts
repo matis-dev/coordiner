@@ -167,19 +167,76 @@ export async function listWorktrees(root: string, exec: Exec): Promise<WorktreeL
 }
 
 // What a worktree holds that its removal would lose: uncommitted files, and commits on its branch that the main checkout's HEAD
-// does not have. Either is undefined when git could not say, which is never read as none.
-export type WorktreeState = { changed?: number; ahead?: number };
+// does not have. Either is undefined when git could not say, which is never read as none. `landed`: those commits change nothing
+// HEAD lacks, as after a squash merge; only ever true.
+export type WorktreeState = { changed?: number; ahead?: number; landed?: true };
 
-export async function worktreeState(root: string, worktree: Listed, exec: Exec): Promise<WorktreeState> {
-  const changed = exec("git", ["status", "--porcelain"], { cwd: worktree.path }).then(
+// Uncommitted files in a checkout; undefined when git could not say.
+export const changedFiles = (path: string, exec: Exec): Promise<number | undefined> =>
+  exec("git", ["status", "--porcelain"], { cwd: path }).then(
     (r) => r.stdout.split("\n").filter((line) => line.trim() !== "").length,
     () => undefined,
   );
+
+// Merging the branch into HEAD gives HEAD's own tree. A conflict (merge-tree exits 1) or any failure is never read as landed.
+async function landed(root: string, branch: string, exec: Exec): Promise<boolean> {
+  try {
+    const [merged, own] = await Promise.all([
+      exec("git", ["merge-tree", "--write-tree", "HEAD", `refs/heads/${branch}`], { cwd: root }),
+      exec("git", ["rev-parse", "HEAD^{tree}"], { cwd: root }),
+    ]);
+    const tree = merged.stdout.split("\n")[0]!.trim();
+    return /^[0-9a-f]{40,64}$/.test(tree) && tree === own.stdout.trim();
+  } catch {
+    return false;
+  }
+}
+
+export async function worktreeState(root: string, worktree: Listed, exec: Exec): Promise<WorktreeState> {
+  const changed = changedFiles(worktree.path, exec);
   const ahead = COORDINER_BRANCH.test(worktree.branch)
     ? exec("git", ["rev-list", "--count", `HEAD..refs/heads/${worktree.branch}`], { cwd: root }).then((r) => (/^\d+$/.test(r.stdout.trim()) ? Number(r.stdout.trim()) : undefined), () => undefined)
     : undefined;
   const [c, a] = await Promise.all([changed, ahead]);
-  return { ...(c !== undefined ? { changed: c } : {}), ...(a !== undefined ? { ahead: a } : {}) };
+  const l = a !== undefined && a > 0 && (await landed(root, worktree.branch, exec));
+  return { ...(c !== undefined ? { changed: c } : {}), ...(a !== undefined ? { ahead: a } : {}), ...(l ? { landed: true } : {}) };
+}
+
+export type MergeStep = { text: string; command?: string };
+export type MergeInput = { root: string; path: string; branch: string; target?: string; mainChanged?: number } & WorktreeState;
+
+const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
+
+// What to run, in order, to land a worktree's work on the branch the main checkout is on, as one commit. Shown for the user to run,
+// never run here. Built from git's own names only: the commit message reaches git through `commit -C <branch>`, never as text.
+export function mergeSteps({ root, path, branch, target, mainChanged, changed, ahead, landed }: MergeInput): MergeStep[] {
+  if (changed === undefined || ahead === undefined || mainChanged === undefined) {
+    return [{ text: `Git could not say what ${plain(branch)} holds, or what the main checkout has uncommitted, so no commands are shown.` }];
+  }
+  if (!COORDINER_BRANCH.test(branch)) return [{ text: `${plain(branch)} is not a branch Coordiner made, so no commands are shown.` }];
+  if (target === undefined || target === "HEAD") {
+    return [{ text: `The main checkout at ${plain(root)} is not on a branch. Check out the branch to merge into there, then choose Merge steps again.` }];
+  }
+  if ([root, path, target].some((value) => /[\u0000-\u001f\u007f-\u009f]/.test(value))) {
+    return [{ text: `A path or branch name has a control character, so no commands are printed. Commit in ${plain(path)}, then merge ${branch} into ${plain(target)} with git merge --squash.` }];
+  }
+  const cleanUp = { text: "Then choose End chat, and remove the worktree with Remove Worktree… in Sessions." };
+  if (changed === 0 && (ahead === 0 || landed)) {
+    return [{ text: ahead === 0 ? `Nothing to merge: ${branch} has no changes and no commits that ${target} lacks.` : `Nothing to merge: the changes on ${branch} are already in ${target}.` }, cleanUp];
+  }
+  return [
+    ...(mainChanged > 0 ? [{ text: `The main checkout has ${files(mainChanged)} uncommitted. Commit or stash them first: the merge stops if it would touch them.` }] : []),
+    ...(changed > 0
+      ? [
+          { text: `Stage the ${files(changed)} the run changed:`, command: `cd ${quote(path)} && git add -A` },
+          { text: "Then run the commit brief's git commit command from the chat above, in the same terminal." },
+        ]
+      : []),
+    { text: `Bring the work into ${target} as one change:`, command: `git -C ${quote(root)} merge --squash ${quote(branch)}` },
+    { text: "Commit it with the message of the worktree's commit:", command: `git -C ${quote(root)} commit -C ${quote(branch)}` },
+    { text: `If the merge stops on conflicts, fix them and run the commit command, or put ${target} back as it was:`, command: `git -C ${quote(root)} reset --merge` },
+    cleanUp,
+  ];
 }
 
 // The branch the main checkout is on, for "commits ahead of <branch>"; undefined when git could not say.

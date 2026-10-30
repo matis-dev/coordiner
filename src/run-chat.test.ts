@@ -5,14 +5,14 @@ import type { ChatMessage } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
 import type { Entry } from "./transcript.ts";
-import { actOnChat, cacheFrom, createRunChat, IDLE_CHAT } from "./run-chat.ts";
+import { actOnChat, cacheFrom, createRunChat, IDLE_CHAT, spentSince, stations } from "./run-chat.ts";
 import { QUESTION_WAIT_MS, type QuestionWait } from "./unattended.ts";
 
 const question = { question: "Which \u001b[31mstore?", options: [{ label: "SQLite" }, { label: "Files (Recommended)" }] };
 const said = (text: string) => ({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "text", text }] } }) as unknown as SDKAssistantMessage;
 const toolOptions = () => ({ signal: new AbortController().signal }) as Parameters<CanUseTool>[2];
 
-function setup(now = () => 0, questions: QuestionWait = "never", sleep?: (ms: number, signal: AbortSignal) => Promise<void>, past?: Entry[]) {
+function setup(now = () => 0, questions: QuestionWait = "never", sleep?: (ms: number, signal: AbortSignal) => Promise<void>, past?: Entry[], line?: string[][], resumes = false) {
   const posted: ChatMessage[] = [];
   const records: JournalRecord[] = [];
   const logs: string[] = [];
@@ -29,6 +29,8 @@ function setup(now = () => 0, questions: QuestionWait = "never", sleep?: (ms: nu
     now,
     ...(sleep ? { sleep } : {}),
     ...(past ? { past } : {}),
+    ...(line ? { line } : {}),
+    ...(resumes ? { resumes } : {}),
   });
   return { chat, posted, records, logs, waiting, moves: () => moves, appended: () => posted.flatMap((m) => (m.type === "chatAppend" ? m.entries : [])), updates: () => posted.filter((m) => m.type === "chatUpdate") };
 }
@@ -268,7 +270,7 @@ describe("actOnChat", () => {
   it("passes each chat message to the run's chat, and stops the run on chatStop", async () => {
     const { chat } = setup();
     let stopped = 0;
-    const stop = { stop: () => void stopped++, copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: () => assert.fail("not asked") };
+    const stop = { stop: () => void stopped++, copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: () => assert.fail("not asked"), mergeSteps: () => assert.fail("not asked") };
     chat.talk.at({ card: "Implement", index: 0, session: 0, attended: false });
     assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "one" }), true);
     assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "  " }), false);
@@ -288,16 +290,17 @@ describe("actOnChat", () => {
   it("hands the actions after the run to the extension", () => {
     const { chat } = setup();
     const asked: string[] = [];
-    const actions = { stop: () => void asked.push("stop"), copyResume: () => void asked.push("copy"), nextChain: () => void asked.push("next"), copyText: (text: string) => void asked.push(`text: ${text}`) };
+    const actions = { stop: () => void asked.push("stop"), copyResume: () => void asked.push("copy"), nextChain: () => void asked.push("next"), copyText: (text: string) => void asked.push(`text: ${text}`), mergeSteps: () => void asked.push("merge") };
     assert.equal(actOnChat(chat.talk, actions, { type: "chatCopyResume" }), true);
     assert.equal(actOnChat(chat.talk, actions, { type: "chatNextChain" }), true);
-    assert.deepEqual(asked, ["copy", "next"]);
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatMergeSteps" }), true);
+    assert.deepEqual(asked, ["copy", "next", "merge"]);
   });
 
   it("hands a command to copy to the extension, at any time", () => {
     const { chat } = setup();
     const asked: string[] = [];
-    const actions = { stop: () => assert.fail("not asked"), copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: (text: string) => void asked.push(text) };
+    const actions = { stop: () => assert.fail("not asked"), copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: (text: string) => void asked.push(text), mergeSteps: () => assert.fail("not asked") };
     assert.equal(actOnChat(chat.talk, actions, { type: "chatCopyText", text: "docker --version" }), true);
     assert.deepEqual(asked, ["docker --version"]);
   });
@@ -353,6 +356,16 @@ describe("createRunChat: the end of the run", () => {
     assert.deepEqual(appended(), [{ kind: "failed", card: "Kickoff", error: "the session failed: [31mAPI Error" }]);
   });
 
+  it("shows the merge steps in the transcript without journaling them", () => {
+    const { chat, appended, records } = setup();
+    const before = records.length;
+    const entry = { kind: "merge" as const, branch: "coordiner/kickoff", target: "main", steps: [{ text: "Bring the work in:", command: "git -C '/r' merge --squash 'coordiner/kickoff'" }] };
+    chat.merge(entry);
+    assert.deepEqual(appended(), [entry]);
+    assert.deepEqual(chat.entries().at(-1), entry);
+    assert.equal(records.length, before);
+  });
+
   it("does not journal the end entry; the outcome record says how the run ended", () => {
     const { chat, records } = setup();
     chat.ended({ status: "done", text: "brief" }, { card: "Kickoff" });
@@ -406,5 +419,135 @@ describe("createRunChat: a reopened session", () => {
     const { chat } = setup(undefined, undefined, undefined, past);
     chat.reopened({ status: "stopped" });
     assert.deepEqual([chat.view().phase, chat.view().afterRun], ["ended", undefined]);
+  });
+});
+
+describe("what each card and session worked and spent", () => {
+  const spend = (costUsd: number, input: number, output = 0, cacheRead = 0, cacheWrite = 0) => ({ costUsd, input, output, cacheRead, cacheWrite });
+  type Chat = ReturnType<typeof setup>["chat"];
+  const at = (chat: Chat, card: string, index: number, session = 0) => chat.talk.at({ card, index, session, attended: false });
+  const turn = (chat: Chat, ms: number, usage?: ReturnType<typeof spend>, status: "done" | "halted" | "stopped" = "done") => {
+    chat.stepped({ type: "step-started", index: 0, label: "x", tier: "weak", model: "model-a", effort: "high", position: { session: 0, card: 0 } });
+    chat.stepped({ type: "step-finished", index: 0, status, detail: "", stats: { ms, ...(usage ? { usage } : {}) } });
+  };
+  const kinds = (entries: Entry[]) => entries.map((e) => e.kind);
+
+  it("takes a turn's spend out of the session's running totals, and a lower total as a fresh count", () => {
+    assert.deepEqual(spentSince(undefined, spend(1, 10)), spend(1, 10));
+    assert.deepEqual(spentSince(spend(1, 10, 2, 3, 4), spend(1.5, 25, 3, 3, 6)), spend(0.5, 15, 1, 0, 2));
+    assert.deepEqual(spentSince(spend(1, 10), spend(0.25, 40)), spend(0.25, 40));
+  });
+
+  it("closes a card that hands over inside its session before anything of the next card", () => {
+    const { chat, appended, records } = setup();
+    at(chat, "Plan", 0);
+    turn(chat, 1000, spend(0.1, 100));
+    turn(chat, 500, spend(0.3, 250, 10));
+    at(chat, "Review", 1);
+    assert.deepEqual(appended(), [
+      { kind: "card-end", card: "Plan", session: 0, status: "done", model: "model-a", effort: "high", worked: { ms: 1500, turns: 2, usage: spend(0.3, 250, 10) } },
+    ]);
+    assert.deepEqual(records, [{ type: "entry", entry: appended()[0] }]);
+  });
+
+  it("leaves the time a question waited for the user out of the turn it was asked in, and out of the turns after it", async () => {
+    let clock = 0;
+    const { chat, appended } = setup(() => clock);
+    at(chat, "Plan", 0);
+    const answers = chat.talk.ask([question], new AbortController().signal);
+    clock = 420_000;
+    chat.talk.answer(chat.view().question!.id, [{ picked: ["SQLite"] }]);
+    await answers;
+    clock = 600_000;
+    turn(chat, 600_000);
+    turn(chat, 5_000);
+    // A stopped turn ends with its question still open: it waited until the turn ended.
+    const stop = new AbortController();
+    void chat.talk.ask([question], stop.signal).catch(() => undefined);
+    clock = 660_000;
+    turn(chat, 60_000, undefined, "stopped");
+    stop.abort();
+    at(chat, "Review", 1);
+    const plan = appended().at(-1)!;
+    assert.deepEqual(plan.kind === "card-end" && plan.worked, { ms: 185_000, turns: 3 });
+  });
+
+  it("closes the card, then the session, then draws the divider when a session hands over; the next session counts afresh", () => {
+    const { chat, appended } = setup();
+    at(chat, "Plan", 0);
+    turn(chat, 1000, spend(0.1, 100));
+    at(chat, "Review", 1);
+    turn(chat, 2000, spend(0.4, 300));
+    at(chat, "Fix", 0, 1);
+    turn(chat, 100, spend(0.05, 20));
+    chat.ended({ status: "done", text: "" });
+    assert.deepEqual(kinds(appended()), ["card-end", "card-end", "session-end", "divider", "card-end", "session-end", "end"]);
+    const [, review, first, , fix, second] = appended();
+    assert.deepEqual(review!.kind === "card-end" && review.worked, { ms: 2000, turns: 1, usage: spend(0.30000000000000004, 200) });
+    assert.deepEqual(first, { kind: "session-end", session: 0, worked: { ms: 3000, turns: 2, usage: spend(0.4, 300) } });
+    assert.deepEqual(fix!.kind === "card-end" && fix.worked.usage, spend(0.05, 20), "a fresh session's first totals are all its own");
+    assert.deepEqual(second, { kind: "session-end", session: 1, worked: { ms: 100, turns: 1, usage: spend(0.05, 20) } });
+  });
+
+  it("counts a resumed session from its first totals, which carry the turns before the run, and the next session afresh", () => {
+    const { chat, appended } = setup(() => 0, "never", undefined, undefined, undefined, true);
+    at(chat, "Fix", 1);
+    turn(chat, 1000, spend(2, 900));
+    turn(chat, 500, spend(2.5, 1000));
+    at(chat, "Ship", 0, 1);
+    turn(chat, 100, spend(0.05, 20));
+    chat.ended({ status: "done", text: "" });
+    const [fix, first, , ship] = appended();
+    assert.deepEqual(fix!.kind === "card-end" && fix.worked, { ms: 1500, turns: 2, usage: spend(0.5, 100), partial: true }, "the earlier turns are not this card's");
+    assert.deepEqual(first!.kind === "session-end" && first.worked.usage, spend(0.5, 100));
+    assert.deepEqual(ship!.kind === "card-end" && ship.worked.usage, spend(0.05, 20), "the next session is fresh");
+  });
+
+  it("marks figures partial when some turns said what they spent and some did not, and leaves usage out when none did", () => {
+    const { chat, appended } = setup();
+    at(chat, "Plan", 0);
+    turn(chat, 10);
+    turn(chat, 10, spend(0.1, 5));
+    at(chat, "Review", 1);
+    turn(chat, 10, spend(0.2, 9));
+    turn(chat, 10, undefined, "stopped");
+    at(chat, "Fix", 2);
+    turn(chat, 10);
+    chat.ended({ status: "stopped" });
+    const [plan, review, fix] = appended();
+    assert.deepEqual(plan!.kind === "card-end" && plan.worked, { ms: 20, turns: 2, usage: spend(0.1, 5), partial: true });
+    assert.deepEqual(review!.kind === "card-end" && [review.status, review.worked.partial], ["stopped", true]);
+    assert.deepEqual(fix!.kind === "card-end" && fix.worked, { ms: 10, turns: 1 });
+  });
+
+  it("writes nothing for a card or session no turn finished in, and nothing new for a reopened chat", () => {
+    const { chat, appended } = setup();
+    at(chat, "Plan", 0);
+    chat.ended({ status: "stopped" });
+    assert.deepEqual(kinds(appended()), ["end"]);
+    const reopened = setup(undefined, undefined, undefined, [{ kind: "session-end", session: 0, worked: { ms: 1, turns: 1 } }]);
+    reopened.chat.reopened({ status: "done" });
+    assert.deepEqual(reopened.appended(), []);
+  });
+
+  it("leaves the effort out when the card has none, and writes no card row for turns whose start it never saw", () => {
+    const { chat, appended } = setup();
+    at(chat, "Plan", 0);
+    chat.stepped({ type: "step-started", index: 0, label: "Plan", tier: "weak", model: "model-a", position: { session: 0, card: 0 } });
+    chat.stepped({ type: "step-finished", index: 0, status: "done", detail: "", stats: { ms: 5 } });
+    at(chat, "Review", 1);
+    chat.stepped({ type: "step-finished", index: 1, status: "done", detail: "", stats: { ms: 7 } });
+    chat.ended({ status: "done", text: "" });
+    assert.deepEqual(appended().slice(0, 2), [
+      { kind: "card-end", card: "Plan", session: 0, status: "done", model: "model-a", worked: { ms: 5, turns: 1 } },
+      { kind: "session-end", session: 0, worked: { ms: 12, turns: 2 } },
+    ]);
+  });
+
+  it("shows the chain's stations with the chat, and only when the chain is known", () => {
+    const line = stations({ sessions: [{ cards: [{ label: "Plan\u001b" }, { label: "Review" }] }, { cards: [{ label: "Fix" }] }] } as never);
+    assert.deepEqual(line, [["Plan", "Review"], ["Fix"]]);
+    assert.deepEqual(setup(undefined, undefined, undefined, undefined, line).chat.view().line, line);
+    assert.equal(Object.hasOwn(setup().chat.view(), "line"), false);
   });
 });

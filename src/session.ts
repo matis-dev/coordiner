@@ -30,10 +30,14 @@ export type TaskMessage = SDKTaskProgressMessage | SDKBackgroundTasksChangedMess
 // becomes of a message, or the turn is ending), and the caller keeps the message for the next turn.
 export type TurnControl = { stopTask(taskId: string): Promise<void>; inject(text: string): boolean };
 
+// What the session has spent so far, as its latest result reports it: running totals across every model it called, at API prices.
+export type Spend = { costUsd: number; input: number; output: number; cacheRead: number; cacheWrite: number };
+
+// `usage`: the totals of the turn's latest result; none when no result came, or when a figure in it was not a count.
 export type TurnResult =
-  | { ok: true; sessionId: string; model: string; resultText: string; commands: string[] }
+  | { ok: true; sessionId: string; model: string; resultText: string; commands: string[]; usage?: Spend }
   // `undelivered`: messages injected into the turn that it ended before starting, in the order they were sent.
-  | { ok: false; sessionId?: string; error: string; undelivered?: string[] };
+  | { ok: false; sessionId?: string; error: string; undelivered?: string[]; usage?: Spend };
 
 export type TurnRequest = {
   prompt: string;
@@ -62,6 +66,22 @@ export type TurnRequest = {
 };
 
 type InitMessage = Extract<SDKMessage, { type: "system"; subtype: "init" }>;
+type ResultMessage = Extract<SDKMessage, { type: "result" }>;
+
+const count = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
+
+// The result's running totals, summed over the models it lists. A figure that is not a count drops them all rather than show a
+// wrong one.
+export function spendOf(result: Pick<ResultMessage, "total_cost_usd" | "modelUsage">): Spend | undefined {
+  const spend: Spend = { costUsd: result.total_cost_usd, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const used of Object.values(result.modelUsage ?? {})) {
+    spend.input += Number(used?.inputTokens);
+    spend.output += Number(used?.outputTokens);
+    spend.cacheRead += Number(used?.cacheReadInputTokens);
+    spend.cacheWrite += Number(used?.cacheCreationInputTokens);
+  }
+  return Object.values(spend).every(count) ? spend : undefined;
+}
 
 const userMessage = (text: string): SDKUserMessage => ({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null });
 
@@ -169,7 +189,10 @@ async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effo
   // CLI reported starting. A CLI that stops sending lifecycle frames then ends the turn after the message's own turn, not never.
   let owed = 0;
   let injectable = false;
-  const failed = (error: string): TurnResult => ({ ok: false, sessionId, error, ...(unstarted.size > 0 ? { undelivered: [...unstarted.values()] } : {}) });
+  // Running totals, so the latest result's are the turn's, early ends included.
+  let usage: Spend | undefined;
+  const spent = () => (usage ? { usage } : {});
+  const failed = (error: string): TurnResult => ({ ok: false, sessionId, error, ...(unstarted.size > 0 ? { undelivered: [...unstarted.values()] } : {}), ...spent() });
   try {
     const messages = query({
       prompt: input.messages,
@@ -226,6 +249,7 @@ async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effo
       if (lifecycle && lifecycle.state !== "queued") unstarted.delete(lifecycle.uuid);
       if (message.type === "result") {
         sessionId = message.session_id;
+        usage = spendOf(message);
         // The turn a message was injected into ends early; the message's own turn follows, and its result is the one returned. The
         // latest reply's status line is the one that counts, since the message may have changed where the chain goes.
         if (message.subtype === "success" && !message.is_error && unstarted.size > 0 && owed > 0) {
@@ -235,7 +259,7 @@ async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effo
         // Closed now, not in finally: returning first waits on the SDK, and a message injected meanwhile would be taken and never run.
         input.close();
         // Returning here also avoids the throw query() raises after an error result.
-        if (message.subtype === "success" && !message.is_error) return { ok: true, sessionId, model: reportedModel, resultText: message.result, commands };
+        if (message.subtype === "success" && !message.is_error) return { ok: true, sessionId, model: reportedModel, resultText: message.result, commands, ...spent() };
         // A "success" flagged is_error carries the reason (an API error, an outdated claude) in its result text.
         if (message.subtype === "success" && message.result) return failed(`the session failed: ${message.result}`);
         return failed(`the session ended with ${message.subtype}.`);

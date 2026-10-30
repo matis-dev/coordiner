@@ -1,7 +1,7 @@
 import { cardPrompt, inputOf, INPUTS, MAX_INPUT_CHARS, REVIEW, skillDefault, type Chain, type ChainSession, type Effort } from "./chains.ts";
 import type { Models, Tier } from "./environment.ts";
 import { parseStatus, tierOf, withoutStatus, type Status } from "./protocol.ts";
-import type { TurnRequest, TurnResult } from "./session.ts";
+import type { Spend, TurnRequest, TurnResult } from "./session.ts";
 import type { Talk } from "./talk.ts";
 import { clip } from "./text.ts";
 import { MAX_NEW_FILES, type ReviewPrep } from "./worktree.ts";
@@ -13,10 +13,13 @@ export type StepStatus = "done" | "failed" | "halted" | "stopped";
 // Where a run is, or where it stopped: the session and the card within it.
 export type At = { session: number; card: number };
 
+// One turn: how long it ran, and the session's running totals after it (none when its session reported none).
+export type TurnStats = { ms: number; usage?: Spend };
+
 export type RunEvent =
   // `position`, not `at`: the journal stamps each record with its time as `at`.
   | { type: "step-started"; index: number; label: string; tier: Tier; model: string; effort?: Effort; position: At }
-  | { type: "step-finished"; index: number; status: StepStatus; detail: string; sessionId?: string };
+  | { type: "step-finished"; index: number; status: StepStatus; detail: string; sessionId?: string; stats: TurnStats };
 
 // Where a continued run picks up: the card, the tier it was on (none takes the skill's default), the session to resume (none
 // starts it fresh), and the prompt its first turn sends.
@@ -39,6 +42,8 @@ export type RunDeps = {
   emit(event: RunEvent): void;
   signal: AbortSignal;
   talk: Pick<Talk, "at" | "takeQueued" | "pausePending" | "waitForYou">;
+  // Times each turn; Date.now when absent.
+  now?: () => number;
 };
 
 // Where a session sits in its chain: its number, and the first card of the session after it (a queued message may cross over).
@@ -176,9 +181,12 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     const { model = deps.models[tier], effort } = cards[card]!;
     const effortSet = effort ? { effort } : {};
     deps.emit({ type: "step-started", index, label: shown, tier, model, ...effortSet, position: { session: place.session, card } });
+    const now = deps.now ?? Date.now;
+    const began = now();
     const result = await deps.runTurn({ prompt: queued ? `${queued}\n\n${prompt}` : prompt, model, ...effortSet, interactive: attended, ...(resume ? { resume } : {}) });
+    const stats: TurnStats = { ms: Math.max(0, now() - began), ...(result.usage ? { usage: result.usage } : {}) };
     const sessionId = result.sessionId;
-    const finish = ([status, detail]: [StepStatus, string]) => deps.emit({ type: "step-finished", index, status, detail, ...(sessionId ? { sessionId } : {}) });
+    const finish = ([status, detail]: [StepStatus, string]) => deps.emit({ type: "step-finished", index, status, detail, ...(sessionId ? { sessionId } : {}), stats });
 
     if (!result.ok) {
       if (deps.signal.aborted) {

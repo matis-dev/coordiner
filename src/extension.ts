@@ -20,7 +20,7 @@ import { createJournal, journalFileName, type JournalRecord, type LastTurn } fro
 import { replyOf } from "./protocol.ts";
 import { fillInput, remainingCommands, runChain, talkOn, type AfterAsk, type Outcome, type RunEvent, type StartPoint } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
-import { actOnChat, createRunChat, IDLE_CHAT, type ChatAction, type Decision, type RunChat, type TurnMode } from "./run-chat.ts";
+import { actOnChat, createRunChat, IDLE_CHAT, stations, type ChatAction, type Decision, type RunChat, type TurnMode } from "./run-chat.ts";
 import { listCommands, runTurn, type TurnControl, type TurnResult } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
 import { commonEfforts, modelOptions, mskillsPresent, palette, type ModelOption, type PaletteEntry } from "./skills.ts";
@@ -31,8 +31,10 @@ import type { Entry } from "./transcript.ts";
 import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, plural, processItem, sessionItem, startItems, stepItem, worktreeItem, type ItemView, type StepView } from "./view.ts";
 import {
   addWorktree,
+  changedFiles,
   currentBranch,
   listWorktrees,
+  mergeSteps,
   prepareReview,
   removalNote,
   removeWorktree,
@@ -791,7 +793,9 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     needsYou: ctx.needsYou,
     log,
     questions,
+    line: stations(chain),
     ...(place.past ? { past: place.past.entries } : {}),
+    ...(place.from?.resume ? { resumes: true } : {}),
   });
   Object.assign(state, { abort, chainId: chain.id, chat, open: { title, file: place.journalFile } });
   provider.update(place.past?.steps ?? []);
@@ -802,6 +806,7 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
   const emit = (raw: RunEvent) => {
     const event = { ...raw, index: raw.index + offset };
     void journal(event);
+    chat.stepped(event);
     if (event.type === "step-started") {
       provider.update([...provider.steps, { label: event.label, tier: event.tier, model: event.model, ...(event.effort ? { effort: event.effort } : {}), status: "running" }]);
       reveal(provider.steps[event.index]!);
@@ -905,7 +910,7 @@ async function reopen(file: string, ctx: RunContext): Promise<boolean> {
     void journal({ type: "log", line });
   };
   const title = `${run.chain} · ${run.story}`;
-  const chat = createRunChat({ title, post: ctx.postChat, record: (r) => void journal(r), moved: ctx.onRunChange, needsYou: ctx.needsYou, log, questions: run.questions, past: run.entries });
+  const chat = createRunChat({ title, post: ctx.postChat, record: (r) => void journal(r), moved: ctx.onRunChange, needsYou: ctx.needsYou, log, questions: run.questions, past: run.entries, ...(run.definition ? { line: stations(run.definition) } : {}) });
   Object.assign(state, { chat, chainId: undefined, open: { title, file: run.file } });
   provider.update(run.steps);
   const there = await exists(run.worktree);
@@ -1188,8 +1193,26 @@ class ChainsEditor {
       // The user runs it, if they choose to; coordiner only puts it on the clipboard.
       copyText: (text: string) => void vscode.env.clipboard.writeText(text),
       nextChain: () => void (after && startCommand(this, { kind: "after", here: after.here })),
+      mergeSteps: () => void (after && this.mergeSteps(after)),
     };
     if (!actOnChat(chat.talk, actions, message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);
+  }
+
+  // Read from git now, never from the page, and only for a worktree git still lists on its coordiner branch. Nothing here writes.
+  private async mergeSteps({ chat, here }: After): Promise<void> {
+    const { path, branch } = here.worktree;
+    const listed = await listWorktrees(here.worktree.root, exec);
+    if (!listed.ok) this.ctx.output.appendLine(listed.detail);
+    const line = listed.ok ? listed.worktrees.find((w) => w.path === path && w.branch === branch) : undefined;
+    if (!listed.ok || !line) {
+      const why = listed.ok ? `Git no longer lists ${plain(path)} as a worktree on ${plain(branch)}` : "Git could not list the worktrees";
+      chat.merge({ kind: "merge", branch: plain(branch), steps: [{ text: `${why}, so no commands are shown.` }] });
+      return;
+    }
+    const root = listed.main;
+    const [target, state, mainChanged] = await Promise.all([currentBranch(root, exec), worktreeState(root, line, exec), changedFiles(root, exec)]);
+    const named = target && target !== "HEAD" ? { target: plain(target) } : {};
+    chat.merge({ kind: "merge", branch: plain(branch), ...named, steps: mergeSteps({ root, path, branch, target, mainChanged, ...state }) });
   }
 
   // Built here from the worktree and the session id, never from the page.
@@ -1321,7 +1344,12 @@ async function removeLine({ line, root, head }: WorktreeRow, ctx: RunContext): P
         ...(state.changed > 0 ? [`${plural(state.changed, "uncommitted file", "uncommitted files")}`] : []),
         ...(state.ahead > 0 ? [`${plural(state.ahead, "commit", "commits")} not in ${plain(head ?? "HEAD")}`] : []),
       ].join(" and ");
-      if (!(await ask(`${name} still holds work.`, `${lost} will be deleted with it. Commit or copy anything you want to keep first.`, "Delete anyway"))) return;
+      // After a squash merge the branch's commits are not in HEAD, but everything they change is.
+      const merged = state.landed && state.changed === 0;
+      const asked = merged
+        ? await ask(`${name} has commits that are already merged.`, `${lost}, but their changes are already in ${plain(head ?? "HEAD")}, as after a squash merge, so nothing is lost.`, "Remove")
+        : await ask(`${name} still holds work.`, `${lost} will be deleted with it. Commit or copy anything you want to keep first.`, "Delete anyway");
+      if (!asked) return;
     }
     const result = await removeWorktree(root, line, { force: state.changed > 0 }, exec);
     if (!result.ok) {

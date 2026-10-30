@@ -25,7 +25,8 @@ export type EditorMessage =
   | { type: "chatCopyText"; text: string }
   // After the run: the clipboard text and the worktree are the extension's own, never taken from the page.
   | { type: "chatCopyResume" }
-  | { type: "chatNextChain" };
+  | { type: "chatNextChain" }
+  | { type: "chatMergeSteps" };
 
 export type EditorState = {
   type: "state";
@@ -53,7 +54,8 @@ export type EditorState = {
 // `cache` only while a card waits for the user: that is when the time it stays warm is the user's to spend. `ending` once the run
 // has ended: how it ended, with the reason a halt or failure gave. `turn` only while a card runs: how long, and its last activity.
 export type Ending = { status: Outcome["status"]; reason?: string };
-export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock; turn?: TurnClock; ending?: Ending };
+// `line`: the chain's card labels, by session, for the line of stations in the chat's head.
+export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock; turn?: TurnClock; ending?: Ending; line?: string[][] };
 export type ChatMessage =
   // Everything: on "ready", and when a run starts.
   | { type: "chat"; chat: ChatView; entries: Entry[] }
@@ -78,6 +80,7 @@ const KEYS: Record<EditorMessage["type"], readonly string[]> = {
   chatCopyText: ["text"],
   chatCopyResume: [],
   chatNextChain: [],
+  chatMergeSteps: [],
 };
 
 const MAX_QUESTIONS = 4;

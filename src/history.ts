@@ -1,9 +1,10 @@
 import { cardPrompt, isEffort, MAX_INPUT_CHARS, MODEL, parseChainShape, type Chain } from "./chains.ts";
 import type { Tier } from "./environment.ts";
 import type { JournaledEntry, LastTurn } from "./journal.ts";
+import type { Spend } from "./session.ts";
 import { continueAfter, fillInput, pickUpAfter, restateAfter, type At, type Outcome, type StartPoint, type StepStatus } from "./run.ts";
 import { clip, plain } from "./text.ts";
-import { endEntry, MAX_TOOL_INPUT, Transcript, type Entry } from "./transcript.ts";
+import { endEntry, MAX_TOOL_INPUT, Transcript, type Entry, type Worked } from "./transcript.ts";
 import type { Ending } from "./editor-protocol.ts";
 import type { DecidedAfter, QuestionWait } from "./unattended.ts";
 import type { StepView } from "./view.ts";
@@ -229,9 +230,30 @@ function entryOf(v: unknown): JournaledEntry | undefined {
       return Number.isInteger(v.session) && (v.session as number) > 0 ? { kind: "divider", session: v.session as number } : undefined;
     case "failed":
       return str(v.card, 1000) && str(v.error) ? { kind: "failed", card: plain(v.card), error: plain(v.error) } : undefined;
+    case "card-end": {
+      const worked = workedOf(v.worked);
+      if (!worked || !str(v.card, 1000) || !index(v.session) || !one(STEP_STATUSES, v.status) || !str(v.model) || !MODEL.test(v.model)) return undefined;
+      return { kind: "card-end", card: plain(v.card), session: v.session, status: v.status, model: v.model, ...effortOf(v), worked };
+    }
+    case "session-end": {
+      const worked = workedOf(v.worked);
+      return worked && index(v.session) ? { kind: "session-end", session: v.session, worked } : undefined;
+    }
     default:
       return undefined;
   }
+}
+
+const count = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+
+// A card's or a session's figures: every one a count, or the entry is dropped.
+function workedOf(v: unknown): Worked | undefined {
+  if (!isRecord(v) || !count(v.ms) || !index(v.turns)) return undefined;
+  if (v.usage === undefined) return { ms: v.ms, turns: v.turns };
+  const u = v.usage;
+  if (!isRecord(u) || ![u.costUsd, u.input, u.output, u.cacheRead, u.cacheWrite].every(count)) return undefined;
+  const usage = { costUsd: u.costUsd, input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite } as Spend;
+  return { ms: v.ms, turns: v.turns, usage, ...(v.partial === true ? { partial: true } : {}) };
 }
 
 // Only the fields the transcript and the list read; a session id or a stop position is not needed to show how a run ended.

@@ -1,8 +1,15 @@
 import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { MAX_ENTRIES } from "./chat-logic.ts";
-import type { Outcome } from "./run.ts";
+import type { Effort } from "./chains.ts";
+import type { Outcome, StepStatus } from "./run.ts";
+import type { Spend } from "./session.ts";
 import { clip, plain } from "./text.ts";
 import type { DecidedAfter } from "./unattended.ts";
+import type { MergeStep } from "./worktree.ts";
+
+// A card's or a session's work, summed over its turns: how long they ran, how many there were, and what they spent. No `usage` when
+// no turn reported it; `partial` when some did and some did not.
+export type Worked = { ms: number; turns: number; usage?: Spend; partial?: boolean };
 
 // What the run's chat shows. Model text reaches it only through plain(), and the webview sets it with textContent.
 export type Entry =
@@ -13,9 +20,14 @@ export type Entry =
   // A question answered with its Recommended option without the user.
   | { kind: "decided"; card: string; question: string; answer: string; after: DecidedAfter }
   | { kind: "divider"; session: number }
+  // A card handed over, inside its session or at its end, and a session handed over or ended with the run.
+  | { kind: "card-end"; card: string; session: number; status: StepStatus; model: string; effort?: Effort; worked: Worked }
+  | { kind: "session-end"; session: number; worked: Worked }
   | { kind: "end"; status: Outcome["status"]; reason?: string }
   // A turn of the chat after the run that failed; the chat stays open.
   | { kind: "failed"; card: string; error: string }
+  // What to run to land the worktree's work on the main checkout's branch, read from git when asked; not journaled, as it goes stale.
+  | { kind: "merge"; branch: string; target?: string; steps: MergeStep[] }
   | { kind: "dropped" };
 
 // A tool's input scrolls in a small box on the page, so it can be longer than one line has room for.

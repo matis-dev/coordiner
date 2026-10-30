@@ -3,10 +3,12 @@ import { canGoOnAlone, needsYou as waitsForUser, type CacheClock, type TurnClock
 import type { ChatMessage, ChatView, EditorMessage, Ending } from "./editor-protocol.ts";
 import type { JournaledEntry, JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
-import type { Outcome } from "./run.ts";
+import type { Chain, Effort } from "./chains.ts";
+import type { Outcome, RunEvent, StepStatus } from "./run.ts";
+import type { Spend } from "./session.ts";
 import { Talk, type TalkSnapshot } from "./talk.ts";
 import { plain } from "./text.ts";
-import { endEntry, entriesFrom, Transcript, type Entry } from "./transcript.ts";
+import { endEntry, entriesFrom, Transcript, type Entry, type Worked } from "./transcript.ts";
 import { interactiveCanUseTool, sleep as realSleep, unattendedCanUseTool, type DecidedAfter, type QuestionWait } from "./unattended.ts";
 
 // One run's chat, wired to the outside: the chains editor (through `post`), the journal, and the editor's attention. Kept out of
@@ -30,6 +32,10 @@ export type RunChatDeps = {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   // A reopened session's transcript, read back from its journal; shown first and not recorded again.
   past?: Entry[];
+  // The chain's card labels, by session; none when the chain is not known.
+  line?: string[][];
+  // The run picks up in a session it resumes, whose first totals already carry the turns before this run.
+  resumes?: boolean;
 };
 
 // A question the run answered with its Recommended option, without the user.
@@ -64,14 +70,42 @@ export type RunChat = {
   reopened(ending: Ending, after?: { card: string }): void;
   // A turn of the chat after the run failed.
   failed(card: string, error: string): void;
+  // The steps to land the worktree's work, as git reads now; not journaled.
+  merge(entry: Extract<Entry, { kind: "merge" }>): void;
   // The questions answered without the user so far, in order.
   decided(): Decision[];
+  // A step of the run started or finished: what the card's and the session's figures are made of.
+  stepped(event: RunEvent): void;
 };
 
-const JOURNALED = new Set<Entry["kind"]>(["assistant", "tool", "divider", "failed"]);
+const JOURNALED = new Set<Entry["kind"]>(["assistant", "tool", "divider", "card-end", "session-end", "failed"]);
 const isJournaled = (entry: Entry): entry is JournaledEntry => JOURNALED.has(entry.kind);
 
-export function createRunChat({ title, post, record, moved, needsYou, log, questions, now = Date.now, sleep = realSleep, past = [] }: RunChatDeps): RunChat {
+const SPEND_KEYS = ["costUsd", "input", "output", "cacheRead", "cacheWrite"] as const;
+
+// What a turn spent: the session's totals after it, less the totals before it. A total lower than before means the session started
+// counting again (a cleared or restarted conversation), so all of it is this turn's.
+export function spentSince(before: Spend | undefined, after: Spend): Spend {
+  if (!before || SPEND_KEYS.some((k) => after[k] < before[k])) return { ...after };
+  return { costUsd: after.costUsd - before.costUsd, input: after.input - before.input, output: after.output - before.output, cacheRead: after.cacheRead - before.cacheRead, cacheWrite: after.cacheWrite - before.cacheWrite };
+}
+
+const addSpend = (a: Spend | undefined, b: Spend): Spend => (a ? { costUsd: a.costUsd + b.costUsd, input: a.input + b.input, output: a.output + b.output, cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite } : { ...b });
+
+// One more turn of `ms`, which spent `spend` (none when its session did not say).
+function addTurn(worked: Worked, ms: number, spend: Spend | undefined): Worked {
+  const usage = spend ? addSpend(worked.usage, spend) : worked.usage;
+  // Some turns said what they spent and some did not.
+  const partial = worked.partial || (worked.turns > 0 && (worked.usage === undefined) !== (spend === undefined));
+  return { ms: worked.ms + ms, turns: worked.turns + 1, ...(usage ? { usage } : {}), ...(partial ? { partial: true } : {}) };
+}
+
+const NOTHING: Worked = { ms: 0, turns: 0 };
+
+// The chain's card labels by session: the line of stations the chat's head draws.
+export const stations = (chain: Pick<Chain, "sessions">): string[][] => chain.sessions.map((session) => session.cards.map((card) => plain(card.label)));
+
+export function createRunChat({ title, post, record, moved, needsYou, log, questions, now = Date.now, sleep = realSleep, past = [], line, resumes = false }: RunChatDeps): RunChat {
   const transcript = new Transcript();
   transcript.add(past);
   // What the user said and answered is recorded where it is handled, below; the rest of the transcript is recorded here.
@@ -85,9 +119,31 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
   let cache: CacheClock | undefined;
   let turn: TurnClock | undefined;
   let ending: Ending | undefined;
+  // The card being worked and its session, summed turn by turn, and the session's totals after its latest turn.
+  let card: { card?: string; model?: string; effort?: Effort; status?: StepStatus; worked: Worked } = { worked: NOTHING };
+  let session = { index: 0, worked: NOTHING };
+  let totals: Spend | undefined;
+  // Until a resumed session reports its totals, they are not this run's to count: the first ones only set where its count starts.
+  let baseUnknown = resumes;
+  // A question waits for the user inside its turn; that time is not working time, so it comes off the turn it was asked in.
+  let waited = 0;
+  let askedAt: number | undefined;
+  const cardDone = (): Entry[] => {
+    const { card: name, model, effort, status, worked } = card;
+    card = { worked: NOTHING };
+    return name && model && status && worked.turns > 0 ? [{ kind: "card-end", card: name, session: session.index, status, model, ...(effort ? { effort } : {}), worked }] : [];
+  };
+  const sessionDone = (next: number): Entry[] => {
+    const { index, worked } = session;
+    session = { index: next, worked: NOTHING };
+    totals = undefined;
+    baseUnknown = false;
+    return worked.turns > 0 ? [{ kind: "session-end", session: index, worked }] : [];
+  };
   const viewOf = (snapshot: TalkSnapshot): ChatView => ({
     ...snapshot,
     title,
+    ...(line ? { line } : {}),
     ...(snapshot.phase === "waiting" && cache ? { cache } : {}),
     ...(snapshot.phase === "running" && turn ? { turn } : {}),
     ...(ending ? { ending } : {}),
@@ -102,7 +158,15 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
         if (before?.phase !== "running" || snapshot.card !== before.card || snapshot.index !== before.index || snapshot.session !== before.session) turn = { since: at, lastAt: at };
         else if (before.question && !snapshot.question) turn = { ...turn!, lastAt: at };
       }
-      if (snapshot.session !== undefined && snapshot.session !== (before?.session ?? 0)) add([{ kind: "divider", session: snapshot.session }]);
+      if (askedAt !== undefined && snapshot.question?.id !== before?.question?.id) {
+        waited += Math.max(0, now() - askedAt);
+        askedAt = undefined;
+      }
+      if (snapshot.question && snapshot.question.id !== before?.question?.id) askedAt = now();
+      // A card that hands over closes its figures before anything of the card after it, and a session's close before the divider.
+      const newSession = snapshot.session !== undefined && snapshot.session !== (before?.session ?? 0);
+      const newCard = newSession || (before?.index !== undefined && snapshot.index !== before.index);
+      add([...(newCard ? cardDone() : []), ...(newSession ? [...sessionDone(snapshot.session!), { kind: "divider" as const, session: snapshot.session! }] : [])]);
       post({ type: "chatUpdate", chat: viewOf(snapshot) });
       const waiting = waitsForUser(snapshot) !== (before !== undefined && waitsForUser(before));
       // Whether the computer may sleep can change without the user being waited for: a turn of the chat after the run.
@@ -152,7 +216,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
     }),
     ended: (outcome, after) => {
       const entry = endEntry(outcome);
-      add([entry]);
+      add([...cardDone(), ...sessionDone(session.index), entry]);
       const { kind: _end, ...how } = entry;
       ending = how;
       talk.end(after ? { after } : {});
@@ -162,7 +226,27 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
       talk.end(after ? { after } : {});
     },
     failed: (card, error) => add([{ kind: "failed", card, error: plain(error) }]),
+    merge: (entry) => add([entry]),
     decided: () => decisions.map((d) => ({ ...d })),
+    stepped: (event) => {
+      if (event.type === "step-started") {
+        card = { ...card, card: card.card ?? talk.snapshot().card, model: event.model, ...(event.effort ? { effort: event.effort } : {}) };
+        return;
+      }
+      const { usage } = event.stats;
+      // A question still open when the turn ends (a stopped turn) waited until now.
+      const open = askedAt !== undefined ? now() - askedAt : 0;
+      const ms = Math.max(0, event.stats.ms - waited - open);
+      waited = 0;
+      if (askedAt !== undefined) askedAt = now();
+      const spend = usage && !baseUnknown ? spentSince(totals, usage) : undefined;
+      if (usage) {
+        totals = usage;
+        baseUnknown = false;
+      }
+      card = { ...card, status: event.status, worked: addTurn(card.worked, ms, spend) };
+      session = { ...session, worked: addTurn(session.worked, ms, spend) };
+    },
   };
 }
 
@@ -171,10 +255,10 @@ const NOTES: Record<TurnMode, string> = { unattended: UNATTENDED_NOTE, interacti
 export type ChatAction = Extract<EditorMessage, { type: `chat${string}` }>;
 
 // What the extension does for the chat: stop the run (or end the chat after it), and the actions once the run has ended.
-export type ChatActions = { stop(): void; copyResume(): void; nextChain(): void; copyText(text: string): void };
+export type ChatActions = { stop(): void; copyResume(): void; nextChain(): void; copyText(text: string): void; mergeSteps(): void };
 
 // Acts on a message from the chat. False when the run's chat refused it (a stale question, an empty message); Talk decides.
-export function actOnChat(talk: Talk, { stop, copyResume, nextChain, copyText }: ChatActions, message: ChatAction): boolean {
+export function actOnChat(talk: Talk, { stop, copyResume, nextChain, copyText, mergeSteps }: ChatActions, message: ChatAction): boolean {
   switch (message.type) {
     case "chatSend":
       return talk.send(message.text);
@@ -200,6 +284,9 @@ export function actOnChat(talk: Talk, { stop, copyResume, nextChain, copyText }:
       return true;
     case "chatNextChain":
       nextChain();
+      return true;
+    case "chatMergeSteps":
+      mergeSteps();
       return true;
   }
 }

@@ -1,4 +1,5 @@
 /* structure: master-detail, full-height rail, the run's chat docked under the detail column · palette: VS Code theme, anchor textLink (focusBorder is near-invisible in some themes), accent owns Run · type: host UI font, sidebar-style section labels, host editor font for skill names · signature: the fresh-context divider between sessions · critique P4 H4 E4 S5 R4 V4 */
+/* run chat (2026-10-30): head = one status row (title, chip with the card and its clock, last activity) + the line of sessions as stations · transcript grouped by session under folding headings · signature: each session's figures written on the dashed rule it hands over on · critique P4 H4 E4 S4 R4 V4 */
 
 :root {
   --gap: 8px;
@@ -472,7 +473,38 @@ textarea {
 @keyframes pulse { 50% { opacity: 0.25; } }
 
 .chat-status { margin: 4px 0; color: var(--vscode-descriptionForeground); }
-.chat-cache, .chat-busy { margin: 0 0 4px; font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+.chat-cache { margin: 0 0 4px; font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+.chat-busy { font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+.run-chip { font-variant-numeric: tabular-nums; }
+
+/* The line: the chain's sessions as stations, one row that scrolls sideways rather than wrap. Between two sessions, the fresh-context
+   rule in miniature. Room around the buttons, so a focus ring is never cut off by the scroll box. */
+.chat-line { overflow-x: auto; margin: 2px 0 0; }
+.chat-line ol { display: flex; align-items: center; gap: var(--gap); list-style: none; margin: 0; padding: 4px; }
+.chat-line li { flex: none; display: flex; align-items: center; gap: var(--gap); }
+.chat-line li + li::before { content: ""; width: 16px; border-top: 2px dashed var(--anchor); }
+
+.station {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 1px 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
+.station:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+.station[aria-disabled="true"] { opacity: 1; cursor: default; }
+.station[aria-disabled="true"]:hover { background: transparent; }
+.station-n { font-weight: 600; color: var(--anchor); }
+.station-card { font-family: var(--vscode-editor-font-family); font-size: 0.9em; }
+.station-card.done { color: var(--vscode-foreground); }
+/* The live card: the one strong mark on the line, in the anchor colour and outlined, besides its ● and its name. */
+.station-card.live { color: var(--anchor); font-weight: 600; padding: 0 6px; border: 1px solid currentColor; border-radius: 999px; }
+.station-card.stopped { color: var(--vscode-foreground); font-weight: 600; }
 
 #transcript, .queued {
   list-style: none;
@@ -597,6 +629,10 @@ textarea {
 .copy-code svg { fill: none; stroke: currentColor; stroke-width: 1.2; }
 .copy-code:hover { background: var(--vscode-toolbar-hoverBackground, transparent); }
 .entry .code:hover .copy-code, .copy-code:focus-visible { opacity: 1; }
+/* A message's own Copy sits in its corner; the padding keeps it off the text. */
+.entry.has-copy { position: relative; padding-right: 28px; }
+.entry.has-copy:hover > .copy-code { opacity: 1; }
+.entry.merge .steps { margin: 2px 0 0; padding-left: 1.5em; }
 /* No hover on a touch screen, so the icon stays. */
 @media (hover: none) { .copy-code { opacity: 1; } }
 
@@ -607,7 +643,77 @@ textarea {
   border-left: 2px solid var(--anchor);
 }
 
+/* A session in the transcript: its heading, a button that folds the entries under it, carries its number and its cards. */
+#transcript > li.session { margin: 0; }
+.session-entries { list-style: none; margin: 0; padding: 0; }
+
+.session-h { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap); margin: var(--gap) 0; font-size: 1em; }
+#transcript > li.session:first-of-type .session-h { margin-top: 0; }
+
+.session-toggle {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  gap: var(--gap);
+  min-height: 24px;
+  padding: 1px 4px 1px 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--anchor);
+  text-align: left;
+}
+
+.session-toggle:hover { background: var(--vscode-toolbar-hoverBackground, transparent); }
+.session-name { font-size: 0.85em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+.chevron { width: 1em; text-align: center; }
+.chevron::before { content: "▾"; }
+.session-toggle[aria-expanded="false"] .chevron::before { content: "▸"; }
+
+.pills { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+
+/* A skill's name as a pill: in the session heading, and as the speaker of each reply. */
+.pill, .entry.assistant .who {
+  display: inline-block;
+  padding: 0 7px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--vscode-descriptionForeground);
+}
+
+.pill.live { color: var(--anchor); border-color: currentColor; font-weight: 600; }
+.pill.done, .pill.stopped { color: var(--vscode-foreground); }
+
 #transcript .handover { margin: var(--gap) 0; }
+
+/* A card handing over: its figures on a quiet solid rule. */
+#transcript .card-end {
+  display: flex;
+  gap: 6px;
+  margin: var(--gap) 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+#transcript .card-end .glyph { flex: none; color: var(--vscode-foreground); }
+
+/* The signature: a session handing over, its figures written on the dashed rule. */
+#transcript .session-end {
+  margin: var(--gap-l) 0 var(--gap);
+  padding-bottom: 4px;
+  border-bottom: 2px dashed var(--anchor);
+  color: var(--anchor);
+  font-size: 0.9em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 
 .queued li {
   padding: 4px var(--gap);

@@ -47,6 +47,33 @@ describe("parseJournal", () => {
     assert.equal(run.userOnly, false);
   });
 
+  it("reads back what each card and session worked and spent, and drops one whose figures are not counts", () => {
+    const usage = { costUsd: 0.4, input: 300, output: 20, cacheRead: 250, cacheWrite: 10 };
+    const card = { kind: "card-end", card: "Pl\u001ban", session: 0, status: "done", model: "model-a", effort: "high", worked: { ms: 1500, turns: 2, usage, partial: true } };
+    const bad = [
+      { ...card, worked: { ms: -1, turns: 1 } },
+      { ...card, worked: { ms: 1, turns: 1.5 } },
+      { ...card, worked: { ms: 1, turns: 1, usage: { ...usage, input: Number.NaN } } },
+      { ...card, worked: { ms: 1, turns: 1, usage: "lots" } },
+      { ...card, worked: undefined },
+      { ...card, status: "won" },
+      { ...card, model: "bad model" },
+      { ...card, session: -1 },
+      { kind: "session-end", session: 0, worked: { ms: 1 } },
+    ];
+    const run = parse(
+      { type: "entry", entry: card },
+      { type: "entry", entry: { ...card, effort: "loud", worked: { ms: 5, turns: 1, partial: true } } },
+      ...bad.map((entry) => ({ type: "entry", entry })),
+      { type: "entry", entry: { kind: "session-end", session: 0, worked: { ms: 1500, turns: 2, usage } } },
+    );
+    assert.deepEqual(run.entries.slice(0, -1), [
+      { kind: "card-end", card: "Plan", session: 0, status: "done", model: "model-a", effort: "high", worked: { ms: 1500, turns: 2, usage, partial: true } },
+      { kind: "card-end", card: "Plan", session: 0, status: "done", model: "model-a", worked: { ms: 5, turns: 1 } },
+      { kind: "session-end", session: 0, worked: { ms: 1500, turns: 2, usage } },
+    ]);
+  });
+
   it("reads each kind of outcome, keeping only what the transcript and the list show", () => {
     const outcomes = [
       { status: "no-changes" },

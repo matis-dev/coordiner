@@ -31,6 +31,8 @@ function harness(script: Array<TurnResult | ((talk: Talk) => TurnResult)>, signa
     models,
     emit: (event) => void events.push(event),
     signal,
+    // Every reading is a second on from the one before, so each turn runs a second.
+    now: ((t) => () => (t += 1000))(0),
     talk: {
       at: (where) => talk.at(where),
       takeQueued: (card) => talk.takeQueued(card),
@@ -61,9 +63,9 @@ describe("runSession: session one", () => {
     assert.equal(requests[1]!.prompt, "/m-skills:implementing-architect Implement the approved plan above.");
     assert.deepEqual(events, [
       { type: "step-started", index: 0, label: "Plan", tier: "strong", model: "m-strong", position: { session: 0, card: 0 } },
-      { type: "step-finished", index: 0, status: "done", detail: "next: Light", sessionId: "sess-1" },
+      { type: "step-finished", index: 0, status: "done", detail: "next: Light", sessionId: "sess-1", stats: { ms: 1000 } },
       { type: "step-started", index: 1, label: "Implement", tier: "weak", model: "m-weak", position: { session: 0, card: 1 } },
-      { type: "step-finished", index: 1, status: "done", detail: "done", sessionId: "sess-2" },
+      { type: "step-finished", index: 1, status: "done", detail: "done", sessionId: "sess-2", stats: { ms: 1000 } },
     ]);
   });
 
@@ -78,7 +80,7 @@ describe("runSession: session one", () => {
   it("stops on HALT with its reason and keeps the session id for take-over", async () => {
     const { deps, events } = harness([reply("COORDINER: NEXT Light", 1), reply("COORDINER: HALT needs a migration decision", 2)]);
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "halted", reason: "needs a migration decision", sessionId: "sess-2" });
-    assert.deepEqual(events.at(-1), { type: "step-finished", index: 1, status: "halted", detail: "needs a migration decision", sessionId: "sess-2" });
+    assert.deepEqual(events.at(-1), { type: "step-finished", index: 1, status: "halted", detail: "needs a migration decision", sessionId: "sess-2", stats: { ms: 1000 } });
   });
 
   it("reminds once on the same model when the status line is missing, then continues", async () => {
@@ -106,7 +108,7 @@ describe("runSession: session one", () => {
   it("stops on a failed turn and keeps the session id for take-over", async () => {
     const { deps, events } = harness([reply("COORDINER: NEXT Light", 1), { ok: false, sessionId: "sess-1", error: "the session ended with error_max_turns." }]);
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "failed", error: "the session ended with error_max_turns.", sessionId: "sess-1" });
-    assert.deepEqual(events.at(-1), { type: "step-finished", index: 1, status: "failed", detail: "the session ended with error_max_turns.", sessionId: "sess-1" });
+    assert.deepEqual(events.at(-1), { type: "step-finished", index: 1, status: "failed", detail: "the session ended with error_max_turns.", sessionId: "sess-1", stats: { ms: 1000 } });
   });
 
   it("reports a failed turn that has no session id", async () => {
@@ -118,7 +120,20 @@ describe("runSession: session one", () => {
     const stop = new AbortController();
     const { deps, events } = harness([() => (stop.abort(), { ok: false, error: "aborted" })], stop.signal);
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "stopped" });
-    assert.deepEqual(events.at(-1), { type: "step-finished", index: 0, status: "stopped", detail: "stopped" });
+    assert.deepEqual(events.at(-1), { type: "step-finished", index: 0, status: "stopped", detail: "stopped", stats: { ms: 1000 } });
+  });
+
+  it("carries the session's totals with the turn, and times a turn with the real clock when none is given", async () => {
+    const usage = { costUsd: 0.2, input: 10, output: 2, cacheRead: 5, cacheWrite: 1 };
+    const { deps, events } = harness([{ ...reply("COORDINER: DONE", 1), usage }]);
+    await runSession({ ...AUTHOR_SESSION, cards: [AUTHOR_SESSION.cards[0]!] }, deps);
+    const first = events.at(-1)!;
+    assert.deepEqual(first.type === "step-finished" && first.stats, { ms: 1000, usage });
+    const timed = harness([reply("COORDINER: DONE", 1)]);
+    delete timed.deps.now;
+    await runSession({ ...AUTHOR_SESSION, cards: [AUTHOR_SESSION.cards[0]!] }, timed.deps);
+    const last = timed.events.at(-1)!;
+    assert.ok(last.type === "step-finished" && last.stats.ms >= 0);
   });
 
   it("starts no turn when already aborted", async () => {

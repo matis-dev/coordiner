@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import { announcement, busyLabel, canGoOnAlone, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
+import { announcement, busyMeta, canGoOnAlone, canMerge, cardEndLine, chipLabel, lineOf, sessionEndLine, tokens, workedLine, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -62,6 +62,14 @@ describe("what the chat allows", () => {
     assert.equal(canPause(view({ phase: "waiting" })), false);
   });
 
+  it("offers the merge steps only in the chat after a run that is done", () => {
+    const after = view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "done" } });
+    assert.equal(canMerge(after), true);
+    for (const status of ["no-changes", "halted", "failed", "stopped", "refused"] as const) assert.equal(canMerge({ ...after, ending: { status } }), false);
+    assert.equal(canMerge({ ...after, ending: undefined }), false);
+    assert.equal(canMerge({ ...after, afterRun: undefined }), false);
+  });
+
   it("sends to the chat after the run, and never pauses it", () => {
     const after = view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true });
     assert.equal(canSend(after), true);
@@ -82,7 +90,7 @@ describe("the end of the run", () => {
     const after = view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "halted", reason: "needs you" } });
     assert.equal(statusLine(after), "The run halted: needs you. You can keep talking to Kickoff.");
     assert.equal(statusLine({ ...after, ending: undefined }), "The run has ended. You can keep talking to Kickoff.");
-    assert.equal(statusLine({ ...after, phase: "running" }), "Kickoff is working on your message…");
+    assert.equal(statusLine({ ...after, phase: "running" }), "", "the chip says it");
     assert.equal(statusLine(view({ phase: "ended", ending: { status: "done" } })), "The run is done.");
   });
 
@@ -98,8 +106,7 @@ describe("the end of the run", () => {
 describe("chat labels", () => {
   it("says what the run is doing in text", () => {
     assert.match(statusLine(view({ phase: "idle" })), /No run yet/);
-    assert.equal(statusLine(view()), "Implement is working…");
-    assert.equal(statusLine(view({ card: "Brainstorm", attended: true })), "Brainstorm is working on your message…");
+    assert.equal(statusLine(view()), "", "a running card is in the chip, with its clock");
     assert.equal(statusLine(view({ phase: "waiting", card: "Brainstorm" })), "Brainstorm is waiting for you.");
     assert.match(statusLine(view({ phase: "waiting", card: "Brainstorm", continueReady: true })), /Continue moves the chain on/);
     assert.equal(statusLine(view({ phase: "ended" })), "The run has ended.");
@@ -161,17 +168,73 @@ describe("entriesAnnouncement", () => {
   });
 });
 
-describe("busyLabel", () => {
-  it("counts whole seconds up since the turn started and since its last activity, with the last tool", () => {
-    assert.equal(busyLabel({ since: 1000, lastAt: 150_000, last: "Bash" }, 192_900), "Working 3:11 · last activity 0:42 ago · Bash");
+describe("busyMeta and chipLabel", () => {
+  it("counts whole seconds since the last activity, with the last tool", () => {
+    assert.equal(busyMeta({ since: 1000, lastAt: 150_000, last: "Bash" }, 192_900), "last activity 0:42 ago · Bash");
   });
 
-  it("names no tool before one was called, and shows hours from one hour on", () => {
-    assert.equal(busyLabel({ since: 0, lastAt: 0 }, 3_600_000), "Working 1:00:00 · last activity 1:00:00 ago");
+  it("names no tool before one was called, shows hours from one hour on, and reads a clock that moved back as no time", () => {
+    assert.equal(busyMeta({ since: 0, lastAt: 0 }, 3_600_000), "last activity 1:00:00 ago");
+    assert.equal(busyMeta({ since: 5000, lastAt: 5000 }, 1000), "last activity 0:00 ago");
   });
 
-  it("reads a clock that moved back as no time at all", () => {
-    assert.equal(busyLabel({ since: 5000, lastAt: 5000 }, 1000), "Working 0:00 · last activity 0:00 ago");
+  it("puts the working card and its turn's clock in the chip, and what the run waits for otherwise", () => {
+    assert.equal(chipLabel(view({ turn: { since: 1000, lastAt: 1000 } }), 192_900), "Implement · 3:11");
+    assert.equal(chipLabel(view(), 0), "Implement", "no clock before the turn's first tick");
+    assert.equal(chipLabel(view({ card: undefined }), 0), "Working");
+    assert.equal(chipLabel(view({ phase: "waiting" }), 0), "Waiting for you");
+    assert.equal(chipLabel(view({ phase: "ended" }), 0), undefined);
+  });
+});
+
+describe("lineOf", () => {
+  const line = [["Plan", "Review"], ["Fix", "History"]];
+  const states = (chat: ChatView) => lineOf(chat).map((s) => s.cards.map((c) => c.state));
+
+  it("marks cards before the run's card done, its card live, and those after it to come", () => {
+    assert.deepEqual(states(view({ line, session: 1, index: 0 })), [["done", "done"], ["live", "todo"]]);
+    assert.deepEqual(states(view({ line, phase: "waiting", session: 0, index: 1 })), [["done", "live"], ["todo", "todo"]]);
+    assert.deepEqual(lineOf(view({ line, session: 0, index: 0 }))[1], { session: 1, cards: [{ label: "Fix", state: "todo" }, { label: "History", state: "todo" }] });
+  });
+
+  it("marks every card done when the run is done, and the card a run that did not finish ended on as stopped", () => {
+    assert.deepEqual(states(view({ line, phase: "waiting", afterRun: true, session: 1, index: 1, ending: { status: "done" } })), [["done", "done"], ["done", "done"]]);
+    assert.deepEqual(states(view({ line, phase: "ended", session: 0, index: 1, ending: { status: "halted" } })), [["done", "stopped"], ["todo", "todo"]]);
+    assert.deepEqual(states(view({ line, phase: "ended", ending: { status: "stopped" } })), [["todo", "todo"], ["todo", "todo"]], "a reopened session's card is not known");
+  });
+
+  it("draws nothing before a run or when the chain is not known", () => {
+    assert.deepEqual(lineOf(view({ line, phase: "idle" })), []);
+    assert.deepEqual(lineOf(view()), []);
+  });
+});
+
+describe("the figures on a closing rule", () => {
+  const usage = { costUsd: 0.4123, input: 2000, output: 9800, cacheRead: 171_000, cacheWrite: 39_000 };
+
+  it("counts tokens the way a person reads them", () => {
+    assert.deepEqual([0, 950, 1000, 9849, 212_400, 999_499, 999_500, 1_430_000, 12_000_000].map(tokens), ["0", "950", "1k", "9.8k", "212k", "999k", "1M", "1.4M", "12M"]);
+  });
+
+  it("gives time, turns, tokens in with the cached share and out, and the API-price cost", () => {
+    assert.equal(workedLine({ ms: 842_000, turns: 6, usage }), "14:02 working · 6 turns · 212k in (81% cached) / 9.8k out · ≈ $0.41 API price");
+    assert.equal(workedLine({ ms: 999, turns: 1, usage: { ...usage, costUsd: 0.004 }, partial: true }), "0:00 working · 1 turn · 212k in (81% cached) / 9.8k out · under $0.01 API price, some turns not reported");
+    assert.equal(workedLine({ ms: 0, turns: 1, usage: { costUsd: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }), "0:00 working · 1 turn · 0 in / 0 out · under $0.01 API price");
+    assert.equal(workedLine({ ms: 61_000, turns: 2 }), "1:01 working · 2 turns · tokens not reported");
+  });
+
+  it("says a card's status in words beside its mark, with its model and effort", () => {
+    const worked = { ms: 1000, turns: 1 };
+    const card = { kind: "card-end" as const, card: "Plan", session: 0, status: "done" as const, model: "claude-opus-5-5", effort: "high" as const, worked };
+    assert.deepEqual(cardEndLine(card), { glyph: "✓", text: "Plan done · 0:01 working · 1 turn · tokens not reported · claude-opus-5-5 · high effort" });
+    const { effort: _e, ...plain } = card;
+    assert.deepEqual(cardEndLine({ ...plain, status: "halted" }), { glyph: "✕", text: "Plan halted · 0:01 working · 1 turn · tokens not reported · claude-opus-5-5" });
+    assert.deepEqual(["failed", "stopped"].map((status) => cardEndLine({ ...card, status: status as "failed" }).glyph), ["✕", "■"]);
+    assert.equal(sessionEndLine({ kind: "session-end", session: 0, worked }), "Session 1 · 0:01 working · 1 turn · tokens not reported");
+  });
+
+  it("announces a session that finished by its number", () => {
+    assert.equal(entriesAnnouncement([{ kind: "card-end", card: "Plan", session: 1, status: "done", model: "m", worked: { ms: 0, turns: 1 } }, { kind: "session-end", session: 1, worked: { ms: 0, turns: 1 } }, { kind: "divider", session: 2 }]), "Session 2 finished");
   });
 });
 

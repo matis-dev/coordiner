@@ -35,7 +35,7 @@ describe("parseEditorMessage", () => {
   });
 
   it("accepts the chat's messages with exactly their fields", () => {
-    for (const type of ["chatPause", "chatContinue", "chatStop", "chatCopyResume", "chatNextChain"]) assert.deepEqual(parseEditorMessage({ type }), { type });
+    for (const type of ["chatPause", "chatContinue", "chatStop", "chatCopyResume", "chatNextChain", "chatMergeSteps"]) assert.deepEqual(parseEditorMessage({ type }), { type });
     assert.deepEqual(parseEditorMessage({ type: "chatSend", text: "keep it small" }), { type: "chatSend", text: "keep it small" });
     assert.deepEqual(parseEditorMessage({ type: "chatWithdraw", id: "m3" }), { type: "chatWithdraw", id: "m3" });
     const picks = [{ picked: ["SQLite"] }, { picked: [], other: "Postgres" }];
@@ -50,6 +50,7 @@ describe("parseEditorMessage", () => {
     assert.equal(parseEditorMessage({ type: "chatPause", card: "Implement" }), undefined);
     assert.equal(parseEditorMessage({ type: "chatCopyResume", command: "rm -rf ~" }), undefined);
     assert.equal(parseEditorMessage({ type: "chatNextChain", worktree: "/tmp" }), undefined);
+    assert.equal(parseEditorMessage({ type: "chatMergeSteps", target: "main" }), undefined);
     assert.equal(parseEditorMessage({ type: "chatWithdraw", id: "M 3" }), undefined);
   });
 

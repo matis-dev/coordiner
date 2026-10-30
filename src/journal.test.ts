@@ -29,10 +29,10 @@ describe("createJournal", () => {
   it("writes one JSON line per record, stamped by the clock", async () => {
     const lines: string[] = [];
     const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);
-    await journal({ type: "step-finished", index: 2, status: "done", detail: "next: Light", sessionId: "s-1" });
+    await journal({ type: "step-finished", index: 2, status: "done", detail: "next: Light", sessionId: "s-1", stats: { ms: 5 } });
     assert.equal(lines.length, 1);
     assert.ok(lines[0]!.endsWith("\n"));
-    assert.deepEqual(JSON.parse(lines[0]!), { at: "2026-10-10T19:51:03.123Z", type: "step-finished", index: 2, status: "done", detail: "next: Light", sessionId: "s-1" });
+    assert.deepEqual(JSON.parse(lines[0]!), { at: "2026-10-10T19:51:03.123Z", type: "step-finished", index: 2, status: "done", detail: "next: Light", sessionId: "s-1", stats: { ms: 5 } });
   });
 
   it("records the chain a run started from and where a continued run picked up", async () => {

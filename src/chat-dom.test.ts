@@ -53,7 +53,8 @@ async function open(stored?: Record<string, unknown>) {
     input: () => doc.getElementById("chat-input") as HTMLTextAreaElement,
     status: () => doc.getElementById("status")!.textContent,
     line: () => doc.querySelector(".chat-status")!.textContent,
-    entries: () => [...doc.querySelectorAll<HTMLElement>("#transcript > li")],
+    // The entries in order across the session groups, with the dropped note at the top.
+    entries: () => [...doc.querySelectorAll<HTMLElement>("#transcript > li[data-dropped], #transcript .session-entries > li")],
     reset: (chat: ChatView, entries: Entry[] = []) => post({ type: "chat", chat, entries }),
     update: (chat: ChatView) => post({ type: "chatUpdate", chat }),
     append: (entries: Entry[]) => post({ type: "chatAppend", entries }),
@@ -107,7 +108,7 @@ describe("run chat: before and during a run", () => {
     assert.deepEqual(shown(), { composer: false, transcript: false, actions: false, splitter: false, chip: false, line: true });
     assert.equal(page.chat().style.height, "");
     page.reset(view());
-    assert.deepEqual(shown(), { composer: true, transcript: true, actions: true, splitter: true, chip: true, line: true });
+    assert.deepEqual(shown(), { composer: true, transcript: true, actions: true, splitter: true, chip: true, line: false }, "a working card is in the chip, not the status line");
     assert.equal(page.chat().style.height, "60vh");
   });
 
@@ -130,7 +131,7 @@ describe("run chat: before and during a run", () => {
       { kind: "divider", session: 1 },
     ]);
     assert.equal(page.doc.getElementById("chat-h")!.textContent, "Run: Story · login");
-    assert.equal(page.line(), "Implement is working…");
+    assert.equal(page.line(), "");
     assert.deepEqual(
       page.entries().map((li) => li.textContent),
       [
@@ -139,9 +140,9 @@ describe("run chat: before and during a run", () => {
         "Plan used Reada.ts",
         "You to Implementkeep it small",
         "You answered BrainstormWhich store? → SQLite",
-        "fresh context: session 2",
       ],
     );
+    assert.deepEqual([...page.doc.querySelectorAll("#transcript .session-name")].map((h) => h.textContent), ["Session 1", "Session 2 · fresh context"]);
     assert.equal(page.status(), "");
   });
 
@@ -696,10 +697,12 @@ describe("run chat: a running turn", () => {
     mock.timers.enable({ apis: ["setInterval", "Date"], now: 75_000 });
     page.update(view({ turn: { since: 0, lastAt: 60_000, last: "Bash" } }));
     assert.equal(busyLine(page).hidden, false);
-    assert.equal(busyLine(page).textContent, "Working 1:15 · last activity 0:15 ago · Bash");
+    const chip = page.doc.querySelector(".chat-title .run-chip")!;
+    assert.equal(busyLine(page).parentElement, page.doc.querySelector(".chat-title"), "on the title's row");
+    assert.deepEqual([chip.textContent, busyLine(page).textContent], ["Implement · 1:15", "last activity 0:15 ago · Bash"]);
     assert.equal(busyLine(page).getAttribute("role"), null);
     mock.timers.tick(1000);
-    assert.equal(busyLine(page).textContent, "Working 1:16 · last activity 0:16 ago · Bash");
+    assert.deepEqual([chip.textContent, busyLine(page).textContent], ["Implement · 1:16", "last activity 0:16 ago · Bash"]);
   });
 
   it("shows nothing while a card waits, and its timer stops with the turn", async () => {
@@ -757,7 +760,7 @@ describe("run chat: the chip by the title", () => {
     const page = await open();
     const chip = () => page.doc.querySelector<HTMLElement>(".chat-title .run-chip")!;
     page.reset(view());
-    assert.deepEqual([chip().hidden, chip().textContent, chip().classList.contains("working")], [false, "Working", true]);
+    assert.deepEqual([chip().hidden, chip().textContent, chip().classList.contains("working")], [false, "Implement", true]);
     page.update(view({ phase: "waiting" }));
     assert.deepEqual([chip().textContent, chip().classList.contains("needs")], ["Waiting for you", true]);
     page.update(view({ question }));
@@ -772,6 +775,122 @@ describe("run chat: the chip by the title", () => {
     page.button("Hide chat").click();
     assert.equal(page.doc.getElementById("chat-body")!.hidden, true);
     assert.equal(page.doc.querySelector<HTMLElement>(".chat-title .run-chip")!.hidden, false);
+  });
+});
+
+describe("run chat: the line of sessions and the session headings", () => {
+  const line = [["Plan", "Review"], ["Fix"]];
+  const stations = (page: Awaited<ReturnType<typeof open>>) => [...page.doc.querySelectorAll<HTMLButtonElement>(".chat-line .station")];
+  const heading = (page: Awaited<ReturnType<typeof open>>, n: number) => page.doc.querySelectorAll<HTMLButtonElement>("#transcript .session-toggle")[n]!;
+  const worked = { ms: 61_000, turns: 2, usage: { costUsd: 0.5, input: 1000, output: 200, cacheRead: 3000, cacheWrite: 0 } };
+
+  it("puts the title, the chip and the turn's last activity on one row, and the line under it, outside the body", async () => {
+    const page = await open();
+    page.reset(view({ line }));
+    const title = page.doc.querySelector(".chat-title")!;
+    assert.deepEqual([...title.children].map((c) => c.className || c.tagName), ["H2", "run-chip working", "chat-busy"]);
+    const nav = page.doc.querySelector<HTMLElement>(".chat-line")!;
+    assert.equal(nav.previousElementSibling, page.doc.querySelector(".chat-head"));
+    assert.equal(nav.getAttribute("aria-label"), "Sessions");
+    assert.equal(nav.hidden, false);
+  });
+
+  it("draws the line once the run starts when the chat first came idle with the chain, as a run's chat does", async () => {
+    const page = await open();
+    page.reset(view({ phase: "idle", line }));
+    assert.equal(page.doc.querySelector<HTMLElement>(".chat-line")!.hidden, true);
+    page.update(view({ line, index: 0 }));
+    assert.deepEqual(stations(page).map((s) => s.getAttribute("aria-label")), ["Session 1: Plan (running), Review", "Session 2: Fix"]);
+    assert.equal(page.input().labels?.[0]?.textContent, "Message to Implement", "the rest of the chat still updates");
+  });
+
+  it("names each session's cards with their state in words, marks the live one, and keeps its buttons through updates", async () => {
+    const page = await open();
+    page.reset(view({ line, index: 1 }), [{ kind: "assistant", card: "Plan", text: "x" }]);
+    const [first, second] = stations(page);
+    assert.equal(first!.getAttribute("aria-label"), "Session 1: Plan (done), Review (running)");
+    assert.equal(first!.getAttribute("aria-current"), "step");
+    assert.equal(first!.textContent, "1✓ Plan›● Review");
+    assert.equal(second!.getAttribute("aria-label"), "Session 2: Fix");
+    assert.equal(second!.getAttribute("aria-disabled"), "true", "a session that has not started has nothing to go to");
+    const focused = page.doc.activeElement;
+    second!.click();
+    assert.equal(page.doc.activeElement, focused, "choosing it moves nothing");
+    page.update(view({ line, session: 1, index: 0 }));
+    assert.equal(stations(page)[0], first, "the same button, so focus on it survives");
+    assert.equal(first!.hasAttribute("aria-current"), false);
+    assert.equal(second!.getAttribute("aria-current"), "step");
+    page.update(view({ line: [["Plan"]] }));
+    assert.notEqual(stations(page)[0], first, "a new chain shape is drawn again");
+    page.update(view());
+    assert.equal(page.doc.querySelector<HTMLElement>(".chat-line")!.hidden, true, "no line when the chain is not known");
+  });
+
+  it("goes to a session from the line: opens a hidden chat, unfolds the session and focuses its heading", async () => {
+    const page = await open();
+    page.reset(view({ line, session: 1, index: 0 }), [{ kind: "assistant", card: "Plan", text: "x" }, { kind: "divider", session: 1 }, { kind: "assistant", card: "Fix", text: "y" }]);
+    heading(page, 0).click();
+    assert.equal(heading(page, 0).getAttribute("aria-expanded"), "false");
+    assert.equal(page.doc.getElementById(heading(page, 0).getAttribute("aria-controls")!)!.hidden, true);
+    page.button("Hide chat").click();
+    stations(page)[0]!.click();
+    assert.equal(page.doc.getElementById("chat-body")!.hidden, false);
+    assert.equal(heading(page, 0).getAttribute("aria-expanded"), "true");
+    assert.equal(page.doc.activeElement, heading(page, 0));
+    heading(page, 1).click();
+    heading(page, 1).click();
+    assert.equal(heading(page, 1).getAttribute("aria-expanded"), "true", "a second press unfolds it again");
+    const before = page.doc.activeElement;
+    page.update(view({ line, session: 1, index: 0 }));
+    stations(page)[1]!.click();
+    assert.equal(page.doc.activeElement, heading(page, 1));
+    assert.notEqual(before, page.doc.activeElement);
+  });
+
+  it("puts each session's cards in its heading as pills, the live one marked, once the chain is known", async () => {
+    const page = await open();
+    page.reset(view({ line, index: 1 }), [{ kind: "assistant", card: "Plan", text: "x" }]);
+    const pills = [...heading(page, 0).parentElement!.querySelectorAll(".pill")];
+    assert.deepEqual(pills.map((p) => [p.textContent, p.className]), [["✓ Plan (done)", "pill done"], ["● Review (running)", "pill live"]], "a glyph and words, not colour alone");
+    assert.equal(pills[0]!.firstElementChild!.getAttribute("aria-hidden"), "true");
+    assert.equal(heading(page, 0).textContent, "Session 1", "the button's own words; the pills sit beside it");
+  });
+
+  it("writes a card's and a session's figures on their rules, before the next session's heading, and announces the session", async () => {
+    const page = await open();
+    page.reset(view({ line }), [{ kind: "assistant", card: "Plan", text: "x" }]);
+    page.append([
+      { kind: "card-end", card: "Plan", session: 0, status: "done", model: "claude-opus-5-5", effort: "high", worked },
+      { kind: "session-end", session: 0, worked },
+      { kind: "divider", session: 1 },
+    ]);
+    const [, card, session] = page.entries();
+    assert.equal(card!.className, "card-end");
+    assert.equal(card!.querySelector(".glyph")!.getAttribute("aria-hidden"), "true");
+    assert.equal(card!.textContent, "✓Plan done · 1:01 working · 2 turns · 4k in (75% cached) / 200 out · ≈ $0.50 API price · claude-opus-5-5 · high effort");
+    assert.equal(session!.className, "session-end");
+    assert.equal(session!.textContent, "Session 1 · 1:01 working · 2 turns · 4k in (75% cached) / 200 out · ≈ $0.50 API price");
+    assert.equal(session!.closest("li.session")!.getAttribute("data-session"), "0", "under the session it closes");
+    assert.equal(page.status(), "Session 1 finished");
+  });
+
+  it("goes on under the same heading when a continued run starts its session again", async () => {
+    const page = await open();
+    page.reset(view({ line }), [{ kind: "divider", session: 1 }, { kind: "assistant", card: "Fix", text: "x" }]);
+    page.append([{ kind: "divider", session: 1 }, { kind: "assistant", card: "Fix", text: "y" }]);
+    assert.equal(page.doc.querySelectorAll("#transcript > li.session").length, 1);
+    const ids = [...page.doc.querySelectorAll(".session-entries")].map((l) => l.id);
+    assert.equal(new Set(ids).size, ids.length);
+  });
+
+  it("drops the oldest entries across sessions and keeps the headings", async () => {
+    const page = await open();
+    const said = (i: number): Entry => ({ kind: "assistant", card: "Implement", text: `reply ${i}` });
+    page.reset(view(), [said(0), { kind: "divider", session: 1 }, ...Array.from({ length: MAX_ENTRIES }, (_, i) => said(i + 1))]);
+    const shown = page.entries();
+    assert.equal(shown.length, MAX_ENTRIES + 1);
+    assert.equal(shown[0]!.dataset.dropped, "true");
+    assert.equal(page.doc.querySelectorAll("#transcript > li.session").length, 2, "the first session's heading stays");
   });
 });
 
@@ -815,6 +934,142 @@ describe("run chat: tool calls", () => {
     overflowing(page.w);
     observers.at(-1)!();
     assert.deepEqual(attrs(pre), ["0", "group", "Read input"]);
+  });
+});
+
+describe("run chat: copying a message", () => {
+  const entries: Entry[] = [
+    { kind: "assistant", card: "Implement", text: "**Done.** See `src/a.ts`." },
+    { kind: "tool", card: "Implement", name: "Read", input: "src/a.ts" },
+    { kind: "you", card: "Implement", text: "thanks\nand one more" },
+    { kind: "end", status: "done" },
+  ];
+
+  it("copies a reply's own text, Markdown included, keeping focus and saying what was copied", async () => {
+    const page = await open();
+    page.reset(view(), entries);
+    const copy = page.button("Copy message from Implement");
+    assert.equal(copy.getAttribute("title"), "Copy");
+    copy.focus();
+    copy.click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatCopyText", text: "**Done.** See `src/a.ts`." });
+    assert.equal(page.doc.activeElement, copy);
+    assert.equal(page.status(), "Copied message from Implement");
+  });
+
+  it("copies the user's own message", async () => {
+    const page = await open();
+    page.reset(view(), entries);
+    page.button("Copy your message to Implement").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatCopyText", text: "thanks\nand one more" });
+  });
+
+  it("gives tool calls and the end line no Copy button", async () => {
+    const page = await open();
+    page.reset(view(), entries);
+    const [, tool, , end] = page.entries();
+    assert.equal(tool!.querySelector("button.copy-code"), null);
+    assert.equal(end!.querySelector("button.copy-code"), null);
+  });
+
+  it("says a message is too long to copy instead of sending one the extension would refuse", async () => {
+    const page = await open();
+    page.reset(view(), [{ kind: "assistant", card: "Implement", text: "x".repeat(MAX_INPUT_CHARS + 1) }]);
+    const sent = page.posted.length;
+    page.button("Copy message from Implement").click();
+    assert.equal(page.posted.length, sent);
+    assert.equal(page.status(), "This message is over 20,000 characters, too long to copy with the button.");
+  });
+});
+
+describe("run chat: Ctrl+C on the transcript", () => {
+  const select = (page: Awaited<ReturnType<typeof open>>, node: Node) => {
+    const range = page.doc.createRange();
+    range.selectNodeContents(node);
+    const selection = page.doc.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+  const press = (page: Awaited<ReturnType<typeof open>>, init: KeyboardEventInit) => page.doc.dispatchEvent(new page.w.KeyboardEvent("keydown", { key: "c", bubbles: true, ...init }));
+
+  it("copies text selected in the transcript through the extension, with Ctrl or Cmd", async () => {
+    const page = await open();
+    page.reset(view(), [{ kind: "you", card: "Implement", text: "pick SQLite" }]);
+    select(page, page.entries()[0]!.querySelector("p.text")!);
+    press(page, { ctrlKey: true });
+    assert.deepEqual(page.posted.at(-1), { type: "chatCopyText", text: "pick SQLite" });
+    page.posted.length = 0;
+    press(page, { metaKey: true, key: "C" });
+    assert.deepEqual(page.posted, [{ type: "chatCopyText", text: "pick SQLite" }]);
+  });
+
+  it("leaves a selection outside the transcript, an empty one, and other shortcuts alone", async () => {
+    const page = await open();
+    page.reset(view(), [{ kind: "you", card: "Implement", text: "pick SQLite" }]);
+    const sent = page.posted.length;
+    select(page, page.doc.querySelector(".chat-status")!);
+    press(page, { ctrlKey: true });
+    page.doc.getSelection()!.removeAllRanges();
+    press(page, { ctrlKey: true });
+    select(page, page.entries()[0]!.querySelector("p.text")!);
+    press(page, { ctrlKey: true, shiftKey: true });
+    press(page, { ctrlKey: true, altKey: true });
+    press(page, { key: "c" });
+    press(page, { ctrlKey: true, key: "v" });
+    assert.equal(page.posted.length, sent);
+  });
+});
+
+describe("run chat: merge steps", () => {
+  const done = (patch: Partial<ChatView> = {}) => view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "done" }, ...patch });
+  const steps: Entry = {
+    kind: "merge",
+    branch: "coordiner/login",
+    target: "main",
+    steps: [
+      { text: "Stage the 2 files the run changed:", command: "cd '/w' && git add -A" },
+      { text: "Then run the commit brief's git commit command from the chat above, in the same terminal." },
+      { text: "Bring the work into main as one change:", command: "git -C '/r' merge --squash 'coordiner/login'" },
+    ],
+  };
+
+  it("offers Merge steps only after a run that is done", async () => {
+    const page = await open();
+    page.reset(done());
+    assert.equal(page.button("Merge steps").hidden, false);
+    for (const status of ["no-changes", "halted", "failed", "stopped"] as const) {
+      page.update(done({ ending: { status } }));
+      assert.equal(page.button("Merge steps").hidden, true, status);
+    }
+    page.update(view());
+    assert.equal(page.button("Merge steps").hidden, true);
+  });
+
+  it("asks the extension for the steps, and moves focus to them when they come", async () => {
+    const page = await open();
+    page.reset(done());
+    page.button("Merge steps").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatMergeSteps" });
+    page.append([steps]);
+    const entry = page.entries().at(-1)!;
+    assert.equal(page.doc.activeElement, entry);
+    assert.equal(entry.getAttribute("tabindex"), "-1");
+    assert.equal(page.doc.getElementById(entry.getAttribute("aria-labelledby")!)!.textContent, "Merge coordiner/login into main");
+    assert.deepEqual([...entry.querySelectorAll("ol.steps > li > p.text")].map((p) => p.textContent), steps.steps.map((s) => s.text));
+    page.button("Copy command 2").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatCopyText", text: "git -C '/r' merge --squash 'coordiner/login'" });
+    assert.equal(page.status(), "Copied command 2");
+  });
+
+  it("does not take focus for steps that arrive without being asked for, as on a reload", async () => {
+    const page = await open();
+    page.reset(done(), [steps]);
+    assert.notEqual(page.doc.activeElement, page.entries().at(-1));
+    page.append([{ ...steps, target: undefined, steps: [{ text: "Git could not list the worktrees, so no commands are shown." }] }]);
+    const last = page.entries().at(-1)!;
+    assert.notEqual(page.doc.activeElement, last);
+    assert.equal(last.querySelector(".who")!.textContent, "Merge coordiner/login");
+    assert.equal(last.querySelector("button"), null);
   });
 });
 
