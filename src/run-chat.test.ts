@@ -315,6 +315,21 @@ describe("createRunChat: the end of the run", () => {
     assert.deepEqual(chat.entries(), appended());
   });
 
+  it("says the run moved when a turn of the chat after the run starts and ends, so the computer is kept awake for it", async () => {
+    const { chat, moves } = setup();
+    chat.ended({ status: "done", text: "" }, { card: "Kickoff" });
+    const before = moves();
+    const signal = new AbortController().signal;
+    const wait = chat.talk.waitForYou({ card: "Kickoff", ready: false, signal });
+    assert.equal(moves(), before, "waiting after the run is not news");
+    chat.talk.send("one more thing");
+    await wait;
+    assert.equal(chat.view().phase, "running");
+    assert.equal(moves(), before + 1);
+    void chat.talk.waitForYou({ card: "Kickoff", ready: false, signal });
+    assert.equal(moves(), before + 2);
+  });
+
   it("closes the chat when there is no session to keep talking to", () => {
     const { chat } = setup();
     chat.ended({ status: "done", text: "brief" });

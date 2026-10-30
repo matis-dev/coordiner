@@ -1,6 +1,6 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, existsSync } from "node:fs";
 import { access, appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -10,7 +10,8 @@ import { lastFirst, parseStories, slugify, storyText, wholeFileStory, type Story
 import { ChainStore, type StoreFs } from "./chain-store.ts";
 import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
-import { needsYou } from "./chat-logic.ts";
+import { awakeHelper, keepAwake, type Helper, type Spawned } from "./awake.ts";
+import { canGoOnAlone, needsYou } from "./chat-logic.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
 import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
@@ -48,6 +49,18 @@ import {
 
 const run = promisify(execFile);
 const exec: Exec = (file, args, options) => run(file, args, options);
+
+// A keep-awake helper runs with no shell and keeps no output; its arguments are constants and the extension host's pid.
+const startHelper = ({ file, args }: Helper): Spawned => {
+  const child = spawn(file, args, { stdio: "ignore", windowsHide: true });
+  return {
+    kill: () => void child.kill(),
+    onExit: (listener) => {
+      child.once("error", (error) => listener(`did not start: ${error.message}`));
+      child.once("exit", (code, signal) => listener(`exited (${signal ?? `code ${code}`})`));
+    },
+  };
+};
 
 // The Sessions list: the session open now at the top, with its steps and, under the running one, the background processes of its
 // turn; under it this repo's lines of work, one per worktree, each with its earlier sessions and the steps they ran.
@@ -1371,10 +1384,15 @@ export function activate(context: vscode.ExtensionContext): void {
   // Reveal without stealing focus; a hidden view just rejects, which is fine.
   const reveal = (step: RunItem) => void view.reveal(step, { focus: false, select: false }).then(undefined, () => undefined);
   let editor: ChainsEditor | undefined;
+  // While the run can go on without you, the computer does not sleep (coordiner.keepAwake).
+  const awake = keepAwake({ helper: awakeHelper(process.platform, process.pid, existsSync("/.flatpak-info")), start: startHelper, log: (line) => output.appendLine(line) });
+  const syncAwake = (chat = state.chat?.view()) =>
+    awake.set(vscode.workspace.getConfiguration("coordiner").get("keepAwake", true) && chat !== undefined && canGoOnAlone(chat));
   // The Sessions view's Stop button shows while the slot is held and while the chat after a run is open.
   const changed = () => {
     editor?.post();
     const chat = state.chat?.view();
+    syncAwake(chat);
     const waiting = state.abort !== undefined && chat !== undefined && needsYou(chat);
     provider.setOpen(state.open && { title: state.open.title, phase: waiting ? "waiting for you" : state.abort ? "running" : state.after ? "chat open" : "ended" });
     // The count on the Coordiner icon in the activity bar, seen with the Sessions view closed.
@@ -1408,6 +1426,8 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     output,
     view,
+    awake,
+    vscode.workspace.onDidChangeConfiguration((event) => event.affectsConfiguration("coordiner.keepAwake") && syncAwake()),
     // Another window may have run something meanwhile.
     view.onDidChangeVisibility(({ visible }) => visible && sessionsChanged()),
     vscode.commands.registerCommand("coordiner.checkEnvironment", () => checkEnvironmentCommand(output)),

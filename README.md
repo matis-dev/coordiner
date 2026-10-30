@@ -228,6 +228,14 @@ Chains are saved in the extension's global storage (`chains.json`), never in you
 
 Every session Coordiner starts denies `git` writes (commit, push, branch creation, reset and the rest), `--no-verify`, and `gh` commands that publish, whichever skills the chain uses. Read-only git and `gh` stay open. A denial is logged in the **Coordiner** output and the run journal.
 
+## Keep the computer awake
+
+While a run can go on without you (a card is working, or a question is counting down to its Recommended option), Coordiner asks the system not to sleep, so a long run is not cut off by the idle timer. It lets go as soon as a card waits for you, a question has no time limit, the run ends, or the editor closes. A chat turn after a run holds it while the turn works.
+
+Only sleep is blocked. The screen still dims and locks, and closing the lid still sleeps. The **Coordiner** output says each time the hold is taken, let go, or could not be taken (the run then goes on and the computer may sleep). Turn it off with the setting `coordiner.keepAwake`.
+
+To see the hold: `systemd-inhibit --list` (or your desktop's power menu) on Linux, `pmset -g assertions` on macOS, `powercfg /requests` on Windows.
+
 ## Develop
 
 | Task | Command |

@@ -501,6 +501,10 @@ export function attention(chat: ChatView): { kind: "needs" | "working"; text: st
 
 export const needsYou = (chat: ChatView): boolean => attention(chat)?.kind === "needs";
 
+// The run can move on without the user: a turn is working, or a question counts down to its Recommended option. A card that
+// waits for the user cannot, and its prompt cache runs out within the hour anyway, so the computer may sleep then.
+export const canGoOnAlone = (chat: ChatView): boolean => (chat.question ? chat.question.expiresAt !== undefined : chat.phase === "running");
+
 export const canSend = (chat: ChatView): boolean => chat.phase === "running" || chat.phase === "waiting";
 export const canPause = (chat: ChatView): boolean => chat.phase === "running" && !chat.attended && !chat.pausePending;
 

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import { announcement, busyLabel, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
+import { announcement, busyLabel, canGoOnAlone, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -449,6 +449,34 @@ describe("attention", () => {
     assert.deepEqual(attention(base), { kind: "working", text: "Working" });
     assert.equal(attention({ ...base, phase: "waiting", afterRun: true }), undefined);
     assert.equal(attention({ ...base, phase: "idle" }), undefined);
+  });
+});
+
+describe("canGoOnAlone", () => {
+  const question = (expiresAt?: number) => ({ id: "q1", card: "Implement", questions: [], ...(expiresAt === undefined ? {} : { expiresAt }) });
+
+  it("holds while a turn is working", () => {
+    assert.equal(canGoOnAlone(view({ phase: "running" })), true);
+  });
+
+  it("lets go while a card waits for the user, paused or parked", () => {
+    assert.equal(canGoOnAlone(view({ phase: "waiting", attended: true })), false);
+    assert.equal(canGoOnAlone(view({ phase: "waiting", parked: "the turn failed" })), false);
+  });
+
+  it("holds while a question counts down to its Recommended option, and lets go for one that waits", () => {
+    assert.equal(canGoOnAlone(view({ phase: "running", question: question(1_000) })), true);
+    assert.equal(canGoOnAlone(view({ phase: "running", question: question() })), false);
+  });
+
+  it("lets go before the run starts and after it ends", () => {
+    assert.equal(canGoOnAlone(view({ phase: "idle" })), false);
+    assert.equal(canGoOnAlone(view({ phase: "ended" })), false);
+  });
+
+  it("holds during a turn of the chat after the run, and lets go between them", () => {
+    assert.equal(canGoOnAlone(view({ phase: "running", afterRun: true })), true);
+    assert.equal(canGoOnAlone(view({ phase: "waiting", afterRun: true })), false);
   });
 });
 

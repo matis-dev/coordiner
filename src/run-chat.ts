@@ -1,5 +1,5 @@
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
-import { needsYou as waitsForUser, type CacheClock, type TurnClock } from "./chat-logic.ts";
+import { canGoOnAlone, needsYou as waitsForUser, type CacheClock, type TurnClock } from "./chat-logic.ts";
 import type { ChatMessage, ChatView, EditorMessage, Ending } from "./editor-protocol.ts";
 import type { JournaledEntry, JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
@@ -105,7 +105,9 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
       if (snapshot.session !== undefined && snapshot.session !== (before?.session ?? 0)) add([{ kind: "divider", session: snapshot.session }]);
       post({ type: "chatUpdate", chat: viewOf(snapshot) });
       const waiting = waitsForUser(snapshot) !== (before !== undefined && waitsForUser(before));
-      if (snapshot.index !== before?.index || snapshot.session !== before?.session || waiting) moved();
+      // Whether the computer may sleep can change without the user being waited for: a turn of the chat after the run.
+      const alone = canGoOnAlone(snapshot) !== (before !== undefined && canGoOnAlone(before));
+      if (snapshot.index !== before?.index || snapshot.session !== before?.session || waiting || alone) moved();
       const asked = snapshot.question !== undefined && snapshot.question.id !== before?.question?.id;
       // After the run the chat waits after every reply, and the run's own announcement already says it ended.
       const waits = snapshot.phase === "waiting" && before?.phase !== "waiting" && !snapshot.afterRun;
