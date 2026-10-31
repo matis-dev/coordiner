@@ -203,13 +203,43 @@ button {
 
 button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 
-button.run {
+/* Three tiers beside the plain secondary button: filled primary (Run, Add a session), the accent outline (Duplicate), and the
+   error outline for what removes work (Delete chain, Remove session). VS Code has no error button colour; errorForeground is the
+   theme's error colour, the one the error banner uses. */
+button.run, button.add-session {
   background: var(--vscode-button-background);
   color: var(--vscode-button-foreground);
   font-weight: 600;
 }
 
-button.run:hover { background: var(--vscode-button-hoverBackground); }
+button.run:hover, button.add-session:hover { background: var(--vscode-button-hoverBackground); }
+
+/* The Add beside a session's skill list: the primary colour as an outline, so Run and Add a session stay the filled ones. The text
+   keeps the page's foreground: buttonBackground is a fill, and as text on the editor background it falls under 4.5:1 in the dark
+   defaults. */
+button.outline {
+  background: transparent;
+  color: var(--vscode-foreground);
+  border-color: var(--vscode-button-background);
+}
+
+button.outline:hover { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+
+button.accent {
+  background: transparent;
+  color: var(--anchor);
+  border-color: var(--anchor);
+}
+
+button.accent:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+
+button.danger {
+  background: transparent;
+  color: var(--vscode-errorForeground);
+  border-color: var(--vscode-errorForeground);
+}
+
+button.danger:hover { background: var(--vscode-inputValidation-errorBackground, var(--vscode-list-hoverBackground)); }
 
 button[aria-disabled="true"] {
   opacity: 0.55;
@@ -331,6 +361,12 @@ textarea {
   margin: 0;
 }
 
+/* Dragging: the label is the handle; the card being dragged fades, and an accent edge or outline shows where it lands. */
+.card-label[draggable="true"] { cursor: grab; }
+.card.dragging { opacity: 0.5; }
+.card.drop-before { box-shadow: inset 3px 0 0 var(--anchor); }
+section.drop-end { outline: 2px dashed var(--anchor); outline-offset: 4px; border-radius: var(--radius); }
+
 .card-actions {
   display: flex;
   gap: 4px;
@@ -361,6 +397,22 @@ textarea {
   flex-wrap: wrap;
   gap: var(--gap);
   align-items: center;
+}
+
+/* Add a skill and Remove session share one line; the second sits at the right end, and wraps under when the page is narrow. */
+.session-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap);
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* The close of the last session, above Add a session: the handover's dashed rule, without its words. */
+.end-rule {
+  margin: var(--inset) 0 var(--gap);
+  border: 0;
+  border-top: 2px dashed var(--anchor);
 }
 
 .banner {

@@ -6,14 +6,17 @@ import { defaultCard, type Card, type Chain, type ChainSession, type Effort } fr
 const editSession = (chain: Chain, s: number, edit: (cards: Card[]) => Card[]): Chain =>
   s < 0 || s >= chain.sessions.length ? chain : { ...chain, sessions: chain.sessions.map((session, i) => (i === s ? { cards: edit(session.cards) } : session)) };
 
-export function moveCard(chain: Chain, s: number, i: number, delta: -1 | 1): Chain {
-  return editSession(chain, s, (cards) => {
-    const to = i + delta;
-    if (i < 0 || i >= cards.length || to < 0 || to >= cards.length) return cards;
-    const next = [...cards];
-    [next[i], next[to]] = [next[to]!, next[i]!];
-    return next;
-  });
+// A card's place: its session and its index there.
+export type Slot = { s: number; i: number };
+
+// Moves the card at `from` so it ends at `to`, in its own session or another; `to.i` counts the target's cards without it.
+export function moveTo(chain: Chain, from: Slot, to: Slot): Chain {
+  const card = chain.sessions[from.s]?.cards[from.i];
+  if (!card) return chain;
+  const left = editSession(chain, from.s, (cards) => cards.filter((_, j) => j !== from.i));
+  const target = left.sessions[to.s]?.cards;
+  if (!target || to.i < 0 || to.i > target.length) return chain;
+  return editSession(left, to.s, (cards) => [...cards.slice(0, to.i), card, ...cards.slice(to.i)]);
 }
 
 export const addCard = (chain: Chain, s: number, skill: string): Chain => editSession(chain, s, (cards) => [...cards, defaultCard(skill)]);

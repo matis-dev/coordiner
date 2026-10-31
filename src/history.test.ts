@@ -235,6 +235,40 @@ describe("continuePoint", () => {
     assert.equal(run.input, "Story 11: Export");
   });
 
+  it("continues from the chain the run last picked up, and drops a definition record it cannot read", () => {
+    const { builtIn: _b, ...own } = { ...STORY, id: "own", name: "Own" };
+    const later = { ...own, sessions: [own.sessions[0]!, { cards: [{ ...own.sessions[1]!.cards[0]!, args: "look again" }] }] };
+    const run = defined(plan, { type: "definition", definition: later }, { type: "definition", definition: { sessions: "broken" } });
+    assert.deepEqual(run.definition, later);
+    assert.equal(parse({ type: "definition", definition: later }).definition, undefined, "no chain to continue from at the start, none later");
+  });
+
+  it("continues at the first card of a session the run stopped in front of, as the chain picked it up", () => {
+    const { builtIn: _b, ...own } = { ...STORY, id: "own", name: "Own" };
+    const third = { ...own, sessions: [...own.sessions, { cards: [own.sessions[1]!.cards[0]!] }] };
+    const run = defined(plan, planned, { type: "definition", definition: third }, { type: "outcome", outcome: { status: "halted", reason: "Session 3 has no skills.", at: { session: 2, card: 0 } } });
+    assert.deepEqual(run.lastCard?.at, { session: 2, card: 0 });
+    assert.deepEqual(continuePoint(run)!.from.at, { session: 2, card: 0 });
+  });
+
+  it("continues at a session the run stopped in front of when the chain it last picked up had that session empty", () => {
+    const { builtIn: _b, ...own } = { ...STORY, id: "own", name: "Own" };
+    const emptied = { ...own, sessions: [...own.sessions, { cards: [] }] };
+    const run = defined(plan, planned, { type: "definition", definition: emptied }, { type: "outcome", outcome: { status: "halted", reason: "Session 3 has no skills.", at: { session: 2, card: 0 } } });
+    assert.deepEqual(run.lastCard?.at, { session: 2, card: 0 });
+    const point = continuePoint(run)!;
+    assert.deepEqual(point.from, { at: { session: 2, card: 0 }, prompt: "" }, "no resume, so the run picks the session up as saved");
+    assert.deepEqual([point.card, point.reason], ["Session 3", "Session 3 has no skills."]);
+  });
+
+  it("does not take a halt at a session the chain does not have, nor one at a later card of an empty session", () => {
+    const { builtIn: _b, ...own } = { ...STORY, id: "own", name: "Own" };
+    const emptied = { ...own, sessions: [...own.sessions, { cards: [] }] };
+    const halt = (at: object) => defined(plan, planned, { type: "definition", definition: emptied }, { type: "outcome", outcome: { status: "halted", reason: "r", at } });
+    assert.deepEqual(halt({ session: 3, card: 0 }).lastCard?.at, { session: 0, card: 0 });
+    assert.deepEqual(halt({ session: 2, card: 1 }).lastCard?.at, { session: 0, card: 0 });
+  });
+
   it("retries a stopped card in its session, on the tier it ran on", () => {
     const point = continuePoint(defined(plan, planned, implement, { type: "step-finished", index: 1, status: "stopped", detail: "stopped", sessionId: "s-2" }, { type: "outcome", outcome: { status: "stopped" } }))!;
     assert.deepEqual(point.from, { at: { session: 0, card: 1 }, tier: "weak", resume: "s-2", prompt: pickUpAfter("the user stopped the run") });

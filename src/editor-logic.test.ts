@@ -5,20 +5,24 @@ import {
   addCardReason,
   addKey,
   addSessionReason,
-  afterMove,
   afterRemove,
   argParts,
   copyName,
   copyThenEdit,
+  dropTarget,
   effortAfterModel,
   effortChoices,
   effortKey,
   effortReason,
   isMissing,
+  lockReason,
   modelKey,
   modelOffered,
   moveDelta,
+  movedNote,
   moveKey,
+  moveReason,
+  moveTarget,
   newChainId,
   pauseKey,
   pinNote,
@@ -178,17 +182,67 @@ describe("moveDelta", () => {
   });
 });
 
+describe("moving cards", () => {
+  const cards = (n: number) => Array.from({ length: n }, (_, i) => defaultCard(`acme:${i}`));
+  const three: Chain = { id: "own", name: "Own", sessions: [{ cards: cards(2) }, { cards: [] }, { cards: cards(3) }] };
+  const view = (through?: number, chainId = "own") => ({ running: through !== undefined, ...(through !== undefined ? { locked: { chainId, through } } : {}) });
+
+  it("moves an arrow's card to its neighbour's place inside its session", () => {
+    assert.deepEqual(moveTarget(three, 0, 0, 1), { s: 0, i: 1 });
+    assert.deepEqual(moveTarget(three, 2, 2, -1), { s: 2, i: 1 });
+  });
+
+  it("wraps an arrow past a session's end to the near end of the session that way, an empty one included", () => {
+    assert.deepEqual(moveTarget(three, 0, 1, 1), { s: 1, i: 0 });
+    assert.deepEqual(moveTarget(three, 2, 0, -1), { s: 1, i: 0 });
+    const two: Chain = { ...three, sessions: [three.sessions[0]!, three.sessions[2]!] };
+    assert.deepEqual(moveTarget(two, 1, 0, -1), { s: 0, i: 2 }, "after the previous session's last card");
+    assert.deepEqual(moveTarget(two, 0, 1, 1), { s: 1, i: 0 }, "before the next session's first card");
+  });
+
+  it("moves nothing past either end of the chain", () => {
+    assert.equal(moveTarget(three, 0, 0, -1), undefined);
+    assert.equal(moveTarget(three, 2, 2, 1), undefined);
+  });
+
+  it("puts a dropped card before the card it was dropped on, counting without the card itself", () => {
+    assert.deepEqual(dropTarget(three, { s: 0, i: 0 }, 2, 1), { s: 2, i: 1 });
+    assert.deepEqual(dropTarget(three, { s: 2, i: 0 }, 2, 2), { s: 2, i: 1 }, "later in its own session: one place less");
+    assert.deepEqual(dropTarget(three, { s: 2, i: 2 }, 2, 0), { s: 2, i: 0 });
+  });
+
+  it("puts a card dropped on the session itself at its end", () => {
+    assert.deepEqual(dropTarget(three, { s: 0, i: 0 }, 1), { s: 1, i: 0 });
+    assert.deepEqual(dropTarget(three, { s: 0, i: 0 }, 2), { s: 2, i: 3 });
+    assert.deepEqual(dropTarget(three, { s: 2, i: 0 }, 2), { s: 2, i: 2 }, "its own session: the last place");
+  });
+
+  it("locks the sessions the run on this chain has started, and no others", () => {
+    assert.equal(lockReason(three, 0, view(0)), "Session 1 has started: its cards keep their order until the run ends.");
+    assert.equal(lockReason(three, 1, view(1)), "Session 2 has started: its cards keep their order until the run ends.");
+    assert.equal(lockReason(three, 1, view(0)), undefined);
+    assert.equal(lockReason(three, 0, view(2, "other")), undefined, "another chain's run");
+    assert.equal(lockReason(three, 0, view()), undefined);
+  });
+
+  it("refuses a move out of or into a started session, or into a full one", () => {
+    assert.match(moveReason(three, { s: 0, i: 1 }, { s: 1, i: 0 }, view(0))!, /^Session 1 has started/);
+    assert.match(moveReason(three, { s: 2, i: 0 }, { s: 1, i: 0 }, view(1))!, /^Session 2 has started/);
+    assert.equal(moveReason(three, { s: 2, i: 0 }, { s: 1, i: 0 }, view(0)), undefined);
+    const full: Chain = { ...three, sessions: [{ cards: cards(MAX_CARDS) }, { cards: cards(1) }] };
+    assert.equal(moveReason(full, { s: 1, i: 0 }, { s: 0, i: 0 }, view()), `A session holds at most ${MAX_CARDS} skills.`);
+    assert.equal(moveReason(full, { s: 0, i: 0 }, { s: 0, i: 5 }, view()), undefined, "inside a full session is fine");
+    const room: Chain = { ...three, sessions: [{ cards: cards(MAX_CARDS - 1) }, { cards: cards(1) }] };
+    assert.equal(moveReason(room, { s: 1, i: 0 }, { s: 0, i: 0 }, view()), undefined);
+  });
+
+  it("says where a moved card went, naming the session only when it changed", () => {
+    assert.equal(movedNote("Plan", { s: 0, i: 0 }, { s: 0, i: 1 }), "Moved Plan to position 2");
+    assert.equal(movedNote("Plan", { s: 0, i: 1 }, { s: 2, i: 0 }), "Moved Plan to session 3, position 1");
+  });
+});
+
 describe("focus after an edit", () => {
-  it("keeps focus on the moved card's button at its new place", () => {
-    assert.equal(afterMove(0, 1, 1, 3), moveKey(0, 2, 1));
-    assert.equal(afterMove(1, 1, -1, 3), moveKey(1, 0, -1));
-  });
-
-  it("reports no move at either end", () => {
-    assert.equal(afterMove(0, 0, -1, 3), undefined);
-    assert.equal(afterMove(0, 2, 1, 3), undefined);
-  });
-
   it("moves focus to the card that took the removed one's place, else the one before, else Add", () => {
     assert.equal(afterRemove(0, 0, 3), removeKey(0, 0));
     assert.equal(afterRemove(0, 2, 3), removeKey(0, 1));

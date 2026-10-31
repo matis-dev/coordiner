@@ -202,6 +202,143 @@ describe("chains webview: selecting and copying", () => {
   });
 });
 
+describe("chains webview: moving cards across sessions", () => {
+  const split: Chain = { id: "split", name: "Split", sessions: [{ cards: [defaultCard("acme:p"), defaultCard("acme:q")] }, { cards: [defaultCard("acme:r")] }, { cards: [defaultCard("acme:s")] }] };
+  type Page = Awaited<ReturnType<typeof open>>;
+  const lanes = (chain: Chain) => chain.sessions.map((session) => session.cards.map((c) => c.label));
+  const shown = (page: Page) => page.all("#detail section").map((section) => [...section.querySelectorAll(".card .card-label")].map((n) => n.textContent));
+  // jsdom has no DragEvent: a plain event stands in, with no dataTransfer, as the page must cope with.
+  const fire = (page: Page, node: EventTarget, type: string) => node.dispatchEvent(new page.w.Event(type, { bubbles: true, cancelable: true }));
+  const handle = (page: Page, label: string) => page.all(".card-label").find((n) => n.textContent === label)!;
+  const cardOf = (page: Page, label: string) => handle(page, label).closest(".card")!;
+  const sessionOf = (page: Page, s: number) => page.doc.querySelector(`section[aria-labelledby="session-h-${s}"]`)!;
+  const drag = (page: Page, label: string, target: () => Element) => {
+    fire(page, handle(page, label), "dragstart");
+    fire(page, target(), "dragover");
+    fire(page, target(), "drop");
+  };
+  async function openSplit(patch: Partial<Omit<EditorState, "type">> = {}) {
+    const page = await open({ selectedId: "split" });
+    page.send({ chains: [own, other, split], ...patch });
+    return page;
+  }
+
+  it("wraps an arrow past a session's end into the next or previous session, keeping focus on that arrow", async () => {
+    const page = await openSplit();
+    page.named("Move q right").click();
+    assert.deepEqual(lanes(page.saves()[0]!), [["p"], ["q", "r"], ["s"]]);
+    assert.equal(page.focused(), page.named("Move q right"));
+    assert.equal(page.status(), "Moved q to session 2, position 1");
+    page.named("Move q left").dispatchEvent(new page.w.KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }));
+    assert.deepEqual(lanes(page.saves()[1]!), [["p", "q"], ["r"], ["s"]]);
+    assert.equal(page.focused(), page.named("Move q left"));
+    assert.equal(page.status(), "Moved q to session 1, position 2");
+  });
+
+  it("drops a card dragged onto a card of another session before it, and says where it went", async () => {
+    const page = await openSplit();
+    drag(page, "p", () => cardOf(page, "r"));
+    assert.deepEqual(lanes(page.saves()[0]!), [["q"], ["p", "r"], ["s"]]);
+    assert.deepEqual(shown(page), [["q"], ["p", "r"], ["s"]]);
+    assert.equal(page.status(), "Moved p to session 2, position 1");
+    assert.equal(page.focused(), page.named("Move p right"));
+  });
+
+  it("drops a card dragged onto a session, not onto a card, at that session's end", async () => {
+    const page = await openSplit();
+    drag(page, "p", () => sessionOf(page, 2));
+    assert.deepEqual(lanes(page.saves()[0]!), [["q"], ["r"], ["s", "p"]]);
+    drag(page, "q", () => sessionOf(page, 0));
+    assert.equal(page.saves().length, 1, "q is already the last card of its session");
+  });
+
+  it("marks where a card would land while it is dragged, and clears the marks when the drag ends", async () => {
+    const page = await openSplit();
+    fire(page, handle(page, "p"), "dragstart");
+    assert.ok(cardOf(page, "p").classList.contains("dragging"));
+    fire(page, cardOf(page, "r"), "dragover");
+    assert.ok(cardOf(page, "r").classList.contains("drop-before"));
+    fire(page, sessionOf(page, 2), "dragover");
+    assert.ok(!cardOf(page, "r").classList.contains("drop-before"));
+    assert.ok(sessionOf(page, 2).classList.contains("drop-end"));
+    fire(page, page.doc, "dragend");
+    assert.equal(page.all(".dragging, .drop-before, .drop-end").length, 0);
+    assert.deepEqual(page.saves(), []);
+  });
+
+  it("refuses a drop into a full session, saying why", async () => {
+    const full: Chain = { ...split, sessions: [{ cards: Array.from({ length: MAX_CARDS }, () => defaultCard("acme:p")) }, { cards: [defaultCard("acme:r")] }] };
+    const page = await open({ selectedId: "split" });
+    page.send({ chains: [full] });
+    fire(page, handle(page, "r"), "dragstart");
+    fire(page, sessionOf(page, 0), "dragover");
+    assert.ok(!sessionOf(page, 0).classList.contains("drop-end"));
+    fire(page, sessionOf(page, 0), "drop");
+    assert.deepEqual(page.saves(), []);
+    assert.equal(page.status(), `A session holds at most ${MAX_CARDS} skills.`);
+  });
+
+  it("takes no drop it did not start: a file or text dragged in from outside", async () => {
+    const page = await openSplit();
+    assert.equal(fire(page, sessionOf(page, 1), "dragover"), true, "the drag over is not taken, so nothing can be dropped");
+    fire(page, sessionOf(page, 1), "drop");
+    assert.deepEqual(page.saves(), []);
+    assert.equal(page.all(".drop-end").length, 0);
+  });
+
+  it("locks the sessions a run on this chain has started, and leaves the rest and every setting free", async () => {
+    const page = await openSplit({ running: true, locked: { chainId: "split", through: 0 } });
+    const reason = "Session 1 has started: its cards keep their order until the run ends.";
+    assert.equal(page.doc.getElementById("locked-0")!.textContent, reason);
+    assert.equal(page.doc.getElementById("locked-1"), null);
+    for (const name of ["Move p left", "Move p right", "Remove p", "Remove session 1"]) {
+      assert.equal(page.named(name).getAttribute("aria-disabled"), "true", name);
+      assert.equal(page.named(name).getAttribute("aria-describedby"), "locked-0", name);
+    }
+    assert.equal(handle(page, "p").getAttribute("draggable"), null);
+    page.named("Remove p").click();
+    page.named("Remove session 1").click();
+    page.named("Move q right").click();
+    assert.deepEqual(page.saves(), []);
+    assert.equal(page.status(), reason);
+    // Into the started session, by arrow or by drop, is refused too.
+    assert.equal(page.named("Move r left").getAttribute("aria-disabled"), "true");
+    assert.equal(page.named("Move r left").getAttribute("title"), reason);
+    drag(page, "s", () => cardOf(page, "p"));
+    assert.deepEqual(page.saves(), []);
+    // Its settings, and every later session, stay free.
+    const args = page.doc.getElementById("args-0-0") as HTMLTextAreaElement;
+    args.value = "more";
+    args.dispatchEvent(new page.w.Event("change"));
+    assert.equal(page.saves()[0]!.sessions[0]!.cards[0]!.args, "more");
+    page.named("Move r right").click();
+    assert.deepEqual(lanes(page.saves()[1]!), [["p", "q"], [], ["r", "s"]]);
+  });
+
+  it("locks nothing for a run on another chain", async () => {
+    const page = await openSplit({ running: true, locked: { chainId: "own", through: 2 } });
+    assert.equal(page.named("Move p right").getAttribute("aria-disabled"), "false");
+    assert.equal(handle(page, "p").getAttribute("draggable"), "true");
+  });
+
+  it("holds a state that arrives mid-drag, so the card stays, and renders it when the drag ends", async () => {
+    const page = await openSplit();
+    fire(page, handle(page, "p"), "dragstart");
+    const held = handle(page, "p");
+    page.send({ chains: [own, other, split, { ...other, id: "late", name: "Late" }] });
+    assert.ok(held.isConnected, "not re-rendered while dragging");
+    assert.equal(page.all("#rail button").some((b) => b.textContent === "Late"), false);
+    fire(page, page.doc, "dragend");
+    assert.ok(page.named("Late"));
+  });
+
+  it("offers no drag on a template", async () => {
+    const page = await open();
+    page.send();
+    assert.equal(page.all('.card-label[draggable="true"]').length, 0);
+  });
+});
+
 describe("chains webview: editing a chain", () => {
   it("moves a card right with its button, keeps focus on that button at the new place, and announces it", async () => {
     const page = await open({ selectedId: "own" });

@@ -64,14 +64,20 @@ export class ChainStore {
   }
 
   // Saves run one at a time, each edit applied to what the save before it left, and the file lands by rename, so neither a burst
-  // of edits nor a crash mid-write leaves it torn.
-  save(edit: (chains: readonly Chain[]) => Chain[]): Promise<void> {
+  // of edits nor a crash mid-write leaves it torn. An edit that returns a reason instead is refused there: nothing is written, and
+  // the editor is told why, so a check made against what the saves before it left cannot be overtaken by them.
+  save(edit: (chains: readonly Chain[]) => Chain[] | string): Promise<void> {
     return this.enqueue(async () => {
       if (this.blocked) return;
       const temp = `${this.file}.tmp`;
       // The edit is inside the try too: a throw anywhere here must not leave the queue stuck and the editor waiting on it.
       try {
         const chains = edit(this.chains);
+        if (typeof chains === "string") {
+          this.saveProblem = chains;
+          this.unsaved++;
+          return;
+        }
         await this.fs.mkdir(dirname(this.file));
         await this.fs.writeFile(temp, serializeChains(chains));
         await this.fs.rename(temp, this.file);
@@ -93,12 +99,28 @@ export class ChainStore {
     });
   }
 
-  private enqueue(step: () => Promise<void> | void): Promise<void> {
+  // Runs `look` on the chains between the saves queued before it and those queued after, so what it sees holds until the next
+  // save is applied. Nothing is written and the editor is not told.
+  inTurn<T>(look: (chains: readonly Chain[]) => T): Promise<T> {
+    let result: { ok: true; value: T } | { ok: false; error: unknown } = { ok: false, error: undefined };
+    return this.enqueue(() => {
+      try {
+        result = { ok: true, value: look(this.chains) };
+      } catch (error) {
+        result = { ok: false, error };
+      }
+    }, false).then(() => {
+      if (!result.ok) throw result.error;
+      return result.value;
+    });
+  }
+
+  private enqueue(step: () => Promise<void> | void, tell = true): Promise<void> {
     this.pending++;
     this.queue = this.queue.then(async () => {
       await step();
       this.pending--;
-      this.saved();
+      if (tell) this.saved();
     });
     return this.queue;
   }

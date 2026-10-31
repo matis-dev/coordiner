@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { briefHeading, cardPrompt, defaultCard, parseChain, parseChains, parseChainShape, inputKinds, inputOf, requiredSkills, runnable, serializeChains, singleSkill, skillDefault, TEMPLATES, usesMskills, type Chain } from "./chains.ts";
+import { briefHeading, cardPrompt, defaultCard, parseChain, parseChains, parseChainShape, inputKinds, inputOf, keepsStarted, pickUpFrom, startReason, requiredSkills, runnable, serializeChains, singleSkill, skillDefault, takeFrom, TEMPLATES, usesMskills, type Chain } from "./chains.ts";
 
 const story = TEMPLATES.find((t) => t.id === "story")!;
 const mine = (sessions: Chain["sessions"], id = "mine"): Chain => ({ id, name: "Mine", sessions });
@@ -246,5 +246,65 @@ describe("parseChain", () => {
   it("keeps a valid next prompt", () => {
     const parsed = parseChain(withCard({ ...ok, next: "Keep going." }));
     assert.equal(typeof parsed !== "string" && parsed.sessions[0]!.cards[0]!.next, "Keep going.");
+  });
+});
+
+describe("a chain while it runs", () => {
+  const card = (skill: string, args = "") => ({ ...defaultCard(skill), args });
+  const before = mine([{ cards: [card("a"), card("b")] }, { cards: [card("c")] }, { cards: [card("d")] }]);
+  const edit = (change: (sessions: Chain["sessions"]) => Chain["sessions"]) => mine(change(structuredClone(before.sessions)));
+
+  it("keeps a started session whose settings changed or that gained cards at its end", () => {
+    assert.equal(keepsStarted(before, edit((s) => (s[0]!.cards[0]!.args = "new", s)), 1), true);
+    assert.equal(keepsStarted(before, edit((s) => (s[1]!.cards.push(card("e")), s)), 1), true);
+    assert.equal(keepsStarted(before, edit((s) => [s[0]!, s[1]!]), 1), true, "a session not started yet may go");
+    assert.equal(keepsStarted(before, edit((s) => (s[2]!.cards.reverse(), s)), 0), true);
+  });
+
+  it("does not keep a started session whose cards moved, left or were replaced", () => {
+    assert.equal(keepsStarted(before, edit((s) => (s[0]!.cards.reverse(), s)), 0), false);
+    assert.equal(keepsStarted(before, edit((s) => (s[0]!.cards.pop(), s)), 0), false);
+    assert.equal(keepsStarted(before, edit((s) => (s[0]!.cards[1] = card("x"), s)), 0), false);
+    assert.equal(keepsStarted(before, edit((s) => [s[0]!, s[2]!]), 1), false, "a started session removed");
+    assert.equal(keepsStarted(before, edit((s) => (s[1]!.cards.unshift(card("e")), s)), 1), false, "a card put in front");
+  });
+
+  it("lets a session start when it holds skills, whatever a later session holds", () => {
+    const chain = mine([{ cards: [card("a")] }, { cards: [card("b", "{{story}}")] }, { cards: [] }]);
+    assert.equal(startReason(chain, 1, "story"), undefined);
+    assert.equal(startReason(chain, 2, "story"), "Session 3 has no skills.");
+    assert.equal(startReason(chain, 3, "story"), undefined, "past the end, the run just ends");
+  });
+
+  it("does not start a session once the chain asks for a second input, or one the run was not given", () => {
+    const two = mine([{ cards: [card("a", "{{story}}")] }, { cards: [card("b", "{{idea}}")] }]);
+    assert.match(startReason(two, 1, "story")!, /^Use only one of \{\{story\}\}, \{\{idea\}\}, \{\{bug\}\} in a chain/);
+    const idea = mine([{ cards: [card("a")] }, { cards: [card("b", "{{idea}}")] }]);
+    assert.equal(startReason(idea, 1, "story"), "{{idea}} has nothing to fill it: this run started from the story you choose at Run.");
+    assert.equal(startReason(idea, 1, undefined), "{{idea}} has nothing to fill it: this run started from a name only.");
+    assert.equal(startReason(idea, 1, "idea"), undefined);
+    assert.equal(startReason(mine([{ cards: [card("a")] }, { cards: [card("b")] }]), 1, "story"), undefined, "a placeholder dropped is fine");
+  });
+
+  it("takes the sessions from `s` on from the saved chain and keeps the ones before as the run has them", () => {
+    const saved = mine([{ cards: [card("x")] }, { cards: [card("y"), card("c")] }]);
+    const taken = takeFrom(before, saved, 1);
+    assert.deepEqual(taken.sessions.map((s) => s.cards.map((c) => c.skill)), [["a", "b"], ["y", "c"]], "a shorter saved chain ends there");
+    assert.equal(taken.id, before.id);
+  });
+
+  it("picks up the saved copy of the run's chain from the session starting, and the run's own chain when none is saved", () => {
+    const saved = mine([{ cards: [card("x")] }, { cards: [card("y")] }]);
+    const other = { ...mine([{ cards: [card("z")] }]), id: "other" };
+    const picked = pickUpFrom(before, [other, saved], 1, undefined);
+    assert.deepEqual(typeof picked !== "string" && picked.sessions.map((s) => s.cards.map((c) => c.skill)), [["a", "b"], ["y"]]);
+    assert.equal(pickUpFrom(before, [other], 1, undefined), before, "a template or a deleted chain runs on as the run has it");
+  });
+
+  it("gives the reason instead when the session starting cannot start as saved", () => {
+    const emptied = mine([{ cards: [card("a"), card("b")] }, { cards: [] }]);
+    assert.equal(pickUpFrom(before, [emptied], 1, undefined), "Session 2 has no skills.");
+    const asking = mine([{ cards: [card("a")] }, { cards: [card("c", "{{bug}}")] }]);
+    assert.equal(pickUpFrom(before, [asking], 1, "story"), "{{bug}} has nothing to fill it: this run started from the story you choose at Run.");
   });
 });

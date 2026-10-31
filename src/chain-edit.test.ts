@@ -1,27 +1,39 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addCard, addSession, duplicate, moveCard, removeCard, removeSession, rename, setArgs, setEffort, setModel, setPause } from "./chain-edit.ts";
+import { addCard, addSession, duplicate, moveTo, removeCard, removeSession, rename, setArgs, setEffort, setModel, setPause } from "./chain-edit.ts";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
 
 const chain: Chain = { id: "c", name: "C", sessions: [{ cards: [defaultCard("a"), defaultCard("b"), defaultCard("c")] }, { cards: [defaultCard("d")] }] };
 const skills = (c: Chain) => c.sessions.map((s) => s.cards.map((x) => x.skill));
 
-describe("moveCard", () => {
-  it("swaps a card with its neighbour in either direction", () => {
-    assert.deepEqual(skills(moveCard(chain, 0, 0, 1)), [["b", "a", "c"], ["d"]]);
-    assert.deepEqual(skills(moveCard(chain, 0, 2, -1)), [["a", "c", "b"], ["d"]]);
+describe("moveTo", () => {
+  it("moves a card within its session, either way", () => {
+    assert.deepEqual(skills(moveTo(chain, { s: 0, i: 0 }, { s: 0, i: 1 })), [["b", "a", "c"], ["d"]]);
+    assert.deepEqual(skills(moveTo(chain, { s: 0, i: 2 }, { s: 0, i: 0 })), [["c", "a", "b"], ["d"]]);
   });
 
-  it("leaves the chain as it was at either end or out of range", () => {
-    assert.deepEqual(skills(moveCard(chain, 0, 0, -1)), skills(chain));
-    assert.deepEqual(skills(moveCard(chain, 0, 2, 1)), skills(chain));
-    assert.deepEqual(skills(moveCard(chain, 0, 7, 1)), skills(chain));
-    assert.equal(moveCard(chain, 5, 0, 1), chain);
-    assert.equal(moveCard(chain, -1, 0, 1), chain);
+  it("moves a card into another session, at its start, middle or end", () => {
+    assert.deepEqual(skills(moveTo(chain, { s: 0, i: 1 }, { s: 1, i: 0 })), [["a", "c"], ["b", "d"]]);
+    assert.deepEqual(skills(moveTo(chain, { s: 0, i: 1 }, { s: 1, i: 1 })), [["a", "c"], ["d", "b"]]);
+    assert.deepEqual(skills(moveTo(chain, { s: 1, i: 0 }, { s: 0, i: 3 })), [["a", "b", "c", "d"], []]);
+  });
+
+  it("moves a card into an empty session, and leaves the session it emptied", () => {
+    const withEmpty: Chain = { ...chain, sessions: [...chain.sessions, { cards: [] }] };
+    assert.deepEqual(skills(moveTo(withEmpty, { s: 1, i: 0 }, { s: 2, i: 0 })), [["a", "b", "c"], [], ["d"]]);
+  });
+
+  it("leaves the chain as it was for a card or a place that is not there", () => {
+    assert.equal(moveTo(chain, { s: 0, i: 7 }, { s: 1, i: 0 }), chain);
+    assert.equal(moveTo(chain, { s: 5, i: 0 }, { s: 0, i: 0 }), chain);
+    assert.equal(moveTo(chain, { s: 0, i: 0 }, { s: 5, i: 0 }), chain);
+    assert.equal(moveTo(chain, { s: 0, i: 0 }, { s: 1, i: 2 }), chain);
+    assert.equal(moveTo(chain, { s: 0, i: 0 }, { s: 0, i: 3 }), chain, "the session has two other cards, so 3 is past its end");
+    assert.equal(moveTo(chain, { s: 0, i: 0 }, { s: 0, i: -1 }), chain);
   });
 
   it("never changes the chain it was given", () => {
-    moveCard(chain, 0, 0, 1);
+    moveTo(chain, { s: 0, i: 0 }, { s: 1, i: 0 });
     assert.deepEqual(skills(chain), [["a", "b", "c"], ["d"]]);
   });
 });

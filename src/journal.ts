@@ -15,6 +15,8 @@ export type JournalRecord =
   | { type: "run-started"; chain: string; story: string; repo: string; worktree: string; branch: string; models: Models; questions: QuestionWait; definition: Chain; input: string }
   // The run was continued at that card; what follows belongs to it, up to its own outcome.
   | { type: "continued"; position: At; questions: QuestionWait }
+  // The chain as the run picked it up when a session started, before `input` filled it: from here on, the definition.
+  | { type: "definition"; definition: Chain }
   | RunEvent
   | { type: "log"; line: string }
   // What the user said in the run's chat, and how they answered a skill's question.

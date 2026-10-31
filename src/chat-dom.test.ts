@@ -804,6 +804,14 @@ describe("run chat: the line of sessions and the session headings", () => {
     assert.equal(page.input().labels?.[0]?.textContent, "Message to Implement", "the rest of the chat still updates");
   });
 
+  it("draws the line again when the run picks up a changed chain", async () => {
+    const page = await open();
+    page.reset(view({ phase: "idle", line }));
+    page.update(view({ line, index: 0 }));
+    page.update(view({ line: [line[0]!, ["Docs", "Fix"]], index: 0 }));
+    assert.deepEqual(stations(page).map((s) => s.getAttribute("aria-label")), ["Session 1: Plan (running), Review", "Session 2: Docs, Fix"]);
+  });
+
   it("names each session's cards with their state in words, marks the live one, and keeps its buttons through updates", async () => {
     const page = await open();
     page.reset(view({ line, index: 1 }), [{ kind: "assistant", card: "Plan", text: "x" }]);

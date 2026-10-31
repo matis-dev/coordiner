@@ -177,6 +177,19 @@ describe("ChainStore: saving", () => {
     assert.equal(store.error, "Changes could not be saved: EACCES: permission denied");
   });
 
+  it("refuses an edit that returns a reason: nothing is written, the reason is shown and counted, and the editor is told", async () => {
+    const { store, calls, add, saved } = setup();
+    await store.save(add(chain("a")));
+    await store.save(() => "Session 1 has started.");
+    assert.equal(calls.filter((c) => c.startsWith("write")).length, 1);
+    assert.deepEqual(store.chains.map((c) => c.id), ["a"]);
+    assert.equal(store.error, "Session 1 has started.");
+    assert.equal(store.unsaved, 1);
+    assert.equal(saved(), 2);
+    await store.save(add(chain("b")));
+    assert.equal(store.error, undefined);
+  });
+
   it("keeps saving after an edit that throws: the queue moves on, the problem is shown, and the editor is told", async () => {
     const { store, add, stored, saved } = setup();
     await store.save(() => {
@@ -185,6 +198,32 @@ describe("ChainStore: saving", () => {
     assert.equal(store.saving, false);
     assert.equal(store.error, "Changes could not be saved: bad edit");
     assert.equal(saved(), 1);
+    await store.save(add(chain("a")));
+    assert.deepEqual(stored(), ["a"]);
+  });
+});
+
+describe("ChainStore: reading in turn", () => {
+  it("sees the saves queued before it and not those queued after, without telling the editor", async () => {
+    const { store, add, saved } = setup();
+    const first = store.save(add(chain("a")));
+    const seen = store.inTurn((chains) => chains.map((c) => c.id));
+    const second = store.save(add(chain("b")));
+    assert.deepEqual(await seen, ["a"]);
+    await Promise.all([first, second]);
+    assert.deepEqual(store.chains.map((c) => c.id), ["a", "b"]);
+    assert.equal(saved(), 2, "only the two saves are told");
+  });
+
+  it("rejects with what the look threw, and the queue moves on", async () => {
+    const { store, add, stored } = setup();
+    await assert.rejects(
+      store.inTurn(() => {
+        throw new Error("bad look");
+      }),
+      /bad look/,
+    );
+    assert.equal(store.saving, false);
     await store.save(add(chain("a")));
     assert.deepEqual(stored(), ["a"]);
   });

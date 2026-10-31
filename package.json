@@ -246,11 +246,27 @@
     "views": {
       "coordiner": [
         {
+          "id": "coordiner.start",
+          "name": "Start",
+          "initialSize": 1
+        },
+        {
           "id": "coordiner.run",
-          "name": "Sessions"
+          "name": "Sessions",
+          "initialSize": 4
         }
       ]
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "coordiner.start",
+        "contents": "Start a session: a template, a single skill, or one of your chains.\n[Start…](command:coordiner.start)\nBuild a chain and run it from the editor tab.\n[Open Chains](command:coordiner.openChains)"
+      },
+      {
+        "view": "coordiner.run",
+        "contents": "No sessions yet."
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "pnpm run build",

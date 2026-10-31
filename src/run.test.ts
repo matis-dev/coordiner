@@ -37,6 +37,7 @@ function harness(script: Array<TurnResult | ((talk: Talk) => TurnResult)>, signa
       at: (where) => talk.at(where),
       takeQueued: (card) => talk.takeQueued(card),
       pausePending: () => talk.pausePending(),
+      giveBack: (texts) => talk.giveBack(texts),
       waitForYou: (request) => {
         waits.push(request);
         const move = talk.waitForYou(request);
@@ -816,3 +817,79 @@ describe("talkOn", () => {
     assert.deepEqual(requests, [{ prompt: "hello", model: "m-medium", resume: "sess-1" }]);
   });
 });
+
+describe("runChain: picking up the saved chain at each session", () => {
+  const card = (skill: string) => defaultCard(skill);
+  const chainOf = (...sessions: string[][]): Chain => ({ id: "own", name: "Own", sessions: sessions.map((skills) => ({ cards: skills.map(card) })) });
+  const done = (n: number) => reply("COORDINER: DONE", n);
+  // `answers` gives what each pickUp returns, in turn; past its end the chain it was given goes on as it is.
+  const withPickUp = (h: ReturnType<typeof harness>, answers: Array<Chain | string>) => {
+    const asked: number[] = [];
+    const deps: ChainDeps = {
+      ...h.deps,
+      prepareReview: async () => ({ kind: "ready", marked: 0 }),
+      pickUp: async (s, chain) => (asked.push(s), answers.shift() ?? chain),
+    };
+    return { deps, asked };
+  };
+
+  it("runs a later session as saved when it starts, in its new order", async () => {
+    const h = harness([done(1), done(2), done(3)]);
+    const { deps, asked } = withPickUp(h, [chainOf(["a"], ["b", "c"]), chainOf(["a"], ["c", "b"])]);
+    assert.equal((await runChain(chainOf(["a"], ["b", "c"]), deps)).status, "done");
+    assert.deepEqual(h.requests.map((r) => r.prompt), ["/a", "/c", "/b"]);
+    assert.deepEqual(asked, [0, 1]);
+  });
+
+  it("runs a session added while the run went, and stops where a shorter saved chain ends", async () => {
+    const added = harness([done(1), done(2), done(3)]);
+    await runChain(chainOf(["a"], ["b"]), withPickUp(added, [chainOf(["a"], ["b"]), chainOf(["a"], ["b"], ["c"])]).deps);
+    assert.deepEqual(added.requests.map((r) => r.prompt), ["/a", "/b", "/c"]);
+    const cut = harness([done(1)]);
+    assert.deepEqual(await runChain(chainOf(["a"], ["b"]), withPickUp(cut, [chainOf(["a"], ["b"]), chainOf(["a"])]).deps), { status: "done", text: "" });
+    assert.deepEqual(cut.requests.map((r) => r.prompt), ["/a"]);
+  });
+
+  it("waits for the user while a session cannot start, and looks again on Continue", async () => {
+    const h = harness([done(1), done(2)], undefined, [(t) => t.continue()]);
+    const { deps, asked } = withPickUp(h, [chainOf(["a"], []), "Session 2 has no skills.", chainOf(["a"], ["b"])]);
+    assert.equal((await runChain(chainOf(["a"], []), deps)).status, "done");
+    assert.deepEqual(h.waits.map((w) => [w.card, w.parked, w.ready]), [["Session 2", "Session 2 has no skills.", false]]);
+    assert.deepEqual(asked, [0, 1, 1]);
+    assert.deepEqual(h.requests.map((r) => r.prompt), ["/a", "/b"]);
+  });
+
+  it("ends halted at the session's first card when the user stops while it cannot start", async () => {
+    const h = harness([done(1)]);
+    const { deps } = withPickUp(h, [chainOf(["a"], []), "Session 2 has no skills."]);
+    assert.deepEqual(await runChain(chainOf(["a"], []), deps), { status: "halted", reason: "Session 2 has no skills.", at: { session: 1, card: 0 } });
+    assert.equal(h.requests.length, 1);
+  });
+
+  it("takes a message sent while waiting as a look again, and puts it in front of the session's first prompt", async () => {
+    const h = harness([done(1), done(2)], undefined, [(t) => void t.send("use the new API")]);
+    const { deps } = withPickUp(h, [chainOf(["a"], []), "Session 2 has no skills.", chainOf(["a"], ["b"])]);
+    assert.equal((await runChain(chainOf(["a"], []), deps)).status, "done");
+    assert.match(h.requests[1]!.prompt, /^use the new API\n\n\/b$/);
+  });
+
+  it("picks up the session a continued run enters at its first card, sending that card's own prompt, unless it resumes a session", async () => {
+    const fresh = harness([done(1)]);
+    const picked = withPickUp(fresh, [chainOf(["a"], ["new"])]);
+    await runChain(chainOf(["a"], ["old"]), picked.deps, { at: { session: 1, card: 0 }, prompt: "/old" });
+    assert.deepEqual([picked.asked, fresh.requests.map((r) => r.prompt)], [[1], ["/new"]]);
+    const resumed = harness([done(1)]);
+    const kept = withPickUp(resumed, [chainOf(["a"], ["new"])]);
+    await runChain(chainOf(["a"], ["old"]), kept.deps, { at: { session: 1, card: 0 }, resume: "sess-9", prompt: "Carry on." });
+    assert.deepEqual([kept.asked, resumed.requests.map((r) => [r.prompt, r.resume])], [[], [["Carry on.", "sess-9"]]]);
+  });
+
+  it("does not pick up a session a continued run enters at a later card, but does the ones after it", async () => {
+    const h = harness([done(1), done(2)]);
+    const { deps, asked } = withPickUp(h, []);
+    await runChain(chainOf(["a", "b"], ["c"]), deps, { at: { session: 0, card: 1 }, prompt: "/b" });
+    assert.deepEqual(asked, [1]);
+    assert.deepEqual(h.requests.map((r) => r.prompt), ["/b", "/c"]);
+  });
+});
+

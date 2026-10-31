@@ -179,9 +179,9 @@ For what each step does, the unattended rules, and where the run journal is kept
 
 ## Build and run a chain
 
-To run something without opening the editor, run **Coordiner: Start…** (the ▶ button in the **Sessions** view's title bar, or **New Session…** at the top of the view) and pick a template, a single skill or one of your chains.
+To run something without opening the editor, run **Coordiner: Start…** (the **Start…** button in the **Start** view at the top of the sidebar, or the ▶ button in the **Sessions** view's title bar) and pick a template, a single skill or one of your chains.
 
-Run **Coordiner: Open Chains** (or the list button in the **Sessions** view's title bar, or **Open Chains** at the top of the view). Templates, single skills and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
+Run **Coordiner: Open Chains** (the **Open Chains** button in the **Start** view, or the list button in the **Sessions** view's title bar). Templates, single skills and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
 
 Each template is named after what you bring to it, and **Run** asks for exactly that:
 
@@ -210,7 +210,7 @@ For a typed answer, Run then suggests a run name made from it, which you can cha
 ⏸ marks a card that pauses for you: the brainstorm, the debugging, the kickoff and the onboarding are conversations, and your answer at Run only opens them. The conversation happens in the run's chat, described below.
 
 1. Select a template and choose **Duplicate to edit**. A template's skills and arguments are read-only; changing a card's model, effort or pause copies it for you, and a line under the toolbar says "Saved as <template> copy".
-2. Edit the copy: rename it in the **Name** field, **Add** a skill from the list (every skill your Claude Code session offers, m-skills first), move cards with the arrow buttons or **Alt+←** / **Alt+→**, edit a card's arguments, add or remove sessions. Every change is saved at once. After you remove a card or a session, a line under the toolbar says what went, with **Undo** to put it back; it clears at your next edit or when you pick another chain. **Delete chain** sits at the far end of the toolbar and asks first. To have Run ask for an input, put one placeholder in a card's arguments:
+2. Edit the copy: rename it in the **Name** field, **Add** a skill from the list (every skill your Claude Code session offers, m-skills first), move cards (below), edit a card's arguments, add or remove sessions. Every change is saved at once. After you remove a card or a session, a line under the toolbar says what went, with **Undo** to put it back; it clears at your next edit or when you pick another chain. **Delete chain** sits at the far end of the toolbar and asks first. To have Run ask for an input, put one placeholder in a card's arguments:
 
    | Placeholder | Run asks for | What replaces it |
    |---|---|---|
@@ -220,6 +220,12 @@ For a typed answer, Run then suggests a run name made from it, which you can cha
 
    A chain uses one kind of placeholder at most. A chain with none asks only for a run name.
 3. Choose **Run**. A disabled **Run** says why underneath.
+
+### Move cards, and edit a chain while it runs
+
+On your own chains, drag a card by its name: dropped on a card it goes in front of that card, dropped on a session anywhere else it goes to the end of that session, in its own session or another. The arrow buttons and **Alt+←** / **Alt+→** do the same without dragging: past the end of a session they move the card to the near end of the next or previous session. A session with 30 skills takes no more. A session you empty stays, and **Run** says it has no skills until you fill or remove it.
+
+You can keep editing a chain while it runs. Each session is read from your saved chain when the run reaches it, so changes to sessions the run has not started yet are run. The sessions it has started keep their cards in order until it ends: their arrows, **Remove**, **Remove session** and dragging are off, and their heading says why. You can still change their cards' arguments, model, effort and pause, and **Add** a skill at their end; those changes are saved for the next run, since this run already read those sessions. If the session the run reaches cannot start (it has no skills, or it asks for an input the run was not given), the run waits in the chat with the reason: fix the chain and choose **Continue**, or **Stop**, and **Continue** on its line of work picks it up at that session later.
 
 ### Choose a card's model and effort
 

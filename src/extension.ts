@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { lastFirst, parseStories, slugify, storyText, wholeFileStory, type Story } from "./backlog.ts";
 import { ChainStore, type StoreFs } from "./chain-store.ts";
-import { briefHeading, inputOf, INPUTS, MAX_INPUT_CHARS, MSKILLS_URL, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
+import { briefHeading, inputOf, INPUTS, keepsStarted, MAX_INPUT_CHARS, MSKILLS_URL, pickUpFrom, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import { awakeHelper, keepAwake, type Helper, type Spawned } from "./awake.ts";
 import { canGoOnAlone, needsYou } from "./chat-logic.ts";
@@ -66,20 +66,16 @@ const startHelper = ({ file, args }: Helper): Spawned => {
 
 // The Sessions list: the session open now at the top, with its steps and, under the running one, the background processes of its
 // turn; under it this repo's lines of work, one per worktree, each with its earlier sessions and the steps they ran.
-// Above them, the two ways to start a session, so they stay in sight once there is history.
-type ActionRow = { kind: "action"; command: string; label: string; description: string; icon: string };
 type OpenRow = { kind: "open" };
 // `continuation` is set when the line's latest run can be continued; `root` is the repo the worktree belongs to; `open`, that this
 // window has the worktree open.
 type WorktreeRow = { kind: "worktree"; line: Line; root: string; open: boolean; state: WorktreeState; head?: string; continuation?: Continuation };
 type PastRow = { kind: "past"; run: PastRun; parent: WorktreeRow };
 type PastStep = { kind: "past-step"; step: StepView; index: number; parent: PastRow };
-type RunItem = ActionRow | OpenRow | WorktreeRow | PastRow | PastStep | StepView | Process;
+type RunItem = OpenRow | WorktreeRow | PastRow | PastStep | StepView | Process;
 const OPEN: OpenRow = { kind: "open" };
-const ACTIONS: readonly ActionRow[] = [
-  { kind: "action", command: "coordiner.start", label: "New Session…", description: "a template, a single skill, or one of your chains", icon: "play" },
-  { kind: "action", command: "coordiner.openChains", label: "Open Chains", description: "build a chain and run it from the editor tab", icon: "list-ordered" },
-];
+// The Start view holds nothing: an empty tree always shows its welcome text, whose buttons (package.json `viewsWelcome`) start a session.
+const START: vscode.TreeDataProvider<never> = { getTreeItem: (element) => element, getChildren: () => [] };
 const isProcess = (item: RunItem): item is Process => "id" in item && !("kind" in item);
 
 class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
@@ -138,15 +134,9 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
     return item;
   }
 
-  private sessionTreeItem(element: ActionRow | OpenRow | WorktreeRow | PastRow | PastStep): vscode.TreeItem {
+  private sessionTreeItem(element: OpenRow | WorktreeRow | PastRow | PastStep): vscode.TreeItem {
     const { Collapsed, Expanded, None } = vscode.TreeItemCollapsibleState;
     switch (element.kind) {
-      case "action": {
-        const item = treeItem({ ...element, accessibleLabel: `${element.label}, ${element.description}` });
-        item.id = `action:${element.command}`;
-        item.command = { command: element.command, title: element.label };
-        return item;
-      }
       case "open": {
         const item = treeItem(currentItem(this.open?.title ?? "", this.open?.phase ?? "ended"));
         item.id = "open";
@@ -184,11 +174,10 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
   }
 
   getChildren(element?: RunItem): vscode.ProviderResult<RunItem[]> {
-    if (!element) return [...ACTIONS, ...(this.open ? [OPEN] : []), ...this.lines];
+    if (!element) return [...(this.open ? [OPEN] : []), ...this.lines];
     if (element === OPEN) return this.steps;
     if ("kind" in element) {
       if (element.kind === "worktree") return this.runsOf(element);
-      if (element.kind === "action") return [];
       return element.kind === "past" ? element.run.steps.map((step, index): PastStep => ({ kind: "past-step", step, index, parent: element })) : [];
     }
     return !isProcess(element) && element === this.running() ? this.processes : [];
@@ -402,7 +391,8 @@ async function announce(outcome: Outcome, heading: string, worktree: Worktree, c
 // earlier session is reopened. `stopProcess` exists while a turn can run; it acts on the turn running at the time. `after` is the
 // chat after the run. `open` is the session the chat belongs to: its row title and its journal file; `opening` is the journal file
 // of an earlier session being reopened.
-type RunState = { abort?: AbortController; chainId?: string; chat?: RunChat; stopProcess?: (process: Process) => Promise<void>; after?: After; open?: { title: string; file: string }; opening?: string };
+// `through`: the running chain's sessions up to it have started, so their cards keep their order until the run ends.
+type RunState = { abort?: AbortController; chainId?: string; through?: number; chat?: RunChat; stopProcess?: (process: Process) => Promise<void>; after?: After; open?: { title: string; file: string }; opening?: string };
 
 // Where a next chain runs: the worktree of the run before, that run's name, and its last reply, which becomes the input.
 type Here = { worktree: Worktree; name: string; slug: string; card: string; input: string };
@@ -419,8 +409,11 @@ type Journal = (record: JournalRecord) => Promise<void>;
 // A run the user confirmed: the filled chain, its name, and a worktree whose setup is done.
 // `questions`: how the run treats a question from a card that runs unattended, chosen with the run's confirmation.
 // A continued run also has where it picks up, and the steps and transcript it had, which the list and the chat start from.
+// `definition` and `input` are the chain before the input filled it, and the input: a session picks up the saved chain with them.
 type Place = {
   chain: Chain;
+  definition: Chain;
+  input: string;
   name: string;
   slug: string;
   worktree: Worktree;
@@ -450,6 +443,8 @@ type RunContext = {
   needsYou: (card: string) => void;
   // The open session changed: list the earlier ones again, without it.
   sessionsChanged: () => void;
+  // Looks at the saved chains between the saves queued before and after, so a check made there holds until the next save.
+  savedChains: <T>(look: (chains: readonly Chain[]) => T) => Promise<T>;
 };
 
 // The run's announcement waits on a notification, so it comes after the slot is given back: the chat after the run needs the slot.
@@ -661,7 +656,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
       return undefined;
     }
   }
-  return { chain: filled.chain, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
+  return { chain: filled.chain, definition: chain, input: input.text, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
 }
 
 // A chain in a worktree that is already there: no new worktree and no setup. After a run, its input is that run's last reply; in a
@@ -709,7 +704,7 @@ async function confirmHere(chain: Chain, where: Extract<Where, { kind: "after" |
   if (!questions) return undefined;
   endAfter(ctx.state);
   const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models, questions, definition: chain, input: input.text });
-  return { chain: filled.chain, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
+  return { chain: filled.chain, definition: chain, input: input.text, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
 }
 
 // A stopped run, continued at its card in its own worktree. It goes on in the same journal, so reopening it later shows all of it.
@@ -730,7 +725,8 @@ async function confirmContinue({ run, continuation }: Extract<Where, { kind: "co
   const journal = journalAt(ctx, run.file);
   void journal({ type: "continued", position: from.at, questions });
   ctx.output.appendLine(`Journal: ${join(journalDir(ctx), run.file)}`);
-  return { chain, name: run.story, slug: slugOf(run.worktree), worktree, models: tools.models, journal, journalFile: run.file, questions, from, past: { steps: run.steps, entries: run.entries } };
+  // continuePoint gives a continuation only for a run whose definition and input it read.
+  return { chain, definition: run.definition!, input: run.input!, name: run.story, slug: slugOf(run.worktree), worktree, models: tools.models, journal, journalFile: run.file, questions, from, past: { steps: run.steps, entries: run.entries } };
 }
 
 type Turn = (request: AfterAsk & { mode: TurnMode }, signal: AbortSignal) => Promise<TurnResult>;
@@ -738,7 +734,8 @@ type Turns = { turn: Turn; stopProcess: (process: Process) => Promise<void>; las
 
 // The turns of a run's sessions, or of a reopened session's, in its worktree. Each turn's session, model and reply is journaled, so
 // the chat can be reopened on it after VS Code closes.
-function sessionTurns(chat: RunChat, worktree: Worktree, required: readonly string[], journal: Journal, ctx: RunContext, log: (line: string) => void): Turns {
+// `required` is read at each turn, since a run that picks up a changed chain may need other skills.
+function sessionTurns(chat: RunChat, worktree: Worktree, required: () => readonly string[], journal: Journal, ctx: RunContext, log: (line: string) => void): Turns {
   const { provider, output } = ctx;
   // What can act on the turn that is running; the turn's processes are listed only while it runs.
   let control: TurnControl | undefined;
@@ -763,7 +760,7 @@ function sessionTurns(chat: RunChat, worktree: Worktree, required: readonly stri
         cwd: worktree.path,
         env: tools.env,
         claudePath: tools.claudePath,
-        requiredCommands: required,
+        requiredCommands: required(),
         signal,
         onGuard: log,
         onStarted: (c) => {
@@ -827,7 +824,30 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     }
     provider.update(provider.steps.map((step, i) => (i === event.index ? { ...step, status: event.status, detail: event.detail } : step)));
   };
-  const { turn, stopProcess, last } = sessionTurns(chat, worktree, requiredSkills(chain), journal, ctx, log);
+  // Each session the run enters at its first card runs as saved then; a template or a deleted chain goes on as the run has it.
+  // Only a session that can start is locked, so one that cannot stays free for the user to fix while the run waits.
+  let current = chain;
+  let definition = place.definition;
+  const kind = inputOf(place.definition);
+  const pickUp = async (s: number): Promise<Chain | string> => {
+    const picked = await ctx.savedChains((chains) => {
+      const next = pickUpFrom(definition, chains, s, kind);
+      if (typeof next !== "string") state.through = s;
+      return next;
+    });
+    ctx.onRunChange();
+    if (typeof picked === "string") return picked;
+    if (JSON.stringify(picked.sessions) !== JSON.stringify(definition.sessions)) {
+      definition = picked;
+      void journal({ type: "definition", definition });
+      chat.relined(stations(picked));
+    }
+    const filled = fillInput(picked, place.input);
+    if (!filled.ok) return filled.reason;
+    current = filled.chain;
+    return current;
+  };
+  const { turn, stopProcess, last } = sessionTurns(chat, worktree, () => requiredSkills(current), journal, ctx, log);
   state.stopProcess = stopProcess;
   let outcome: Outcome | undefined;
   try {
@@ -838,10 +858,12 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
       signal: abort.signal,
       talk: chat.talk,
       prepareReview: () => prepareReview(worktree.path, exec),
+      pickUp,
     }, place.from);
   } finally {
     if (!outcome) chat.talk.end();
     state.abort = undefined;
+    state.through = undefined;
     state.stopProcess = undefined;
     ctx.onRunChange();
   }
@@ -851,7 +873,7 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
   chat.ended(outcome, lastTurn && { card: lastTurn.card });
   if (lastTurn) talkAfter(lastTurn, { chat, place, ctx, stopProcess, turn });
   const ended = outcome;
-  return () => announce(ended, name, worktree, chain, output, chat.decided());
+  return () => announce(ended, name, worktree, current, output, chat.decided());
 }
 
 // The chat after the run: each message is a turn of the run's last session, and each turn holds the slot, so a new run waits
@@ -930,7 +952,7 @@ async function reopen(file: string, ctx: RunContext): Promise<boolean> {
   if (run.last && there) {
     const worktree: Worktree = { root: run.repo, path: run.worktree, branch: run.branch };
     // A chat turn runs no skill of its own, so no skill is required of the session.
-    const { turn, stopProcess } = sessionTurns(chat, worktree, [], journal, ctx, log);
+    const { turn, stopProcess } = sessionTurns(chat, worktree, () => [], journal, ctx, log);
     chat.reopened(run.ending, { card: run.last.card });
     talkAfter(run.last, { chat, place: { worktree, name: run.story, slug: slugOf(run.worktree) }, ctx, stopProcess, turn });
   } else {
@@ -1020,6 +1042,11 @@ async function loadSessions(ctx: RunContext, skipped: Set<string>, root: string)
 }
 
 // ── Chains editor ─────────────────────────────────────────────────────────────
+
+const STARTED_KEEP_ORDER = "A change was not saved: the sessions the run has started keep their cards in order until it ends. The editor shows your chains as last saved.";
+
+// The sessions the run has started, which the lanes lock; nothing once it has ended.
+const lockedAt = ({ abort, chainId, through }: RunState): Pick<EditorState, "locked"> => (abort && chainId && through !== undefined ? { locked: { chainId, through } } : {});
 
 // Where the run is, for the lanes to mark; nothing once it has ended.
 function runningAt({ abort, chainId, chat }: RunState): Pick<EditorState, "runningAt"> {
@@ -1118,6 +1145,12 @@ class ChainsEditor {
     };
   }
 
+  // The saved chains, loaded first, looked at in turn with the saves (ChainStore.inTurn).
+  async savedChains<T>(look: (chains: readonly Chain[]) => T): Promise<T> {
+    await this.store.load();
+    return this.store.inTurn(look);
+  }
+
   postChat(message: ChatMessage): void {
     void this.panel?.webview.postMessage(message);
   }
@@ -1133,6 +1166,7 @@ class ChainsEditor {
       chains: this.store.chains,
       running: this.ctx.slot.busy(),
       ...runningAt(run),
+      ...lockedAt(run),
       ...this.discovered(),
       ...(this.paletteError ? { paletteError: this.paletteError } : {}),
       ...(this.modelsError ? { modelsError: this.modelsError } : {}),
@@ -1157,9 +1191,17 @@ class ChainsEditor {
         this.postChat({ type: "chat", chat: this.ctx.state.chat?.view() ?? IDLE_CHAT, entries: this.ctx.state.chat?.entries() ?? [] });
         if (!this.palette) await this.discover();
         return;
-      case "save":
-        await this.store.save((chains) => (chains.some((c) => c.id === message.chain.id) ? chains.map((c) => (c.id === message.chain.id ? message.chain : c)) : [...chains, message.chain]));
+      case "save": {
+        const { chain } = message;
+        // Checked against the chain as the saves before it left it, and the run as it is when this save's turn comes.
+        await this.store.save((chains) => {
+          const { abort, chainId, through } = this.ctx.state;
+          const stored = chains.find((c) => c.id === chain.id);
+          if (abort && chainId === chain.id && through !== undefined && stored && !keepsStarted(stored, chain, through)) return STARTED_KEEP_ORDER;
+          return stored ? chains.map((c) => (c.id === chain.id ? chain : c)) : [...chains, chain];
+        });
         return;
+      }
       case "delete": {
         const chain = this.store.chains.find((c) => c.id === message.id);
         if (!chain) return;
@@ -1421,6 +1463,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Coordiner");
   const provider = new SessionsProvider();
   const view = vscode.window.createTreeView("coordiner.run", { treeDataProvider: provider });
+  const start = vscode.window.createTreeView("coordiner.start", { treeDataProvider: START });
   const state: RunState = {};
   // Reveal without stealing focus; a hidden view just rejects, which is fine.
   const reveal = (step: RunItem) => void view.reveal(step, { focus: false, select: false }).then(undefined, () => undefined);
@@ -1459,6 +1502,7 @@ export function activate(context: vscode.ExtensionContext): void {
     postChat: (message) => editor?.postChat(message),
     needsYou: (card) => editor?.needsYou(card),
     sessionsChanged,
+    savedChains: (look) => editor!.savedChains(look),
   };
   editor = new ChainsEditor(context.extensionUri, join(context.globalStorageUri.fsPath, "chains.json"), ctx);
   const story = TEMPLATES.find((t) => t.id === "story")!;
@@ -1467,6 +1511,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     output,
     view,
+    start,
     awake,
     vscode.workspace.onDidChangeConfiguration((event) => event.affectsConfiguration("coordiner.keepAwake") && syncAwake()),
     // Another window may have run something meanwhile.

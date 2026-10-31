@@ -1,4 +1,5 @@
 import { INPUT_KINDS, inputOf, INPUTS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, runnable, skillDefault, usesMskills, type Card, type Chain, type Effort } from "./chains.ts";
+import type { Slot } from "./chain-edit.ts";
 import type { ModelOption } from "./skills.ts";
 
 // The decisions behind the chains webview, kept out of the DOM script so they can be tested. The webview loads this module from dist/.
@@ -9,6 +10,7 @@ export type EditorView = {
   palette?: readonly { skill: string }[];
   models?: readonly ModelOption[];
   tierEfforts?: readonly Effort[];
+  locked?: { chainId: string; through: number };
 };
 
 // Until the models are listed nothing is offered, and nothing is refused: the session's own model check still guards the turn.
@@ -109,11 +111,33 @@ export const modelKey = (s: number, i: number): string => `model-${s}-${i}`;
 export const effortKey = (s: number, i: number): string => `effort-${s}-${i}`;
 export const pauseKey = (s: number, i: number): string => `pause-${s}-${i}`;
 
-// After a move, focus stays on the same button of the moved card; at either end nothing moves.
-export function afterMove(s: number, i: number, delta: -1 | 1, count: number): string | undefined {
-  const to = i + delta;
-  return to < 0 || to >= count ? undefined : moveKey(s, to, delta);
+// Why a session's cards cannot change places: the run has started it.
+export const lockReason = (chain: Chain, s: number, view: EditorView): string | undefined =>
+  view.locked?.chainId === chain.id && s <= view.locked.through ? `Session ${s + 1} has started: its cards keep their order until the run ends.` : undefined;
+
+// Where an arrow moves a card: its neighbour's place, or past either end of its session, the near end of the session that way.
+// Nothing past either end of the chain.
+export function moveTarget(chain: Chain, s: number, i: number, delta: -1 | 1): Slot | undefined {
+  const count = chain.sessions[s]?.cards.length ?? 0;
+  if (i + delta >= 0 && i + delta < count) return { s, i: i + delta };
+  const next = chain.sessions[s + delta];
+  if (!next) return undefined;
+  return { s: s + delta, i: delta < 0 ? next.cards.length : 0 };
 }
+
+// Where a dropped card ends: before the card it was dropped on, or at the end of the session (`before` undefined).
+export function dropTarget(chain: Chain, from: Slot, s: number, before?: number): Slot {
+  const count = chain.sessions[s]?.cards.length ?? 0;
+  const at = before ?? count;
+  return { s, i: s === from.s && from.i < at ? at - 1 : at };
+}
+
+// Why a card cannot go from `from` to `to`: either session has started, or the other session is full.
+export const moveReason = (chain: Chain, from: Slot, to: Slot, view: EditorView): string | undefined =>
+  lockReason(chain, from.s, view) ?? lockReason(chain, to.s, view) ?? (to.s === from.s ? undefined : addCardReason(chain, to.s));
+
+export const movedNote = (label: string, from: Slot, to: Slot): string =>
+  to.s === from.s ? `Moved ${label} to position ${to.i + 1}` : `Moved ${label} to session ${to.s + 1}, position ${to.i + 1}`;
 
 // After a remove, focus goes to the card that took its place, else the one before it, else the session's Add button.
 export function afterRemove(s: number, i: number, count: number): string {

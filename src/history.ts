@@ -79,10 +79,13 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
   let questions: QuestionWait = firstWait;
 
   const shape = parseChainShape(start.definition);
-  const definition = typeof shape === "string" || !str(start.input, MAX_INPUT_CHARS) ? undefined : shape;
+  // A run picks up the saved chain as each session starts; the latest it picked up is the one to continue from.
+  let definition = typeof shape === "string" || !str(start.input, MAX_INPUT_CHARS) ? undefined : shape;
   const input = definition ? (start.input as string) : undefined;
   const inChain = (v: unknown): v is At =>
     isRecord(v) && index(v.session) && index(v.card) && definition?.sessions[v.session as number]?.cards[v.card as number] !== undefined;
+  // A run halts in front of a session that cannot start, which may have had no cards when the run last picked the chain up.
+  const atSessionStart = (v: unknown): v is At => isRecord(v) && index(v.session) && v.card === 0 && definition?.sessions[v.session as number] !== undefined;
 
   const steps: StepView[] = [];
   // Each step's card, kept only while the chain is known.
@@ -130,6 +133,11 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
           questions = r.questions;
         }
         break;
+      case "definition": {
+        const picked = definition && parseChainShape(r.definition);
+        if (picked && typeof picked !== "string") definition = picked;
+        break;
+      }
       case "you":
         if (str(r.card, 1000) && str(r.text)) transcript.add([{ kind: "you", card: plain(r.card), text: plain(r.text) }]);
         break;
@@ -159,7 +167,8 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
           outcome = parsed;
           // outcomeOf took it, so it is an object.
           const { at } = r.outcome as { at?: unknown };
-          stoppedAt = (parsed.status === "halted" || parsed.status === "failed") && inChain(at) ? { session: at.session, card: at.card } : undefined;
+          stoppedAt =
+            (parsed.status === "halted" || parsed.status === "failed") && (inChain(at) || (parsed.status === "halted" && atSessionStart(at))) ? { session: at.session, card: at.card } : undefined;
           transcript.add([endEntry(parsed)]);
         }
         break;
@@ -210,10 +219,13 @@ export function continuePoint(run: PastRun): Continuation | undefined {
   if (outcome && outcome.status !== "halted" && outcome.status !== "failed" && outcome.status !== "stopped") return undefined;
   const filled = fillInput(definition, input);
   if (!filled.ok) return undefined;
-  const card = filled.chain.sessions[lastCard.at.session]!.cards[lastCard.at.card]!;
+  const card = filled.chain.sessions[lastCard.at.session]!.cards[lastCard.at.card];
   const reason = !outcome ? CLOSED_MID_RUN : outcome.status === "halted" ? outcome.reason : outcome.status === "failed" ? outcome.error : "the user stopped the run";
   // A card whose prompt never reached a session is sent it again; one that had given its reply is asked for its status line again;
   // any other is asked to carry on.
+  // A halt in front of a session that had no cards names none: the run picks that session up as saved when it enters it, so it
+  // needs no prompt of its own.
+  if (!card) return { chain: filled.chain, from: { at: lastCard.at, prompt: "" }, card: `Session ${lastCard.at.session + 1}`, reason };
   const retry = outcome?.status === "halted" || outcome?.status === "failed" ? continueAfter(reason) : pickUpAfter(reason);
   const prompt = !lastCard.reached ? cardPrompt(card) : lastCard.finished ? restateAfter(reason) : retry;
   return { chain: filled.chain, from: { at: lastCard.at, ...(lastCard.tier ? { tier: lastCard.tier } : {}), ...(lastCard.resume ? { resume: lastCard.resume } : {}), prompt }, card: card.label, reason };

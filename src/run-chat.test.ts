@@ -550,4 +550,11 @@ describe("what each card and session worked and spent", () => {
     assert.deepEqual(setup(undefined, undefined, undefined, undefined, line).chat.view().line, line);
     assert.equal(Object.hasOwn(setup().chat.view(), "line"), false);
   });
+
+  it("draws the chain the run picked up from then on", () => {
+    const { chat, updates } = setup(undefined, undefined, undefined, undefined, [["Plan"], ["Review"]]);
+    chat.relined([["Plan"], ["Fix", "Review"]]);
+    assert.deepEqual(chat.view().line, [["Plan"], ["Fix", "Review"]]);
+    assert.deepEqual(updates().at(-1), { type: "chatUpdate", chat: chat.view() });
+  });
 });

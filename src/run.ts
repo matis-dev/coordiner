@@ -41,7 +41,7 @@ export type RunDeps = {
   models: Models;
   emit(event: RunEvent): void;
   signal: AbortSignal;
-  talk: Pick<Talk, "at" | "takeQueued" | "pausePending" | "waitForYou">;
+  talk: Pick<Talk, "at" | "takeQueued" | "pausePending" | "waitForYou" | "giveBack">;
   // Times each turn; Date.now when absent.
   now?: () => number;
 };
@@ -283,18 +283,47 @@ export function fillInput(chain: Chain, text: string): FilledChain {
   };
 }
 
-export type ChainDeps = RunDeps & { prepareReview(): Promise<ReviewPrep> };
+export type ChainDeps = RunDeps & {
+  prepareReview(): Promise<ReviewPrep>;
+  // The chain as saved, read as session `s` is about to start: the chain to run on with, or why session `s` cannot start.
+  pickUp?(s: number, chain: Chain): Promise<Chain | string>;
+};
+
+// While session `s` cannot start, the run waits for the user with the reason. Continue looks again; a message does too, and goes in
+// front of the session's first prompt once it starts; Stop ends the run halted there, so it can be continued at that session.
+async function pickUpAt(s: number, chain: Chain, deps: ChainDeps, pickUp: NonNullable<ChainDeps["pickUp"]>): Promise<Chain | Outcome> {
+  const held: string[] = [];
+  for (;;) {
+    const picked = await pickUp(s, chain);
+    if (typeof picked !== "string") {
+      if (held.length > 0) deps.talk.giveBack(held);
+      return picked;
+    }
+    const move = await deps.talk.waitForYou({ card: `Session ${s + 1}`, ready: false, signal: deps.signal, parked: picked });
+    if (move.kind === "stopped") return { status: "halted", reason: picked, at: { session: s, card: 0 } };
+    if (move.kind === "message") held.push(move.text);
+  }
+}
 
 // Each session is fresh (never a resume), so a reviewer does not share the author's context. A session that opens with the
 // uncommitted review first marks the new files so the review sees them. With `from`, the chain picks up at that card: the sessions
-// before it are skipped, and a session entered at a later card has its review already prepared.
+// before it are skipped, and a session entered at a later card has its review already prepared. With `pickUp`, each session entered
+// at its first card is run as saved then, so edits to sessions not started yet reach the run.
 export async function runChain(chain: Chain, deps: ChainDeps, from?: StartPoint): Promise<Outcome> {
   let steps = 0;
   let last: Outcome = { status: "refused", reason: "This chain has no sessions." };
-  for (const [s, session] of chain.sessions.entries()) {
-    if (from && s < from.at.session) continue;
+  for (let s = from?.at.session ?? 0; s < chain.sessions.length; s++) {
     if (s > 0 && deps.signal.aborted) return { status: "stopped" };
-    const start = from?.at.session === s ? { ...from, card: from.at.card } : undefined;
+    let start = from?.at.session === s ? { ...from, card: from.at.card } : undefined;
+    // A session with no conversation to resume has not started: it runs as saved, from its first card's own prompt.
+    if (deps.pickUp && (start === undefined || (start.card === 0 && start.resume === undefined))) {
+      const picked = await pickUpAt(s, chain, deps, deps.pickUp);
+      if ("status" in picked) return picked;
+      chain = picked;
+      start = undefined;
+      if (s >= chain.sessions.length) break;
+    }
+    const session = chain.sessions[s]!;
     if (session.cards[0]?.skill === REVIEW && (start?.card ?? 0) === 0) {
       const prep = await deps.prepareReview();
       const at = { session: s, card: 0 };

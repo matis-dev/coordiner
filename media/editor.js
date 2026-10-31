@@ -30,6 +30,10 @@ export async function start() {
   let notice;
   // The skill picked in each session's palette, by chain and session: a re-render (a run moving on, say) keeps it.
   const picks = new Map();
+  // The card being dragged, { chainId, from, label }: set only by a drag this page started, so a file or text dragged in from
+  // outside is never dropped. The node showing where it would land carries a drop-* class.
+  let dragging;
+  let marked;
 
   function el(tag, attrs = {}, ...children) {
     const node = document.createElement(tag);
@@ -155,7 +159,14 @@ export async function start() {
     const missing = logic.isMissing(c, state);
     const running = logic.runningCard(chain, s, state.runningAt) === i;
     const label = c.label;
-    const children = [el("span", { class: "card-label" }, label), el("code", { class: "skill" }, c.skill)];
+    const locked = editable ? logic.lockReason(chain, s, state) : undefined;
+    // The label, with its station number, is the handle: the card's fields keep their own pointer behaviour.
+    const handle = el("span", { class: "card-label", draggable: editable && !locked ? "true" : undefined, ondragstart: (e) => {
+      dragging = { chainId: chain.id, from: { s, i }, label };
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      e.currentTarget.closest(".card").classList.add("dragging");
+    } }, label);
+    const children = [handle, el("code", { class: "skill" }, c.skill)];
     if (running) children.push(el("span", { class: "flag running" }, state.runningAt.waiting ? "Waiting for you" : "Running"));
     if (editable) {
       const id = `args-${s}-${i}`;
@@ -173,24 +184,44 @@ export async function start() {
     if (!logic.modelOffered(c, state)) children.push(el("span", { class: "flag" }, "Model not offered by this session"));
     if (editable) {
       const cards = chain.sessions[s].cards;
+      const from = { s, i };
+      // Why an arrow cannot move the card that way: its session has started, or the move is refused. Past either end of the chain
+      // it just does nothing.
+      const blocked = (delta) => {
+        const to = logic.moveTarget(chain, s, i, delta);
+        return locked ?? (to && logic.moveReason(chain, from, to, state));
+      };
       const move = (delta) => {
-        const focus = logic.afterMove(s, i, delta, cards.length);
-        if (focus) save(edit.moveCard(chain, s, i, delta), `Moved ${label} to position ${i + delta + 1}`, focus);
+        const why = blocked(delta);
+        if (why) return announce(why);
+        const to = logic.moveTarget(chain, s, i, delta);
+        if (!to) return;
+        save(edit.moveTo(chain, from, to), logic.movedNote(label, from, to), logic.moveKey(to.s, to.i, delta));
+      };
+      const arrow = (delta, name, glyph) => {
+        const why = blocked(delta);
+        return el(
+          "button",
+          { type: "button", "aria-label": `Move ${label} ${name}`, "data-focus": logic.moveKey(s, i, delta), "aria-disabled": String(why !== undefined), "aria-describedby": locked ? `locked-${s}` : undefined, title: why, onclick: () => move(delta) },
+          glyph,
+        );
       };
       children.push(
         el(
           "div",
           { class: "card-actions" },
-          el("button", { type: "button", "aria-label": `Move ${label} left`, "data-focus": logic.moveKey(s, i, -1), onclick: () => move(-1) }, "←"),
-          el("button", { type: "button", "aria-label": `Move ${label} right`, "data-focus": logic.moveKey(s, i, 1), onclick: () => move(1) }, "→"),
+          arrow(-1, "left", "←"),
+          arrow(1, "right", "→"),
           el(
             "button",
-            { type: "button", "data-focus": logic.removeKey(s, i), "aria-label": `Remove ${label}`, onclick: () =>
+            { type: "button", "data-focus": logic.removeKey(s, i), "aria-label": `Remove ${label}`, "aria-disabled": String(locked !== undefined), "aria-describedby": locked ? `locked-${s}` : undefined, title: locked, onclick: () => {
+              if (locked) return announce(locked);
               save(edit.removeCard(chain, s, i), `Removed ${label}`, logic.afterRemove(s, i, cards.length), {
                 chainId: chain.id,
                 text: `Removed ${label}`,
                 undo: { chain, name: `Undo remove ${label}`, said: `Restored ${label}`, focus: logic.removeKey(s, i) },
-              }) },
+              });
+            } },
             "Remove",
           ),
         ),
@@ -202,11 +233,49 @@ export async function start() {
           if (delta === undefined) return;
           e.preventDefault();
           move(delta);
-        } },
+        }, ondragover: (e) => dragOver(e, chain, s, i), ondrop: (e) => drop(e, chain, s, i) },
         children,
       );
     }
     return el("li", { class: "card", "aria-current": running ? "step" : undefined }, children);
+  }
+
+  // A drop target takes only this page's own drag, of a card of the chain on screen. A drop on a card puts the dragged card before
+  // it; a drop on the session elsewhere puts it at the end. Where the move is refused, nothing is marked and the drop says why.
+  function dragOver(e, chain, s, before) {
+    if (dragging?.chainId !== chain.id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const to = logic.dropTarget(chain, dragging.from, s, before);
+    unmark();
+    if (logic.moveReason(chain, dragging.from, to, state)) return;
+    marked = e.currentTarget;
+    marked.classList.add(before === undefined ? "drop-end" : "drop-before");
+  }
+
+  function drop(e, chain, s, before) {
+    if (dragging?.chainId !== chain.id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const { from, label } = dragging;
+    endDrag();
+    const to = logic.dropTarget(chain, from, s, before);
+    const why = logic.moveReason(chain, from, to, state);
+    if (why) announce(why);
+    else if (to.s !== from.s || to.i !== from.i) save(edit.moveTo(chain, from, to), logic.movedNote(label, from, to), logic.moveKey(to.s, to.i, 1));
+    // A state held back for the drag renders now, unless the save just did.
+    if (deferred) applyState();
+  }
+
+  function unmark() {
+    marked?.classList.remove("drop-before", "drop-end");
+    marked = undefined;
+  }
+
+  function endDrag() {
+    dragging = undefined;
+    unmark();
+    detail.querySelector(".card.dragging")?.classList.remove("dragging");
   }
 
   // Model, effort and pause, each a native control whose label names the card, on every card: on a template, a change makes a copy.
@@ -282,7 +351,7 @@ export async function start() {
       el("select", { id, "data-focus": id, onchange: (e) => picks.set(key, e.target.value) }, options),
       el(
         "button",
-        { type: "button", "data-focus": logic.addKey(s), "aria-disabled": String(full !== undefined), "aria-describedby": full ? `full-${s}` : undefined, title: full, onclick: () => {
+        { type: "button", class: "outline", "data-focus": logic.addKey(s), "aria-disabled": String(full !== undefined), "aria-describedby": full ? `full-${s}` : undefined, title: full, onclick: () => {
           if (full) return announce(full);
           const skill = document.getElementById(id).value;
           if (!skill) return;
@@ -325,8 +394,8 @@ export async function start() {
         } },
         `Run ${chain.name}`,
       ),
-      el("button", { type: "button", "data-focus": "duplicate", onclick: () => copyOf(chain) }, editable ? "Duplicate" : "Duplicate to edit"),
-      editable ? el("button", { type: "button", class: "end", "data-focus": "delete-chain", onclick: () => vscode.postMessage({ type: "delete", id: chain.id }) }, "Delete chain") : undefined,
+      el("button", { type: "button", class: "accent", "data-focus": "duplicate", onclick: () => copyOf(chain) }, editable ? "Duplicate" : "Duplicate to edit"),
+      editable ? el("button", { type: "button", class: "end danger", "data-focus": "delete-chain", onclick: () => vscode.postMessage({ type: "delete", id: chain.id }) }, "Delete chain") : undefined,
     ];
     parts.push(el("div", { class: "toolbar" }, toolbar));
     // Not a live region: the status region already said it once.
@@ -351,20 +420,31 @@ export async function start() {
     chain.sessions.forEach((session, s) => {
       if (s > 0) parts.push(el("div", { class: "handover", role: "separator", "aria-label": `Fresh context: session ${s + 1} starts a new conversation` }, "fresh context"));
       const heading = `session-h-${s}`;
+      const locked = editable ? logic.lockReason(chain, s, state) : undefined;
       parts.push(
         el(
           "section",
-          { "aria-labelledby": heading },
+          { "aria-labelledby": heading, ondragover: editable ? (e) => dragOver(e, chain, s) : undefined, ondrop: editable ? (e) => drop(e, chain, s) : undefined },
           el("h3", { id: heading }, `Session ${s + 1}`),
+          locked ? el("p", { id: `locked-${s}`, class: "reason" }, locked) : undefined,
           session.cards.length > 0 ? el("ol", { class: "lane" }, session.cards.map((c, i) => card(chain, s, i, c, editable))) : el("p", { class: "note" }, "No skills in this session yet."),
-          editable ? addSkill(chain, s) : undefined,
-          editable && chain.sessions.length > 1
-            ? el("button", { type: "button", "data-focus": `remove-session-${s}`, onclick: () =>
+          // Add a skill on the left, Remove session at the right end of the same line; they wrap under each other when narrow.
+          editable
+            ? el(
+                "div",
+                { class: "session-foot" },
+                addSkill(chain, s),
+                chain.sessions.length > 1
+                  ? el("button", { type: "button", class: "danger", "data-focus": `remove-session-${s}`, "aria-disabled": String(locked !== undefined), "aria-describedby": locked ? `locked-${s}` : undefined, title: locked, onclick: () => {
+                if (locked) return announce(locked);
                 save(edit.removeSession(chain, s), `Removed session ${s + 1}`, "add-session", {
                   chainId: chain.id,
                   text: `Removed session ${s + 1}`,
                   undo: { chain, name: `Undo remove session ${s + 1}`, said: `Restored session ${s + 1}`, focus: `remove-session-${s}` },
-                }) }, `Remove session ${s + 1}`)
+                });
+              } }, `Remove session ${s + 1}`)
+                  : undefined,
+              )
             : undefined,
         ),
       );
@@ -373,12 +453,13 @@ export async function start() {
       const full = logic.addSessionReason(chain);
       // replaceChildren writes an undefined part out as the text "undefined", so only elements go into parts.
       parts.push(
+        el("hr", { class: "end-rule" }),
         el(
           "p",
           {},
           el(
             "button",
-            { type: "button", "data-focus": "add-session", "aria-disabled": String(full !== undefined), "aria-describedby": full ? "sessions-full" : undefined, title: full, onclick: () => {
+            { type: "button", class: "add-session", "data-focus": "add-session", "aria-disabled": String(full !== undefined), "aria-describedby": full ? "sessions-full" : undefined, title: full, onclick: () => {
               if (full) return announce(full);
               save(edit.addSession(chain), `Added session ${chain.sessions.length + 1}`, logic.addKey(chain.sessions.length));
             } },
@@ -437,12 +518,21 @@ export async function start() {
     const unsavedRose = (event.data.unsaved ?? 0) > (state.unsaved ?? 0);
     if (event.data.storageError && (event.data.storageError !== state.storageError || unsavedRose)) announce(event.data.storageError);
     state = event.data;
-    if (typing()) deferred = true;
+    // A re-render mid-drag would take away the card being dragged; the drop, or the drag's end, renders it.
+    if (typing() || dragging) deferred = true;
     else applyState();
   });
 
   document.addEventListener("focusout", () => {
     if (deferred) setTimeout(applyState);
+  });
+
+  // A drag that ends without a drop here (Escape, or let go elsewhere). Listened for on the page, since the dragged card may be
+  // gone from it by then.
+  document.addEventListener("dragend", () => {
+    if (!dragging) return;
+    endDrag();
+    if (deferred) applyState();
   });
 
   vscode.postMessage({ type: "ready" });

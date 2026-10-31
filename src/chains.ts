@@ -138,14 +138,46 @@ export const inputOf = (chain: Chain): InputKind | undefined => inputKinds(chain
 export type Runnable = { ok: true } | { ok: false; reason: string };
 
 // `commands` is what discovery found; undefined means not known yet, and the session's init check still guards the run.
+const ONE_INPUT = `Use only one of ${INPUT_KINDS.map((k) => INPUTS[k].placeholder).join(", ")} in a chain; Run asks for one input.`;
+
 export function runnable(chain: Chain, commands?: readonly string[]): Runnable {
   if (chain.sessions.length === 0) return { ok: false, reason: "This chain has no sessions." };
   const empty = chain.sessions.findIndex((s) => s.cards.length === 0);
   if (empty !== -1) return { ok: false, reason: `Session ${empty + 1} has no skills.` };
-  if (inputKinds(chain).length > 1) return { ok: false, reason: `Use only one of ${INPUT_KINDS.map((k) => INPUTS[k].placeholder).join(", ")} in a chain; Run asks for one input.` };
+  if (inputKinds(chain).length > 1) return { ok: false, reason: ONE_INPUT };
   const missing = commands ? requiredSkills(chain).filter((s) => !commands.includes(s)) : [];
   if (missing.length > 0) return { ok: false, reason: `Missing skills: ${missing.join(", ")}.` };
   return { ok: true };
+}
+
+// While a run goes, whether `after` keeps what it has started: through session `through`, every card where it was (by skill), with
+// cards added after them allowed. A started session's settings may change, since the run never reads that session again.
+export const keepsStarted = (before: Chain, after: Chain, through: number): boolean =>
+  before.sessions.slice(0, through + 1).every((session, s) => {
+    const now = after.sessions[s]?.cards;
+    return now !== undefined && now.length >= session.cards.length && session.cards.every((card, i) => now[i]!.skill === card.skill);
+  });
+
+// Why session `s` cannot start now the run has reached it, with the saved sessions taken in. Only that session must hold skills,
+// so a later one can still be half made; the input the run was given (`kind`, none for a name only) must still fill the chain.
+export function startReason(chain: Chain, s: number, kind: InputKind | undefined): string | undefined {
+  if (chain.sessions[s]?.cards.length === 0) return `Session ${s + 1} has no skills.`;
+  const kinds = inputKinds(chain);
+  if (kinds.length > 1) return ONE_INPUT;
+  const wanted = kinds[0];
+  if (wanted !== undefined && wanted !== kind) return `${INPUTS[wanted].placeholder} has nothing to fill it: this run started from ${kind ? INPUTS[kind].chip : "a name only"}.`;
+  return undefined;
+}
+
+// The run's chain with its sessions from `s` on as `saved` has them; the sessions before `s` stay as the run ran them.
+export const takeFrom = (chain: Chain, saved: Chain, s: number): Chain => ({ ...chain, sessions: [...chain.sessions.slice(0, s), ...saved.sessions.slice(s)] });
+
+// The chain a run goes on with as session `s` starts, from the saved `chains`: `takeFrom` the saved copy of the run's chain, or the
+// run's chain as it is when none is saved (a template, or a chain deleted while it ran); else why session `s` cannot start.
+export function pickUpFrom(chain: Chain, chains: readonly Chain[], s: number, kind: InputKind | undefined): Chain | string {
+  const saved = chains.find((c) => c.id === chain.id);
+  const next = saved ? takeFrom(chain, saved, s) : chain;
+  return startReason(next, s, kind) ?? next;
 }
 
 // ── Stored chains ─────────────────────────────────────────────────────────────

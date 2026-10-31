@@ -45,6 +45,8 @@ export type EditorState = {
   // The chain running, and where in it (the card's index in its session): the lanes mark that card.
   // `waiting`: the card waits for the user, or asked them something.
   runningAt?: { chainId: string; session: number; index: number; waiting?: boolean };
+  // The running chain's sessions up to `through` have started: their cards keep their order until the run ends.
+  locked?: { chainId: string; through: number };
   storageError?: string;
   // How many changes could not be saved so far: each rise is said aloud, even when storageError reads the same as before.
   unsaved?: number;

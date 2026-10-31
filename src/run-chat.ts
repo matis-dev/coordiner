@@ -76,6 +76,8 @@ export type RunChat = {
   decided(): Decision[];
   // A step of the run started or finished: what the card's and the session's figures are made of.
   stepped(event: RunEvent): void;
+  // The run picked up a changed chain: the line of stations draws it.
+  relined(line: string[][]): void;
 };
 
 const JOURNALED = new Set<Entry["kind"]>(["assistant", "tool", "divider", "card-end", "session-end", "failed"]);
@@ -108,6 +110,7 @@ export const stations = (chain: Pick<Chain, "sessions">): string[][] => chain.se
 export function createRunChat({ title, post, record, moved, needsYou, log, questions, now = Date.now, sleep = realSleep, past = [], line, resumes = false }: RunChatDeps): RunChat {
   const transcript = new Transcript();
   transcript.add(past);
+  let stationsLine = line;
   // What the user said and answered is recorded where it is handled, below; the rest of the transcript is recorded here.
   const add = (entries: Entry[]) => {
     if (entries.length === 0) return;
@@ -143,7 +146,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
   const viewOf = (snapshot: TalkSnapshot): ChatView => ({
     ...snapshot,
     title,
-    ...(line ? { line } : {}),
+    ...(stationsLine ? { line: stationsLine } : {}),
     ...(snapshot.phase === "waiting" && cache ? { cache } : {}),
     ...(snapshot.phase === "running" && turn ? { turn } : {}),
     ...(ending ? { ending } : {}),
@@ -246,6 +249,10 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
       }
       card = { ...card, status: event.status, worked: addTurn(card.worked, ms, spend) };
       session = { ...session, worked: addTurn(session.worked, ms, spend) };
+    },
+    relined: (next) => {
+      stationsLine = next;
+      post({ type: "chatUpdate", chat: view() });
     },
   };
 }
