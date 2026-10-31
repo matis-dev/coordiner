@@ -179,9 +179,9 @@ For what each step does, the unattended rules, and where the run journal is kept
 
 ## Build and run a chain
 
-To run something without opening the editor, run **Coordiner: Start…** (the ▶ button in the **Sessions** view's title bar, or **Start…** in the view before your first session) and pick a template, a single skill or one of your chains.
+To run something without opening the editor, run **Coordiner: Start…** (the ▶ button in the **Sessions** view's title bar, or **New Session…** at the top of the view) and pick a template, a single skill or one of your chains.
 
-Run **Coordiner: Open Chains** (or the list button in the **Sessions** view's title bar). Templates, single skills and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
+Run **Coordiner: Open Chains** (or the list button in the **Sessions** view's title bar, or **Open Chains** at the top of the view). Templates, single skills and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
 
 Each template is named after what you bring to it, and **Run** asks for exactly that:
 

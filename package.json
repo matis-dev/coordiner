@@ -1,7 +1,7 @@
 {
   "name": "coordiner",
   "displayName": "Coordiner",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "matis-dev",
   "description": "Runs chains of Claude Code skills in unattended sessions, each run in its own git worktree, up to the commit brief. Nothing is committed for you.",
   "license": "MIT",
@@ -250,13 +250,7 @@
           "name": "Sessions"
         }
       ]
-    },
-    "viewsWelcome": [
-      {
-        "view": "coordiner.run",
-        "contents": "No sessions yet.\n[Start…](command:coordiner.start)\n[Open Chains](command:coordiner.openChains)"
-      }
-    ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "pnpm run build",

@@ -66,14 +66,20 @@ const startHelper = ({ file, args }: Helper): Spawned => {
 
 // The Sessions list: the session open now at the top, with its steps and, under the running one, the background processes of its
 // turn; under it this repo's lines of work, one per worktree, each with its earlier sessions and the steps they ran.
+// Above them, the two ways to start a session, so they stay in sight once there is history.
+type ActionRow = { kind: "action"; command: string; label: string; description: string; icon: string };
 type OpenRow = { kind: "open" };
 // `continuation` is set when the line's latest run can be continued; `root` is the repo the worktree belongs to; `open`, that this
 // window has the worktree open.
 type WorktreeRow = { kind: "worktree"; line: Line; root: string; open: boolean; state: WorktreeState; head?: string; continuation?: Continuation };
 type PastRow = { kind: "past"; run: PastRun; parent: WorktreeRow };
 type PastStep = { kind: "past-step"; step: StepView; index: number; parent: PastRow };
-type RunItem = OpenRow | WorktreeRow | PastRow | PastStep | StepView | Process;
+type RunItem = ActionRow | OpenRow | WorktreeRow | PastRow | PastStep | StepView | Process;
 const OPEN: OpenRow = { kind: "open" };
+const ACTIONS: readonly ActionRow[] = [
+  { kind: "action", command: "coordiner.start", label: "New Session…", description: "a template, a single skill, or one of your chains", icon: "play" },
+  { kind: "action", command: "coordiner.openChains", label: "Open Chains", description: "build a chain and run it from the editor tab", icon: "list-ordered" },
+];
 const isProcess = (item: RunItem): item is Process => "id" in item && !("kind" in item);
 
 class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
@@ -132,9 +138,15 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
     return item;
   }
 
-  private sessionTreeItem(element: OpenRow | WorktreeRow | PastRow | PastStep): vscode.TreeItem {
+  private sessionTreeItem(element: ActionRow | OpenRow | WorktreeRow | PastRow | PastStep): vscode.TreeItem {
     const { Collapsed, Expanded, None } = vscode.TreeItemCollapsibleState;
     switch (element.kind) {
+      case "action": {
+        const item = treeItem({ ...element, accessibleLabel: `${element.label}, ${element.description}` });
+        item.id = `action:${element.command}`;
+        item.command = { command: element.command, title: element.label };
+        return item;
+      }
       case "open": {
         const item = treeItem(currentItem(this.open?.title ?? "", this.open?.phase ?? "ended"));
         item.id = "open";
@@ -172,10 +184,11 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
   }
 
   getChildren(element?: RunItem): vscode.ProviderResult<RunItem[]> {
-    if (!element) return [...(this.open ? [OPEN] : []), ...this.lines];
+    if (!element) return [...ACTIONS, ...(this.open ? [OPEN] : []), ...this.lines];
     if (element === OPEN) return this.steps;
     if ("kind" in element) {
       if (element.kind === "worktree") return this.runsOf(element);
+      if (element.kind === "action") return [];
       return element.kind === "past" ? element.run.steps.map((step, index): PastStep => ({ kind: "past-step", step, index, parent: element })) : [];
     }
     return !isProcess(element) && element === this.running() ? this.processes : [];
