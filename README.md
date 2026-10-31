@@ -7,8 +7,8 @@
 <p align="center"><strong>Chains of Claude Code skills, run unattended, each in its own git worktree.</strong></p>
 
 <p align="center">
-  <a href="https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner"><img src="https://img.shields.io/visual-studio-marketplace/v/matis-dev.coordiner?label=VS%20Code%20Marketplace" alt="VS Code Marketplace version"></a>
-  <a href="https://open-vsx.org/extension/matis-dev/coordiner"><img src="https://img.shields.io/open-vsx/v/matis-dev/coordiner?label=Open%20VSX" alt="Open VSX version"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner"><img src="https://img.shields.io/badge/VS%20Code%20Marketplace-v0.5.1-007ACC" alt="VS Code Marketplace version"></a>
+  <a href="https://open-vsx.org/extension/matis-dev/coordiner"><img src="https://img.shields.io/badge/Open%20VSX-pending%20approval-orange" alt="Open VSX: pending approval"></a>
   <img src="https://img.shields.io/github/license/matis-dev/coordiner" alt="License: MIT">
   <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A51.135-007ACC" alt="VS Code 1.135 or newer">
 </p>
