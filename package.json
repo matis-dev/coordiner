@@ -274,6 +274,7 @@
     "build": "node build.ts",
     "test": "node --test \"src/**/*.test.ts\"",
     "coverage": "node --test --experimental-test-coverage --test-coverage-include=src/**/*.ts --test-coverage-include=media/**/*.js --test-coverage-exclude=src/**/*.test.ts \"src/**/*.test.ts\"",
+    "release": "node scripts/release.ts",
     "prepare": "husky"
   },
   "dependencies": {
