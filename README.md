@@ -11,8 +11,8 @@
 </p>
 
 <p align="center">
-  <a href="https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner"><img src="https://img.shields.io/badge/VS%20Code%20Marketplace-v0.5.3-007ACC" alt="VS Code Marketplace version"></a>
-  <a href="https://open-vsx.org/extension/matis-dev/coordiner"><img src="https://img.shields.io/badge/Open%20VSX-v0.5.3-purple" alt="Open VSX version"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner"><img src="https://img.shields.io/badge/VS%20Code%20Marketplace-v0.5.4-007ACC" alt="VS Code Marketplace version"></a>
+  <a href="https://open-vsx.org/extension/matis-dev/coordiner"><img src="https://img.shields.io/badge/Open%20VSX-v0.5.4-purple" alt="Open VSX version"></a>
   <img src="https://img.shields.io/github/license/matis-dev/coordiner" alt="License: MIT">
   <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A51.135-007ACC" alt="VS Code 1.135 or newer">
 </p>
