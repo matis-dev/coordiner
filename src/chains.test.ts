@@ -87,16 +87,21 @@ describe("templates", () => {
   it("marks the conversations as pausing and lets the audits run unattended", () => {
     assert.deepEqual(TEMPLATES.map((t) => t.sessions[0]!.cards[0]!.pause), [false, true, true, true, true, true, false, false, false, false]);
   });
+
+  it("has the implementing cards take the model and effort their plan or review suggests, and no other card", () => {
+    const following = TEMPLATES.flatMap((t) => t.sessions.flatMap((s) => s.cards.filter((c) => c.follow).map((c) => `${t.id}:${c.label}`)));
+    assert.deepEqual(following, ["story:Implement", "story:Fix", "idea:Implement", "idea:Fix", "bug:Fix", "new-project:Implement", "new-project:Fix"]);
+  });
 });
 
 describe("skill defaults", () => {
   it("knows the m-skills cards", () => {
     assert.deepEqual(skillDefault("m-skills:implementing-architect").kind, "loop");
-    assert.deepEqual(skillDefault("m-skills:planning-architect").tier, "strong");
+    assert.deepEqual(skillDefault("m-skills:planning-architect"), { kind: "once", label: "Plan" });
   });
 
-  it("treats any other skill as one medium-tier turn named after the skill", () => {
-    assert.deepEqual(skillDefault("acme:lint-fix"), { kind: "once", tier: "medium", label: "lint-fix" });
+  it("treats any other skill as one turn named after the skill", () => {
+    assert.deepEqual(skillDefault("acme:lint-fix"), { kind: "once", label: "lint-fix" });
     assert.deepEqual(defaultCard("deploy"), { skill: "deploy", args: "", label: "deploy", pause: false });
   });
 
@@ -241,6 +246,14 @@ describe("parseChain", () => {
 
   it("rejects an effort the SDK does not know", () => {
     for (const effort of ["turbo", "", 3, "LOW"]) assert.equal(parseChain(withCard({ ...ok, effort })), "chain a: card x has an invalid effort");
+  });
+
+  it("keeps follow when it is true, and refuses any other value", () => {
+    const parsed = parseChain(withCard({ ...ok, follow: true }));
+    assert.equal(typeof parsed !== "string" && parsed.sessions[0]!.cards[0]!.follow, true);
+    const plain = parseChain(withCard(ok));
+    assert.equal(typeof plain !== "string" && Object.hasOwn(plain.sessions[0]!.cards[0]!, "follow"), false);
+    for (const follow of [false, "yes", 1]) assert.equal(parseChain(withCard({ ...ok, follow })), "chain a: card x has an invalid follow setting");
   });
 
   it("keeps a valid next prompt", () => {

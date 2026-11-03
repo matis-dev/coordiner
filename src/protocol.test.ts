@@ -1,10 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { AFTER_NOTE, INTERACTIVE_NOTE, parseStatus, replyOf, tierOf, UNATTENDED_NOTE, withoutStatus } from "./protocol.ts";
+import { AFTER_NOTE, INTERACTIVE_NOTE, parseStatus, replyOf, suggested, suggestionNote, UNATTENDED_NOTE, withoutStatus } from "./protocol.ts";
 
 describe("parseStatus", () => {
   it("reads NEXT, DONE and HALT from the last line", () => {
-    assert.deepEqual(parseStatus("plan written\nCOORDINER: NEXT Standard"), { kind: "next", tier: "Standard" });
+    assert.deepEqual(parseStatus("plan written\nCOORDINER: NEXT model=claude-opus-5-5 effort=high"), { kind: "next", suggestion: { model: "claude-opus-5-5", effort: "high" } });
+    assert.deepEqual(parseStatus("COORDINER: NEXT"), { kind: "next", suggestion: {} });
     assert.deepEqual(parseStatus("all steps done.\nCOORDINER: DONE\n\n"), { kind: "done" });
     assert.deepEqual(parseStatus("COORDINER: HALT needs a migration decision"), { kind: "halt", reason: "needs a migration decision" });
   });
@@ -13,10 +14,30 @@ describe("parseStatus", () => {
     assert.deepEqual(parseStatus("COORDINER: DONE\nbut then I kept talking"), { kind: "none" });
   });
 
-  it("ignores lowercase, unknown tiers and extra text", () => {
+  it("ignores lowercase, unknown words and extra text", () => {
     assert.deepEqual(parseStatus("COORDINER: NEXT light"), { kind: "none" });
     assert.deepEqual(parseStatus("COORDINER: NEXT Huge"), { kind: "none" });
     assert.deepEqual(parseStatus("COORDINER: DONE please"), { kind: "none" });
+  });
+
+  it("still takes the tier line skills gave before the suggestion fields, suggesting nothing by it", () => {
+    assert.deepEqual(parseStatus("COORDINER: NEXT Light"), { kind: "next", suggestion: {} });
+    assert.deepEqual(parseStatus("COORDINER: NEXT Heavy effort=high"), { kind: "next", suggestion: { effort: "high" } });
+  });
+
+  it("reads the skill field, and keeps each value as written for turnSettings to check", () => {
+    assert.deepEqual(parseStatus("COORDINER: NEXT skill=m-skills:maintenance-architect model=x effort=huge"), {
+      kind: "next",
+      suggestion: { skill: "m-skills:maintenance-architect", model: "x", effort: "huge" },
+    });
+  });
+
+  it("is no status line when a field is unknown, repeated, empty or over 100 characters", () => {
+    assert.deepEqual(parseStatus("COORDINER: NEXT tier=Heavy"), { kind: "none" });
+    assert.deepEqual(parseStatus("COORDINER: NEXT model=a model=b"), { kind: "none" });
+    assert.deepEqual(parseStatus("COORDINER: NEXT model="), { kind: "none" });
+    assert.deepEqual(parseStatus(`COORDINER: NEXT model=${"m".repeat(101)}`), { kind: "none" });
+    assert.deepEqual(parseStatus("COORDINER: NEXT  model=a"), { kind: "none" });
   });
 
   it("returns none for empty text and for a HALT without a reason", () => {
@@ -25,11 +46,29 @@ describe("parseStatus", () => {
   });
 });
 
-describe("tiers", () => {
-  it("maps planner tiers to the user's strong, medium and weak tiers", () => {
-    assert.equal(tierOf("Heavy"), "strong");
-    assert.equal(tierOf("Standard"), "medium");
-    assert.equal(tierOf("Light"), "weak");
+describe("suggested", () => {
+  it("lists the fields a NEXT line gave, skill first", () => {
+    assert.equal(suggested({ effort: "low", model: "m", skill: "s" }), "skill=s model=m effort=low");
+    assert.equal(suggested({}), "");
+  });
+});
+
+describe("suggestionNote", () => {
+  const offered = [
+    { id: "m-big", label: "Big", efforts: ["low", "high"] as const },
+    { id: "m-old", label: "Old", efforts: [] },
+  ].map((m) => ({ ...m, efforts: [...m.efforts] }));
+
+  it("lists each model by id with the efforts it takes, and the fields a NEXT line may carry", () => {
+    const note = suggestionNote(offered);
+    assert.match(note, /`COORDINER: NEXT model=<id> effort=medium`/);
+    assert.match(note, /m-big \(Big; effort low, high\); m-old \(Old; no effort setting\)/);
+    assert.match(note, /Heavy/);
+  });
+
+  it("asks for the effort only when the models could not be listed", () => {
+    assert.match(suggestionNote(undefined), /models could not be listed, so suggest only the effort/);
+    assert.match(suggestionNote([]), /suggest only the effort/);
   });
 });
 
@@ -92,7 +131,7 @@ describe("withoutStatus", () => {
 
 describe("replyOf", () => {
   it("drops a status line, and keeps a reply without one whole", () => {
-    assert.equal(replyOf("Profile written.\nCOORDINER: NEXT Standard"), "Profile written.");
+    assert.equal(replyOf("Profile written.\nCOORDINER: NEXT effort=medium"), "Profile written.");
     assert.equal(replyOf("Two questions first.\nWhich store?\n"), "Two questions first.\nWhich store?");
   });
 });

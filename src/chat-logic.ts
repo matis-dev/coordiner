@@ -591,6 +591,7 @@ export function statusLine(chat: ChatView): string {
     case "running":
       return "";
     case "waiting":
+      if (chat.freeChat) return "Write below: each message is a turn of this chat's own session.";
       if (chat.afterRun) return `${chat.ending ? endedLine(chat.ending) : "The run has ended."} You can keep talking to ${chat.card}.`;
       if (chat.parked) return `${chat.card} needs you: ${chat.parked.replace(/[.\s]+$/, "")}. Reply to it, or fix the cause and choose Continue to try again.`;
       return chat.continueReady ? `${chat.card} is waiting for you. It gave its status line, so Continue moves the chain on.` : `${chat.card} is waiting for you.`;

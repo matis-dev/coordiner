@@ -2,16 +2,16 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
 import type { Line, PastRun } from "./history.ts";
-import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, processItem, sessionItem, startItems, stepItem, when, worktreeItem, type StepView } from "./view.ts";
+import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, processItem, sessionItem, shownTemplates, startItems, stepItem, when, worktreeItem, type StepView } from "./view.ts";
 
-const step = (overrides: Partial<StepView> = {}): StepView => ({ label: "Plan", tier: "strong", model: "m-strong", status: "running", ...overrides });
+const step = (overrides: Partial<StepView> = {}): StepView => ({ label: "Plan", model: "m-big", status: "running", ...overrides });
 
 describe("stepItem", () => {
   it("marks the card waiting for the user with a bell, and says so first", () => {
     const item = stepItem(step({ status: "waiting" }));
     assert.equal(item.icon, "bell-dot");
-    assert.equal(item.description, "waiting for you · strong · m-strong");
-    assert.equal(item.accessibleLabel, "Plan, waiting for you, strong, m-strong");
+    assert.equal(item.description, "waiting for you · m-big");
+    assert.equal(item.accessibleLabel, "Plan, waiting for you, m-big");
   });
 
   it("maps each status to its icon", () => {
@@ -19,35 +19,47 @@ describe("stepItem", () => {
     assert.deepEqual(icons, ["loading~spin", "check", "error", "debug-stop", "circle-slash"]);
   });
 
-  it("speaks the status, tier and model in words", () => {
-    assert.equal(stepItem(step({ status: "failed" })).accessibleLabel, "Plan, failed, strong, m-strong");
+  it("speaks the status and model in words", () => {
+    assert.equal(stepItem(step({ status: "failed" })).accessibleLabel, "Plan, failed, m-big");
   });
 
-  it("shows tier and model, and the detail when it adds something", () => {
-    assert.equal(stepItem(step()).description, "strong · m-strong");
-    assert.equal(stepItem(step({ status: "done", detail: "next: Light" })).description, "strong · m-strong · next: Light");
+  it("shows the model, and the detail when it adds something", () => {
+    assert.equal(stepItem(step()).description, "m-big");
+    assert.equal(stepItem(step({ status: "done", detail: "next: model=m-small" })).description, "m-big · next: model=m-small");
+  });
+
+  it("names the default model for a turn that asked for none", () => {
+    const { model: _model, ...noModel } = step();
+    assert.equal(stepItem(noModel).description, "default model");
+    assert.equal(stepItem(noModel).accessibleLabel, "Plan, running, default model");
   });
 
   it("shows and speaks the effort when the card sets one", () => {
-    const item = stepItem(step({ effort: "high", status: "done", detail: "next: Light" }));
-    assert.equal(item.description, "strong · m-strong · high · next: Light");
-    assert.equal(item.accessibleLabel, "Plan, done, strong, m-strong, effort high");
+    const item = stepItem(step({ effort: "high", status: "done", detail: "next: model=m-small" }));
+    assert.equal(item.description, "m-big · high · next: model=m-small");
+    assert.equal(item.accessibleLabel, "Plan, done, m-big, effort high");
+  });
+
+  it("shows and speaks what became of the previous step's suggestion, made plain", () => {
+    const item = stepItem(step({ note: "the previous step suggested x\u001b[31m" }));
+    assert.equal(item.description, "m-big · the previous step suggested x[31m");
+    assert.equal(item.accessibleLabel, "Plan, running, m-big, the previous step suggested x[31m");
   });
 
   it("does not repeat a detail that only echoes the status", () => {
-    assert.equal(stepItem(step({ status: "done", detail: "done" })).description, "strong · m-strong");
+    assert.equal(stepItem(step({ status: "done", detail: "done" })).description, "m-big");
   });
 
   it("clips a long detail", () => {
     const { description } = stepItem(step({ status: "failed", detail: "x".repeat(300) }));
-    assert.equal(description.length, "strong · m-strong · ".length + 121);
+    assert.equal(description.length, "m-big · ".length + 121);
   });
 
   it("strips control characters from every text field", () => {
     const item = stepItem(step({ label: "Pl\u001b[31man", model: "m\u0007x", status: "halted", detail: "re\u001bason" }));
     assert.equal(item.label, "Pl[31man");
-    assert.equal(item.description, "strong · mx · re" + "ason");
-    assert.equal(item.accessibleLabel, "Pl[31man, halted, strong, mx");
+    assert.equal(item.description, "mx · re" + "ason");
+    assert.equal(item.accessibleLabel, "Pl[31man, halted, mx");
   });
 });
 
@@ -103,6 +115,11 @@ describe("sessionItem", () => {
     lastAt: "2026-10-28T10:00:00.000Z", steps: [], entries: [], ending: { status: "stopped" }, userOnly: false, ...overrides,
   });
 
+  it("calls a chat opened on its own a chat, whatever its journal ends with", () => {
+    const item = sessionItem(past({ chain: "Chat", story: "my-app", chat: true }), now);
+    assert.deepEqual([item.label, item.description, item.icon], ["Chat · my-app", "chat · 2 h ago", "comment-discussion"]);
+  });
+
   it("names the chain and story, and says how it ended in words and by icon", () => {
     const outcomes = [{ status: "done", text: "" }, { status: "no-changes" }, { status: "halted", reason: "r" }, { status: "failed", error: "e" }, { status: "stopped" }, { status: "refused", reason: "r" }] as const;
     assert.deepEqual(
@@ -134,6 +151,15 @@ describe("currentItem", () => {
     assert.equal(currentItem("Story · 1\u001b1", "ended").label, "Story · 11");
     assert.equal(currentItem("x", "ended").icon, "comment");
     assert.deepEqual(currentItem("Story · 11", "waiting for you"), { label: "Story · 11", description: "waiting for you", icon: "bell-dot", accessibleLabel: "Story · 11, waiting for you" });
+  });
+});
+
+describe("shownTemplates", () => {
+  it("leaves out the removed templates, all of them while m-skills is missing, and none while it is not known", () => {
+    assert.deepEqual(shownTemplates(TEMPLATES, ["bug", "kickoff"], true).map((t) => t.id).slice(0, 3), ["story", "idea", "new-project"]);
+    assert.equal(shownTemplates(TEMPLATES, ["bug"], true).length, TEMPLATES.length - 1);
+    assert.deepEqual(shownTemplates(TEMPLATES, [], false), []);
+    assert.equal(shownTemplates(TEMPLATES, [], undefined).length, TEMPLATES.length);
   });
 });
 
@@ -193,7 +219,7 @@ describe("nothingToReviewMessage", () => {
 describe("worktreeItem", () => {
   const now = Date.parse("2026-10-28T12:00:00.000Z");
   const story = TEMPLATES.find((t) => t.id === "story")!;
-  const stopped = { lastAt: "2026-10-28T10:00:00.000Z", outcome: { status: "stopped" }, definition: story, lastCard: { at: { session: 0, card: 1 }, tier: "weak", reached: true, finished: false } } as PastRun;
+  const stopped = { lastAt: "2026-10-28T10:00:00.000Z", outcome: { status: "stopped" }, definition: story, lastCard: { at: { session: 0, card: 1 }, reached: true, finished: false } } as PastRun;
   const line = (runs: PastRun[], where: Line["where"] = "here"): Line => ({ path: "/r.coordiner/my-app", branch: "coordiner/my-app", slug: "my-app", where, runs });
 
   it("says how the latest run ended and at which card, what the worktree holds, and when", () => {
@@ -203,6 +229,16 @@ describe("worktreeItem", () => {
       description: "stopped at Implement · 12 files changed · 2 commits ahead of main · 2 h ago",
       icon: "git-branch",
       accessibleLabel: "my-app, worktree, stopped at Implement, 12 files changed, 2 commits ahead of main, 2 h ago",
+    });
+  });
+
+  it("shows the checkout, where a chat opened Here ran, as your checkout, with a home icon", () => {
+    const chat = { lastAt: "2026-10-28T10:00:00.000Z", chat: true } as PastRun;
+    assert.deepEqual(worktreeItem(line([chat], "checkout"), {}, "main", now), {
+      label: "my-app",
+      description: "chat · your checkout · 2 h ago",
+      icon: "home",
+      accessibleLabel: "my-app, checkout, chat, your checkout, 2 h ago",
     });
   });
 

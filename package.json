@@ -1,7 +1,7 @@
 {
   "name": "coordiner",
   "displayName": "Coordiner",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "publisher": "matis-dev",
   "description": "Runs chains of Claude Code skills in unattended sessions, each run in its own git worktree, up to the commit brief. Nothing is committed for you.",
   "license": "MIT",
@@ -60,6 +60,11 @@
         "command": "coordiner.openChains",
         "title": "Coordiner: Open Chains",
         "icon": "$(list-ordered)"
+      },
+      {
+        "command": "coordiner.openChat",
+        "title": "Coordiner: Open Chat",
+        "icon": "$(comment-discussion)"
       },
       {
         "command": "coordiner.stopRun",
@@ -187,6 +192,11 @@
           "group": "navigation@2"
         },
         {
+          "command": "coordiner.openChat",
+          "when": "view == coordiner.run",
+          "group": "navigation@3"
+        },
+        {
           "command": "coordiner.stopRun",
           "when": "view == coordiner.run && coordiner.busy",
           "group": "navigation@0"
@@ -196,24 +206,6 @@
     "configuration": {
       "title": "Coordiner",
       "properties": {
-        "coordiner.models.strong": {
-          "type": "string",
-          "default": "claude-opus-5-5",
-          "scope": "application",
-          "description": "Full model ID for the strong tier (planner Heavy)."
-        },
-        "coordiner.models.medium": {
-          "type": "string",
-          "default": "claude-sonnet-5-5",
-          "scope": "application",
-          "description": "Full model ID for the medium tier (planner Standard)."
-        },
-        "coordiner.models.weak": {
-          "type": "string",
-          "default": "claude-haiku-5-5",
-          "scope": "application",
-          "description": "Full model ID for the weak tier (planner Light)."
-        },
         "coordiner.claudePath": {
           "type": "string",
           "default": "",
@@ -260,7 +252,7 @@
     "viewsWelcome": [
       {
         "view": "coordiner.start",
-        "contents": "Start a session: a template, a single skill, or one of your chains.\n[Start…](command:coordiner.start)\nBuild a chain and run it from the editor tab.\n[Open Chains](command:coordiner.openChains)"
+        "contents": "Start a session: a template, a single skill, or one of your chains.\n[Start…](command:coordiner.start)\nBuild a chain and run it from the editor tab.\n[Open Chains](command:coordiner.openChains)\nOr just talk to Claude, here or in a new worktree.\n[Open Chat](command:coordiner.openChat)"
       },
       {
         "view": "coordiner.run",

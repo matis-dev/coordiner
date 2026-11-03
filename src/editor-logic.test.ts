@@ -25,7 +25,9 @@ import {
   moveTarget,
   newChainId,
   pauseKey,
-  pinNote,
+  filterPalette,
+  followAvailable,
+  matchCount,
   PLACEHOLDER_NOTE,
   removeKey,
   runningCard,
@@ -56,12 +58,13 @@ describe("model and effort", () => {
     models: [
       { id: "m-opus", label: "Opus", efforts: ["low", "high"] as Effort[] },
       { id: "m-haiku", label: "Haiku", efforts: [] as Effort[] },
+      { id: "m-default", label: "Default", efforts: ["low"] as Effort[] },
     ],
-    tierEfforts: ["low"] as Effort[],
+    defaultModel: "m-default",
   };
   const chainOf = (card: Card): Chain => ({ id: "own", name: "Own", sessions: [{ cards: [card] }] });
 
-  it("offers a pinned model's efforts, the tier efforts on a tier, and nothing before the models are listed", () => {
+  it("offers the card's model's efforts, the default model's on Default, and nothing before the models are listed", () => {
     assert.deepEqual(effortChoices({ ...lint, model: "m-opus" }, view), ["low", "high"]);
     assert.deepEqual(effortChoices(lint, view), ["low"]);
     assert.deepEqual(effortChoices(lint, { running: false, models: view.models }), []);
@@ -86,21 +89,28 @@ describe("model and effort", () => {
     assert.equal(effortReason(lint, view), undefined);
     assert.equal(effortReason(lint, { running: false }), "Effort can be set once the session's models are listed.");
     assert.equal(effortReason({ ...lint, model: "m-haiku" }, view), "This model has no effort setting.");
-    assert.equal(effortReason(lint, { ...view, tierEfforts: [] }), "The tier models do not share an effort setting; pin a model to set one.");
+    assert.equal(effortReason(lint, { ...view, defaultModel: "m-haiku" }), "The default model has no effort setting.");
+    assert.equal(effortReason(lint, { running: false, models: view.models }), "The session names no default model; pick a model to set an effort.");
   });
 
-  it("notes a pinned loop card only", () => {
-    const implement = defaultCard("m-skills:implementing-architect");
-    assert.equal(pinNote({ ...implement, model: "m-opus" }), "Pinned: NEXT <tier> does not change this card's model.");
-    assert.equal(pinNote(implement), undefined);
-    assert.equal(pinNote({ ...lint, model: "m-opus" }), undefined);
+  it("offers following the step before only after an m-skills card in the same session, while m-skills is installed", () => {
+    const plan = defaultCard("m-skills:planning-architect");
+    const chain: Chain = { id: "own", name: "Own", sessions: [{ cards: [plan, lint, lint] }, { cards: [lint] }] };
+    const on = { running: false, mskills: true };
+    assert.equal(followAvailable(chain, 0, 1, on), true);
+    assert.equal(followAvailable(chain, 0, 0, on), false);
+    assert.equal(followAvailable(chain, 0, 2, on), false);
+    assert.equal(followAvailable(chain, 1, 0, on), false);
+    assert.equal(followAvailable(chain, 0, 1, { running: false, mskills: false }), false);
+    assert.equal(followAvailable(chain, 0, 1, { running: false }), false);
+    assert.equal(followAvailable(chain, 5, 1, on), false);
   });
 
   it("refuses to run a card on a model the session does not offer, or an effort its model does not take", () => {
     const palette = [{ skill: "acme:lint" }];
     assert.equal(runReason(chainOf({ ...lint, model: "m-gone" }), { ...view, palette }), "lint: model m-gone is not offered by this session.");
     assert.equal(runReason(chainOf({ ...lint, model: "m-haiku", effort: "low" }), { ...view, palette }), "lint: effort low is not available for m-haiku.");
-    assert.equal(runReason(chainOf({ ...lint, effort: "high" }), { ...view, palette }), "lint: effort high is not available for its tier's models.");
+    assert.equal(runReason(chainOf({ ...lint, effort: "high" }), { ...view, palette }), "lint: effort high is not available for the default model.");
     assert.equal(runReason(chainOf({ ...lint, model: "m-opus", effort: "high" }), { ...view, palette }), undefined);
   });
 
@@ -283,5 +293,28 @@ describe("strayNote", () => {
   it("says nothing for real placeholders or plain text", () => {
     assert.equal(strayNote("Plan {{story}} then {{idea}}"), undefined);
     assert.equal(strayNote("Implement the approved plan above."), undefined);
+  });
+});
+
+describe("filterPalette", () => {
+  const palette = [
+    { skill: "m-skills:planning-architect", label: "Plan" },
+    { skill: "acme:lint", label: "lint" },
+  ];
+
+  it("keeps every skill for an empty or blank filter", () => {
+    assert.equal(filterPalette(palette, ""), palette);
+    assert.equal(filterPalette(palette, "  "), palette);
+  });
+
+  it("matches the name or the label, in any case", () => {
+    assert.deepEqual(filterPalette(palette, "ARCH").map((p) => p.skill), ["m-skills:planning-architect"]);
+    assert.deepEqual(filterPalette(palette, "plan").map((p) => p.skill), ["m-skills:planning-architect"]);
+    assert.deepEqual(filterPalette(palette, " lint ").map((p) => p.skill), ["acme:lint"]);
+    assert.deepEqual(filterPalette(palette, "nope"), []);
+  });
+
+  it("says how many match in words", () => {
+    assert.deepEqual([0, 1, 2].map(matchCount), ["No skills match", "1 skill matches", "2 skills match"]);
   });
 });

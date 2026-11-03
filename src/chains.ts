@@ -1,18 +1,19 @@
-import type { Tier } from "./environment.ts";
-
 // No runtime imports: the editor webview loads this module from dist/ as well.
 
-// `model` pins the card to one model instead of its tier's; `effort` sets the session's effort. Absent means the tier's model and
-// the model's default effort.
-export type Card = { skill: string; args: string; label: string; pause: boolean; next?: string; model?: string; effort?: Effort };
+// `model` and `effort` set how the card's turns run; absent, the step before it may suggest them (src/run.ts `turnSettings`), else the
+// session's default model at the model's default effort. `follow` makes the previous step's suggestion win over the card's own values.
+export type Card = { skill: string; args: string; label: string; pause: boolean; next?: string; model?: string; effort?: Effort; follow?: true };
 export type ChainSession = { cards: Card[] };
 export type Chain = { id: string; name: string; sessions: ChainSession[]; builtIn?: true };
 
-// A "once" card is one turn; a "loop" card keeps going on each NEXT (the implementing loop). Any other skill is "once" on the medium tier.
+// A "once" card is one turn; a "loop" card keeps going on each NEXT (the implementing loop). Any other skill is "once".
 // `doneSkipsLoops`: DONE from this skill means there is nothing for the loop cards after it to do (a review with no findings).
-type SkillDefault = { kind: "once" | "loop"; tier: Tier; label: string; next?: string; pause?: true; doneSkipsLoops?: true };
+type SkillDefault = { kind: "once" | "loop"; label: string; next?: string; pause?: true; doneSkipsLoops?: true };
 
 export const MSKILLS = "m-skills:";
+// `follow` holds only right after an m-skills step in the same session, since m-skills is what suggests a model and effort; the
+// first card of a session starts a fresh context, with nothing before it.
+export const afterMskills = (cards: readonly Card[], i: number): boolean => i > 0 && cards[i - 1]?.skill.startsWith(MSKILLS) === true;
 export const MSKILLS_URL = "https://github.com/matis-dev/m-skills";
 // The most a user types in one go: the input Run asks for, or a message in the run's chat.
 export const MAX_INPUT_CHARS = 20_000;
@@ -23,18 +24,18 @@ const HISTORY = `${MSKILLS}rolling-history`;
 const NEXT_STEP = "Continue with the next step of the plan.";
 
 export const SKILL_DEFAULTS: Readonly<Record<string, SkillDefault>> = {
-  [PLAN]: { kind: "once", tier: "strong", label: "Plan" },
-  [IMPLEMENT]: { kind: "loop", tier: "medium", label: "Implement", next: NEXT_STEP },
-  [REVIEW]: { kind: "once", tier: "strong", label: "Review", doneSkipsLoops: true },
-  [HISTORY]: { kind: "once", tier: "medium", label: "History" },
-  [`${MSKILLS}brainstorming-planner`]: { kind: "once", tier: "strong", label: "Brainstorm", pause: true },
-  [`${MSKILLS}debugging-architect`]: { kind: "once", tier: "strong", label: "Debug", pause: true },
-  [`${MSKILLS}kickoff`]: { kind: "once", tier: "strong", label: "Kickoff", pause: true },
-  [`${MSKILLS}onboard`]: { kind: "once", tier: "medium", label: "Onboard", pause: true },
-  [`${MSKILLS}security-audit`]: { kind: "once", tier: "strong", label: "Security audit" },
-  [`${MSKILLS}ui-audit`]: { kind: "once", tier: "medium", label: "UI audit" },
-  [`${MSKILLS}a11y-audit`]: { kind: "once", tier: "medium", label: "Accessibility audit" },
-  [`${MSKILLS}docs-audit`]: { kind: "once", tier: "medium", label: "Docs audit" },
+  [PLAN]: { kind: "once", label: "Plan" },
+  [IMPLEMENT]: { kind: "loop", label: "Implement", next: NEXT_STEP },
+  [REVIEW]: { kind: "once", label: "Review", doneSkipsLoops: true },
+  [HISTORY]: { kind: "once", label: "History" },
+  [`${MSKILLS}brainstorming-planner`]: { kind: "once", label: "Brainstorm", pause: true },
+  [`${MSKILLS}debugging-architect`]: { kind: "once", label: "Debug", pause: true },
+  [`${MSKILLS}kickoff`]: { kind: "once", label: "Kickoff", pause: true },
+  [`${MSKILLS}onboard`]: { kind: "once", label: "Onboard", pause: true },
+  [`${MSKILLS}security-audit`]: { kind: "once", label: "Security audit" },
+  [`${MSKILLS}ui-audit`]: { kind: "once", label: "UI audit" },
+  [`${MSKILLS}a11y-audit`]: { kind: "once", label: "Accessibility audit" },
+  [`${MSKILLS}docs-audit`]: { kind: "once", label: "Docs audit" },
 };
 
 // What a stored chain may hold; the editor stops at the same limits, so an edit it shows is one the extension can save.
@@ -50,7 +51,7 @@ export const isEffort = (v: unknown): v is Effort => EFFORTS.includes(v as Effor
 // A model id reaches the SDK only as an option value, never a shell; the pattern still keeps it to one plain token.
 export const MODEL = /^[A-Za-z0-9._:[\]-]{1,100}$/;
 
-const GENERIC: SkillDefault = { kind: "once", tier: "medium", label: "" };
+const GENERIC: SkillDefault = { kind: "once", label: "" };
 // A skill name ending in ":" has no last part to show, so its label is the whole name.
 export const skillDefault = (skill: string): SkillDefault => SKILL_DEFAULTS[skill] ?? { ...GENERIC, label: (skill.split(":").at(-1) || skill).slice(0, MAX_LABEL) };
 
@@ -88,10 +89,11 @@ export type InputKind = keyof typeof INPUTS;
 export const INPUT_KINDS = Object.keys(INPUTS) as InputKind[];
 const card = (skill: string, args = "", extra: Partial<Card> = {}): Card => ({ ...defaultCard(skill), args, ...extra });
 const reviewSession: ChainSession = {
-  cards: [card(REVIEW), card(IMPLEMENT, "fix the findings", { label: "Fix", next: "Continue with the next fix." }), card(HISTORY)],
+  cards: [card(REVIEW), card(IMPLEMENT, "fix the findings", { label: "Fix", next: "Continue with the next fix.", follow: true }), card(HISTORY)],
 };
+// The implementing card runs on the model and effort its plan suggests.
 const authorSession = (first: Card[]): ChainSession => ({
-  cards: [...first, card(IMPLEMENT, "Implement the approved plan above.")],
+  cards: [...first, card(IMPLEMENT, "Implement the approved plan above.", { follow: true })],
 });
 
 // Each template is named after what you bring to it.
@@ -197,6 +199,7 @@ function parseCard(v: unknown): Card | string {
   if (v.next !== undefined && !text(v.next, 500, 1)) return `card ${v.skill} has an invalid next prompt`;
   if (v.model !== undefined && !(typeof v.model === "string" && MODEL.test(v.model))) return `card ${v.skill} has an invalid model`;
   if (v.effort !== undefined && !isEffort(v.effort)) return `card ${v.skill} has an invalid effort`;
+  if (v.follow !== undefined && v.follow !== true) return `card ${v.skill} has an invalid follow setting`;
   return {
     skill: v.skill,
     args: v.args,
@@ -205,6 +208,7 @@ function parseCard(v: unknown): Card | string {
     ...(v.next !== undefined ? { next: v.next } : {}),
     ...(v.model !== undefined ? { model: v.model } : {}),
     ...(v.effort !== undefined ? { effort: v.effort } : {}),
+    ...(v.follow ? { follow: true as const } : {}),
   };
 }
 

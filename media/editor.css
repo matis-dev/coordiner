@@ -356,9 +356,15 @@ textarea {
   min-width: 0;
 }
 
-.card-settings .note, .card-settings .reason, .card-settings .pause {
+.card-settings .note, .card-settings .reason, .card-settings .pause, .card-settings .follow {
   grid-column: 1 / -1;
   margin: 0;
+}
+
+/* Off while the card takes its model and effort from the step before; the note above says why. */
+.card-settings select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* Dragging: the label is the handle; the card being dragged fades, and an accent edge or outline shows where it lands. */
@@ -397,6 +403,11 @@ section.drop-end { outline: 2px dashed var(--anchor); outline-offset: 4px; borde
   flex-wrap: wrap;
   gap: var(--gap);
   align-items: center;
+}
+
+.add-skill .filter {
+  inline-size: 12em;
+  max-inline-size: 100%;
 }
 
 /* Add a skill and Remove session share one line; the second sits at the right end, and wraps under when the page is narrow. */

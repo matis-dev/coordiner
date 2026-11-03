@@ -1,10 +1,10 @@
 import { cardPrompt, isEffort, MAX_INPUT_CHARS, MODEL, parseChainShape, type Chain } from "./chains.ts";
-import type { Tier } from "./environment.ts";
 import type { JournaledEntry, LastTurn } from "./journal.ts";
 import type { Spend } from "./session.ts";
+import type { Suggestion } from "./protocol.ts";
 import { continueAfter, fillInput, pickUpAfter, restateAfter, type At, type Outcome, type StartPoint, type StepStatus } from "./run.ts";
 import { clip, plain } from "./text.ts";
-import { endEntry, MAX_TOOL_INPUT, Transcript, type Entry, type Worked } from "./transcript.ts";
+import { DEFAULT_MODEL, endEntry, MAX_TOOL_INPUT, Transcript, type Entry, type Worked } from "./transcript.ts";
 import type { Ending } from "./editor-protocol.ts";
 import type { DecidedAfter, QuestionWait } from "./unattended.ts";
 import type { StepView } from "./view.ts";
@@ -31,13 +31,15 @@ export type PastRun = {
   last?: LastTurn;
   // A journal from before what the sessions said was recorded: the transcript holds the user's side only.
   userOnly: boolean;
+  // A chat opened on its own (Open Chat): no chain ran, and it ends only when the user ends it, so it has no outcome.
+  chat?: true;
   // The chain as picked and its input; none in a journal from before runs could be continued.
   definition?: Chain;
   input?: string;
-  // Where Continue picks up: the card a halted or failed run stopped at, else the card the run last started. With the tier it
-  // ran on (none when it never started), whether a turn of it reached a session, whether it had given its reply, and the latest
-  // session of its chain session.
-  lastCard?: { at: At; tier?: Tier; reached: boolean; finished: boolean; resume?: string };
+  // Where Continue picks up: the card a halted or failed run stopped at, else the card the run last started. With the model and
+  // effort it last ran on, taken as what the step before it suggested (none when it never started), whether a turn of it reached a
+  // session, whether it had given its reply, and the latest session of its chain session.
+  lastCard?: { at: At; suggestion?: Suggestion; reached: boolean; finished: boolean; resume?: string };
 };
 
 // A run that can be continued: the filled chain, where it picks up, and the card and reason the confirm names.
@@ -48,7 +50,6 @@ export const MAX_JOURNAL_BYTES = 5_000_000;
 export const MAX_LISTED = 50;
 export const CLOSED_MID_RUN = "VS Code closed while it ran";
 
-const TIERS: readonly Tier[] = ["strong", "medium", "weak"];
 const WAITS: readonly QuestionWait[] = ["timed", "always", "never"];
 const AFTERS: readonly DecidedAfter[] = ["at once", "after 5 minutes"];
 const STEP_STATUSES: readonly StepStatus[] = ["done", "failed", "halted", "stopped"];
@@ -59,6 +60,7 @@ const str = (v: unknown, max = MAX_TEXT): v is string => typeof v === "string" &
 const index = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
 const one = <T>(list: readonly T[], v: unknown): v is T => list.includes(v as T);
 const effortOf = (v: Record<string, unknown>) => (isEffort(v.effort) ? { effort: v.effort } : {});
+const modelOf = (v: Record<string, unknown>) => (str(v.model) && MODEL.test(v.model) ? { model: v.model } : {});
 
 // The journal is read back field by field: a line that is not JSON, a record of an unknown type and a field of the wrong shape
 // are dropped. Text is made plain again, since anyone who can write the file can write anything into it.
@@ -106,8 +108,10 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
     if (str(r.at, 100)) lastAt = r.at;
     switch (r.type) {
       case "step-started":
-        if (r.index === steps.length && str(r.label, 1000) && one(TIERS, r.tier) && str(r.model) && MODEL.test(r.model)) {
-          steps.push({ label: plain(r.label), tier: r.tier, model: r.model, ...effortOf(r), status: "running" });
+        // Journals from before the tiers were dropped also carry `tier`, which is ignored. No model: the session's default.
+        if (r.index === steps.length && str(r.label, 1000) && (r.model === undefined || (str(r.model) && MODEL.test(r.model)))) {
+          const note = str(r.note) ? { note: clip(plain(r.note), 1000) } : {};
+          steps.push({ label: plain(r.label), ...modelOf(r), ...effortOf(r), ...note, status: "running" });
           cards.push(inChain(r.position) ? { session: r.position.session, card: r.position.card } : undefined);
         }
         break;
@@ -116,7 +120,7 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
         if (!step || !one(STEP_STATUSES, r.status) || !str(r.detail)) break;
         steps[r.index as number] = { ...step, status: r.status, detail: plain(r.detail) };
         if (str(r.sessionId) && SESSION_ID.test(r.sessionId)) {
-          lastStep = { sessionId: r.sessionId, model: step.model, ...(step.effort ? { effort: step.effort } : {}), card: step.label, reply: "" };
+          lastStep = { sessionId: r.sessionId, ...(step.model ? { model: step.model } : {}), ...(step.effort ? { effort: step.effort } : {}), card: step.label, reply: "" };
           const at = cards[r.index as number];
           if (at) {
             sessionOf.set(at.session, r.sessionId);
@@ -157,8 +161,8 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
       }
       case "turn":
         userOnly = false;
-        if (str(r.sessionId) && SESSION_ID.test(r.sessionId) && str(r.model) && MODEL.test(r.model) && str(r.card, 1000) && str(r.reply, MAX_JOURNAL_BYTES)) {
-          last = { sessionId: r.sessionId, model: r.model, ...effortOf(r), card: plain(r.card), reply: r.reply };
+        if (str(r.sessionId) && SESSION_ID.test(r.sessionId) && (r.model === undefined || (str(r.model) && MODEL.test(r.model))) && str(r.card, 1000) && str(r.reply, MAX_JOURNAL_BYTES)) {
+          last = { sessionId: r.sessionId, ...modelOf(r), ...effortOf(r), card: plain(r.card), reply: r.reply };
         }
         break;
       case "outcome": {
@@ -178,7 +182,8 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
   // A step still running when the journal ends did not finish; it is not running now.
   const settled = steps.map((s): StepView => (s.status === "running" ? { ...s, status: "stopped", detail: CLOSED_MID_RUN } : s));
   const { kind: _end, ...ending } = outcome ? endEntry(outcome) : ({ kind: "end", status: "stopped", reason: CLOSED_MID_RUN } as const);
-  if (!outcome) transcript.add([{ kind: "end", ...ending }]);
+  const chat = start.kind === "chat";
+  if (!outcome && !chat) transcript.add([{ kind: "end", ...ending }]);
   const turn = last ?? lastStep;
   const started = cards.at(-1);
   const at = stoppedAt ?? started;
@@ -186,7 +191,7 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
   const resume = at && sessionOf.get(at.session);
   const lastCard = at && {
     at,
-    ...(isStarted ? { tier: steps.at(-1)!.tier } : {}),
+    ...(isStarted && (steps.at(-1)!.model || steps.at(-1)!.effort) ? { suggestion: { ...modelOf(steps.at(-1)!), ...effortOf(steps.at(-1)!) } } : {}),
     reached: reached.has(key(at)),
     finished: isStarted && steps.at(-1)!.status === "done",
     ...(resume ? { resume } : {}),
@@ -206,6 +211,7 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
     ending,
     ...(turn ? { last: turn } : {}),
     userOnly,
+    ...(chat ? { chat: true as const } : {}),
     ...(definition ? { definition, input } : {}),
     ...(lastCard ? { lastCard } : {}),
   };
@@ -228,7 +234,7 @@ export function continuePoint(run: PastRun): Continuation | undefined {
   if (!card) return { chain: filled.chain, from: { at: lastCard.at, prompt: "" }, card: `Session ${lastCard.at.session + 1}`, reason };
   const retry = outcome?.status === "halted" || outcome?.status === "failed" ? continueAfter(reason) : pickUpAfter(reason);
   const prompt = !lastCard.reached ? cardPrompt(card) : lastCard.finished ? restateAfter(reason) : retry;
-  return { chain: filled.chain, from: { at: lastCard.at, ...(lastCard.tier ? { tier: lastCard.tier } : {}), ...(lastCard.resume ? { resume: lastCard.resume } : {}), prompt }, card: card.label, reason };
+  return { chain: filled.chain, from: { at: lastCard.at, ...(lastCard.suggestion ? { suggestion: lastCard.suggestion } : {}), ...(lastCard.resume ? { resume: lastCard.resume } : {}), prompt }, card: card.label, reason };
 }
 
 function entryOf(v: unknown): JournaledEntry | undefined {
@@ -244,8 +250,8 @@ function entryOf(v: unknown): JournaledEntry | undefined {
       return str(v.card, 1000) && str(v.error) ? { kind: "failed", card: plain(v.card), error: plain(v.error) } : undefined;
     case "card-end": {
       const worked = workedOf(v.worked);
-      if (!worked || !str(v.card, 1000) || !index(v.session) || !one(STEP_STATUSES, v.status) || !str(v.model) || !MODEL.test(v.model)) return undefined;
-      return { kind: "card-end", card: plain(v.card), session: v.session, status: v.status, model: v.model, ...effortOf(v), worked };
+      if (!worked || !str(v.card, 1000) || !index(v.session) || !one(STEP_STATUSES, v.status) || !(v.model === DEFAULT_MODEL || (str(v.model) && MODEL.test(v.model)))) return undefined;
+      return { kind: "card-end", card: plain(v.card), session: v.session, status: v.status, model: v.model as string, ...effortOf(v), worked };
     }
     case "session-end": {
       const worked = workedOf(v.worked);
@@ -308,14 +314,17 @@ export const listed =(runs: readonly PastRun[], repoRoot: string, openFile?: str
 
 // One line of work in the Sessions list: a worktree and its runs, newest first. "gone": its folder is not there; "unregistered": the
 // folder is there but git no longer lists it as a worktree. Either way only its runs' journals can be removed, never a folder.
-export type Line = { path: string; branch: string; slug: string; where: "here" | "gone" | "unregistered"; runs: PastRun[] };
+// "checkout": the repo's main checkout, or a worktree of the user's own (not on a coordiner/ branch), where a chat opened Here ran;
+// nothing is removed from it, and no chain runs in it.
+export type Line = { path: string; branch: string; slug: string; where: "here" | "gone" | "unregistered" | "checkout"; runs: PastRun[] };
 
 // The worktrees git lists for the repo and those the listed runs name, each once. Lines with runs come first, by their latest run;
 // a worktree with no run left in the list follows, by name. `runs` come newest first, as `listed` gives them.
-export function byWorktree(runs: readonly PastRun[], worktrees: readonly Listed[], present: (path: string) => boolean): Line[] {
+export function byWorktree(runs: readonly PastRun[], worktrees: readonly Listed[], present: (path: string) => boolean, checkout?: string): Line[] {
   const lines = new Map<string, Line>();
   const line = (path: string, branch: string, isListed: boolean): Line => {
-    const where = present(path) ? (isListed ? "here" : "unregistered") : "gone";
+    const own = path === checkout || (!isListed && present(path) && !branch.startsWith("coordiner/"));
+    const where = own ? "checkout" : present(path) ? (isListed ? "here" : "unregistered") : "gone";
     return { path, branch, slug: path.split(/[\\/]/).at(-1) || path, where, runs: [] };
   };
   for (const w of worktrees) lines.set(w.path, line(w.path, w.branch, true));

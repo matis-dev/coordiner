@@ -1,4 +1,4 @@
-import { MAX_INPUT_CHARS, parseChain, type Chain, type Effort } from "./chains.ts";
+import { MAX_INPUT_CHARS, parseChain, TEMPLATES, type Chain } from "./chains.ts";
 import type { CacheClock, Pick, TurnClock } from "./chat-logic.ts";
 import type { Outcome } from "./run.ts";
 import type { ModelOption, PaletteEntry } from "./skills.ts";
@@ -14,6 +14,10 @@ export type EditorMessage =
   | { type: "refreshPalette" }
   | { type: "openMskills" }
   | { type: "checkEnvironment" }
+  // Templates the user removed stay out of the rail and Start… until restored; the ids are checked against the templates.
+  | { type: "removeTemplate"; id: string }
+  | { type: "restoreTemplate"; id: string }
+  | { type: "restoreTemplates" }
   // The run's chat
   | { type: "chatSend"; text: string }
   | { type: "chatWithdraw"; id: string }
@@ -30,7 +34,10 @@ export type EditorMessage =
 
 export type EditorState = {
   type: "state";
+  // The templates the rail shows: none while m-skills is known to be missing, and none the user removed.
   templates: readonly Chain[];
+  // The ids of the templates the user removed, for Restore; none while m-skills is known to be missing.
+  removedTemplates: readonly string[];
   chains: readonly Chain[];
   // undefined while discovery runs or after it failed
   palette?: PaletteEntry[];
@@ -39,8 +46,8 @@ export type EditorState = {
   // Listed with the skills; undefined while discovery runs or when the session would not list them.
   models?: ModelOption[];
   modelsError?: string;
-  // What a card on its tier may ask for: the efforts every tier model takes.
-  tierEfforts?: Effort[];
+  // The model a card on Default runs on; undefined when the session names none.
+  defaultModel?: string;
   running: boolean;
   // The chain running, and where in it (the card's index in its session): the lanes mark that card.
   // `waiting`: the card waits for the user, or asked them something.
@@ -56,8 +63,9 @@ export type EditorState = {
 // `cache` only while a card waits for the user: that is when the time it stays warm is the user's to spend. `ending` once the run
 // has ended: how it ended, with the reason a halt or failure gave. `turn` only while a card runs: how long, and its last activity.
 export type Ending = { status: Outcome["status"]; reason?: string };
-// `line`: the chain's card labels, by session, for the line of stations in the chat's head.
-export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock; turn?: TurnClock; ending?: Ending; line?: string[][] };
+// `line`: the chain's card labels, by session, for the line of stations in the chat's head. `freeChat`: a chat opened on its own
+// (Open Chat), with no run before it.
+export type ChatView = TalkSnapshot & { title?: string; cache?: CacheClock; turn?: TurnClock; ending?: Ending; line?: string[][]; freeChat?: true };
 export type ChatMessage =
   // Everything: on "ready", and when a run starts.
   | { type: "chat"; chat: ChatView; entries: Entry[] }
@@ -73,6 +81,9 @@ const KEYS: Record<EditorMessage["type"], readonly string[]> = {
   refreshPalette: [],
   openMskills: [],
   checkEnvironment: [],
+  removeTemplate: ["id"],
+  restoreTemplate: ["id"],
+  restoreTemplates: [],
   chatSend: ["text"],
   chatWithdraw: ["id"],
   chatPause: [],
@@ -119,6 +130,9 @@ export function parseEditorMessage(v: unknown): EditorMessage | undefined {
     case "run":
     case "chatWithdraw":
       return typeof m.id === "string" && ID.test(m.id) ? { type, id: m.id } : undefined;
+    case "removeTemplate":
+    case "restoreTemplate":
+      return typeof m.id === "string" && TEMPLATES.some((t) => t.id === m.id) ? { type, id: m.id } : undefined;
     case "chatSend":
     case "chatCopyText":
       return isText(m.text, MAX_INPUT_CHARS) && m.text.trim() !== "" ? { type, text: m.text } : undefined;

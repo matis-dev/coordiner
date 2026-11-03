@@ -23,13 +23,15 @@ export const addCard = (chain: Chain, s: number, skill: string): Chain => editSe
 export const removeCard = (chain: Chain, s: number, i: number): Chain => editSession(chain, s, (cards) => cards.filter((_, j) => j !== i));
 export const setArgs = (chain: Chain, s: number, i: number, args: string): Chain => editSession(chain, s, (cards) => cards.map((c, j) => (j === i ? { ...c, args } : c)));
 
-// Undefined removes the field, so a card back on its tier or the model's default effort is stored as it was before either was set.
+// Undefined removes the field, so a card back on Default or the model's default effort is stored as it was before either was set.
 const withCard = (chain: Chain, s: number, i: number, patch: (card: Card) => Card): Chain => editSession(chain, s, (cards) => cards.map((c, j) => (j === i ? patch(c) : c)));
 export const setModel = (chain: Chain, s: number, i: number, model?: string, effort?: Effort): Chain =>
   withCard(chain, s, i, ({ model: _model, effort: _effort, ...c }) => ({ ...c, ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}) }));
 export const setEffort = (chain: Chain, s: number, i: number, effort?: Effort): Chain =>
   withCard(chain, s, i, ({ effort: _effort, ...c }) => ({ ...c, ...(effort !== undefined ? { effort } : {}) }));
 export const setPause = (chain: Chain, s: number, i: number, pause: boolean): Chain => withCard(chain, s, i, (c) => ({ ...c, pause }));
+export const setFollow = (chain: Chain, s: number, i: number, follow: boolean): Chain =>
+  withCard(chain, s, i, ({ follow: _follow, ...c }) => ({ ...c, ...(follow ? { follow: true as const } : {}) }));
 
 export const addSession = (chain: Chain): Chain => ({ ...chain, sessions: [...chain.sessions, { cards: [] }] });
 export const removeSession = (chain: Chain, s: number): Chain => ({ ...chain, sessions: chain.sessions.filter((_, i) => i !== s) });

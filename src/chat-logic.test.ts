@@ -90,6 +90,7 @@ describe("the end of the run", () => {
     const after = view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "halted", reason: "needs you" } });
     assert.equal(statusLine(after), "The run halted: needs you. You can keep talking to Kickoff.");
     assert.equal(statusLine({ ...after, ending: undefined }), "The run has ended. You can keep talking to Kickoff.");
+    assert.equal(statusLine({ ...after, ending: undefined, freeChat: true }), "Write below: each message is a turn of this chat's own session.");
     assert.equal(statusLine({ ...after, phase: "running" }), "", "the chip says it");
     assert.equal(statusLine(view({ phase: "ended", ending: { status: "done" } })), "The run is done.");
   });

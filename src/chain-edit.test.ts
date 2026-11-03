@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addCard, addSession, duplicate, moveTo, removeCard, removeSession, rename, setArgs, setEffort, setModel, setPause } from "./chain-edit.ts";
+import { addCard, addSession, duplicate, moveTo, removeCard, removeSession, rename, setArgs, setEffort, setFollow, setModel, setPause } from "./chain-edit.ts";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
 
 const chain: Chain = { id: "c", name: "C", sessions: [{ cards: [defaultCard("a"), defaultCard("b"), defaultCard("c")] }, { cards: [defaultCard("d")] }] };
@@ -80,6 +80,12 @@ describe("model and effort", () => {
     const paused = setPause(pinned, 0, 1, true);
     assert.deepEqual(paused.sessions[0]!.cards[1], { ...pinned.sessions[0]!.cards[1]!, pause: true });
     assert.deepEqual(setPause(paused, 0, 1, false).sessions[0]!.cards[1], pinned.sessions[0]!.cards[1]);
+  });
+
+  it("sets follow and removes the field when it is cleared, without touching the other fields", () => {
+    const following = setFollow(pinned, 0, 1, true);
+    assert.deepEqual(following.sessions[0]!.cards[1], { ...pinned.sessions[0]!.cards[1]!, follow: true });
+    assert.deepEqual(setFollow(following, 0, 1, false).sessions[0]!.cards[1], pinned.sessions[0]!.cards[1]);
   });
 
   it("leaves the chain as it was out of range", () => {

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { ModelInfo } from "@anthropic-ai/claude-agent-sdk";
-import { commonEfforts, modelOptions, mskillsPresent, palette } from "./skills.ts";
+import { defaultModelOf, modelOptions, mskillsPresent, palette } from "./skills.ts";
 import { REQUIRED_COMMANDS } from "./session.ts";
 
 describe("mskillsPresent", () => {
@@ -75,12 +75,13 @@ describe("modelOptions", () => {
   });
 });
 
-describe("commonEfforts", () => {
-  const options = [
-    { id: "a", label: "A", efforts: ["low", "high", "max"] as const },
-    { id: "b", label: "B", efforts: ["low", "high"] as const },
-  ].map((o) => ({ ...o, efforts: [...o.efforts] }));
+describe("defaultModelOf", () => {
+  const row = (value: string, resolvedModel?: string): ModelInfo => ({ value, displayName: value, description: "", ...(resolvedModel ? { resolvedModel } : {}) });
 
-  it("is the efforts every tier model takes", () => assert.deepEqual(commonEfforts(options, ["a", "b", "a"]), ["low", "high"]));
-  it("is none when a tier model is not listed", () => assert.deepEqual(commonEfforts(options, ["a", "missing", "b"]), []));
+  it("is the id the default row resolves to", () => assert.equal(defaultModelOf([row("opus"), row("default", "claude-opus-5-5")]), "claude-opus-5-5"));
+  it("is none without a default row, or when it resolves to nothing usable", () => {
+    assert.equal(defaultModelOf([row("opus")]), undefined);
+    assert.equal(defaultModelOf([row("default")]), undefined);
+    assert.equal(defaultModelOf([row("default", "bad id")]), undefined);
+  });
 });

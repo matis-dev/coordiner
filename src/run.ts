@@ -1,9 +1,9 @@
-import { cardPrompt, inputOf, INPUTS, MAX_INPUT_CHARS, REVIEW, skillDefault, type Chain, type ChainSession, type Effort } from "./chains.ts";
-import type { Models, Tier } from "./environment.ts";
-import { parseStatus, tierOf, withoutStatus, type Status } from "./protocol.ts";
+import { afterMskills, cardPrompt, inputOf, INPUTS, isEffort, MAX_INPUT_CHARS, REVIEW, skillDefault, type Card, type Chain, type ChainSession, type Effort } from "./chains.ts";
+import { parseStatus, suggested, withoutStatus, type Status, type Suggestion } from "./protocol.ts";
 import type { Spend, TurnRequest, TurnResult } from "./session.ts";
+import type { ModelOption } from "./skills.ts";
 import type { Talk } from "./talk.ts";
-import { clip } from "./text.ts";
+import { clip, plain } from "./text.ts";
 import { MAX_NEW_FILES, type ReviewPrep } from "./worktree.ts";
 
 export const MAX_TURNS = 20;
@@ -17,13 +17,14 @@ export type At = { session: number; card: number };
 export type TurnStats = { ms: number; usage?: Spend };
 
 export type RunEvent =
-  // `position`, not `at`: the journal stamps each record with its time as `at`.
-  | { type: "step-started"; index: number; label: string; tier: Tier; model: string; effort?: Effort; position: At }
+  // `position`, not `at`: the journal stamps each record with its time as `at`. No `model`: the session's own default, unchecked
+  // (its models could not be listed). `note`: what became of the previous step's suggestion, when it was not simply taken.
+  | { type: "step-started"; index: number; label: string; model?: string; effort?: Effort; note?: string; position: At }
   | { type: "step-finished"; index: number; status: StepStatus; detail: string; sessionId?: string; stats: TurnStats };
 
-// Where a continued run picks up: the card, the tier it was on (none takes the skill's default), the session to resume (none
-// starts it fresh), and the prompt its first turn sends.
-export type StartPoint = { at: At; tier?: Tier; resume?: string; prompt: string };
+// Where a continued run picks up: the card, what the step before it suggested (the model and effort it last ran on), the session
+// to resume (none starts it fresh), and the prompt its first turn sends.
+export type StartPoint = { at: At; suggestion?: Suggestion; resume?: string; prompt: string };
 
 export type Outcome =
   | { status: "done"; text: string }
@@ -38,7 +39,9 @@ export type TurnAsk = Pick<TurnRequest, "prompt" | "model" | "effort" | "resume"
 
 export type RunDeps = {
   runTurn(request: TurnAsk): Promise<TurnResult>;
-  models: Models;
+  // The models the session offers, and its default model's id; none when they could not be listed.
+  offered?: readonly ModelOption[];
+  defaultModel?: string;
   emit(event: RunEvent): void;
   signal: AbortSignal;
   talk: Pick<Talk, "at" | "takeQueued" | "pausePending" | "waitForYou" | "giveBack">;
@@ -67,8 +70,40 @@ export const restateAfter = (reason: string): string =>
 // Why a card stopped, and the outcome the run ends with if the user stops it there.
 type Parking = { outcome: Extract<Outcome, { status: "halted" | "failed" }>; reason: string };
 
-// One session runs its cards in order, resuming one conversation. A "once" card takes one turn; NEXT moves to the next card on the
-// tier it names, DONE moves to the next card on its own tier. A review's DONE skips the loop cards after it (nothing to fix goes
+// How a card's turn runs: its model and effort, from the card and what the step before it suggested. Per field, a value set on the
+// card wins and an unset one takes the suggestion; a card that follows the previous step takes the suggestion first, its own values
+// being the fallback. A suggested model is taken only when the session offers it, and an effort only when the model the turn runs on
+// takes it: anything else is dropped and said in `notes`. With no model at all, the turn runs on the session's default model.
+export type TurnSettings = { model?: string; effort?: Effort; notes: string[] };
+
+export function turnSettings(card: Card, suggestion: Suggestion | undefined, offered: readonly ModelOption[] | undefined, defaultModel: string | undefined): TurnSettings {
+  const notes: string[] = [];
+  const shown = (value: string) => plain(clip(value, 100));
+  let model: string | undefined;
+  if (suggestion?.model !== undefined) {
+    if (!offered) notes.push(`suggested model ${shown(suggestion.model)} not used: the session's models could not be listed`);
+    else if (offered.some((m) => m.id === suggestion.model)) model = suggestion.model;
+    else notes.push(`suggested model ${shown(suggestion.model)} not used: the session does not offer it`);
+  }
+  let effort: Effort | undefined;
+  if (suggestion?.effort !== undefined) {
+    if (isEffort(suggestion.effort)) effort = suggestion.effort;
+    else notes.push(`suggested effort ${shown(suggestion.effort)} not used: not an effort level`);
+  }
+  if (suggestion?.skill !== undefined && suggestion.skill !== card.skill) notes.push(`the previous step suggested ${shown(suggestion.skill)}; the chain runs ${card.skill}`);
+  if (card.follow && model === undefined && effort === undefined) notes.push("no suggestion from the previous step: ran on the card's own model and effort");
+  const chosen = (card.follow ? (model ?? card.model) : (card.model ?? model)) ?? defaultModel;
+  let chosenEffort = card.follow ? (effort ?? card.effort) : (card.effort ?? effort);
+  const takes = chosen === undefined ? undefined : offered?.find((m) => m.id === chosen)?.efforts;
+  if (chosenEffort && takes && !takes.includes(chosenEffort)) {
+    notes.push(`effort ${chosenEffort} not used: ${shown(chosen!)} does not take it`);
+    chosenEffort = undefined;
+  }
+  return { ...(chosen ? { model: chosen } : {}), ...(chosenEffort ? { effort: chosenEffort } : {}), notes };
+}
+
+// One session runs its cards in order, resuming one conversation. A "once" card takes one turn; NEXT moves to the next card with
+// what it suggested, DONE moves to the next card with no suggestion. A review's DONE skips the loop cards after it (nothing to fix goes
 // straight to history); any other skill's DONE does not. A "loop" card continues on each NEXT and moves on at DONE. NEXT on a last
 // "once" card names a step this session does not have (a kickoff naming the planning after it), so it ends the card as DONE does.
 //
@@ -80,8 +115,7 @@ type Parking = { outcome: Extract<Outcome, { status: "halted" | "failed" }>; rea
 // run: it waits for the user, a message is a turn with them, and Continue retries it, in the session that stopped when there is
 // one. Stop ends the run with the outcome that parked it, so the session can still be taken over by hand.
 //
-// A card with its own model runs every turn on it, loop turns and the reminder included: NEXT <tier> then only picks the tier the
-// card after it starts on.
+// A loop card's NEXT suggests how its own next turn runs; a reminder or a retry keeps the suggestion the card had.
 // `start` begins at a later card instead, resuming the session it names with its prompt.
 async function runSessionAt(session: ChainSession, deps: RunDeps, place: SessionPlace = { session: 0 }, start?: Omit<StartPoint, "at"> & { card: number }): Promise<{ outcome: Outcome; card: number }> {
   const { cards } = session;
@@ -90,7 +124,7 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
   if (!cards[card]) return { outcome: { status: "refused", reason: "This session has no such card to continue at." }, card: 0 };
   let { label } = cards[card]!;
   let prompt = start?.prompt ?? cardPrompt(cards[card]!);
-  let tier = start?.tier ?? skillDefault(cards[card]!.skill).tier;
+  let suggestion = start?.suggestion;
   let attended = cards[card]!.pause;
   let chat = false;
   let resume: string | undefined = start?.resume;
@@ -99,11 +133,11 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
   // The latest status line the card gave since it started waiting for the user; Continue applies it.
   let latest: { status: Status; text: string } | undefined;
   const stop = (outcome: Outcome) => ({ outcome, card });
-  const enter = (next: number, nextTier: Tier) => {
+  const enter = (next: number, nextSuggestion: Suggestion | undefined) => {
     card = next;
     ({ label } = cards[card]!);
     prompt = cardPrompt(cards[card]!);
-    tier = nextTier;
+    suggestion = nextSuggestion;
     attended = cards[card]!.pause;
     latest = undefined;
   };
@@ -130,18 +164,19 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
       let next = card + 1;
       if (skillDefault(cards[card]!.skill).doneSkipsLoops) while (next < cards.length && skillDefault(cards[next]!.skill).kind === "loop") next++;
       if (next >= cards.length) return { end: { status: "done", text: withoutStatus(text) }, step: ["done", "done"] };
-      enter(next, skillDefault(cards[next]!.skill).tier);
+      enter(next, undefined);
       return { step: ["done", "done"] };
     }
     if (kind === "loop") {
       ({ label } = cards[card]!);
       prompt = cards[card]!.next ?? "Continue.";
-      tier = tierOf(status.tier);
+      suggestion = status.suggestion;
       attended = false;
     } else {
-      enter(card + 1, tierOf(status.tier));
+      enter(card + 1, status.suggestion);
     }
-    return { step: ["done", `next: ${status.tier}`] };
+    const fields = plain(clip(suggested(status.suggestion), 300));
+    return { step: ["done", fields ? `next: ${fields}` : "next"] };
   };
 
   // The card waits for the user. Returns the outcome to end the run with when they stop it; otherwise the next turn is set, with a
@@ -178,12 +213,15 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     deps.talk.at({ card: cards[card]!.label, index: card, session: place.session, attended, ...(card === cards.length - 1 && place.nextSession ? { nextSession: place.nextSession } : {}) });
     const queued = deps.talk.takeQueued(cards[card]!.label);
     const shown = chat ? `${label} · chat` : label;
-    const { model = deps.models[tier], effort } = cards[card]!;
+    // A `follow` the editor no longer offers (the card was moved) is kept on the card but not applied, as the editor shows it.
+    const { follow, ...unfollowed } = cards[card]!;
+    const { model, effort, notes } = turnSettings(follow && afterMskills(cards, card) ? cards[card]! : unfollowed, suggestion, deps.offered, deps.defaultModel);
     const effortSet = effort ? { effort } : {};
-    deps.emit({ type: "step-started", index, label: shown, tier, model, ...effortSet, position: { session: place.session, card } });
+    const modelSet = model ? { model } : {};
+    deps.emit({ type: "step-started", index, label: shown, ...modelSet, ...effortSet, ...(notes.length > 0 ? { note: notes.join("; ") } : {}), position: { session: place.session, card } });
     const now = deps.now ?? Date.now;
     const began = now();
-    const result = await deps.runTurn({ prompt: queued ? `${queued}\n\n${prompt}` : prompt, model, ...effortSet, interactive: attended, ...(resume ? { resume } : {}) });
+    const result = await deps.runTurn({ prompt: queued ? `${queued}\n\n${prompt}` : prompt, ...modelSet, ...effortSet, interactive: attended, ...(resume ? { resume } : {}) });
     const stats: TurnStats = { ms: Math.max(0, now() - began), ...(result.usage ? { usage: result.usage } : {}) };
     const sessionId = result.sessionId;
     const finish = ([status, detail]: [StepStatus, string]) => deps.emit({ type: "step-finished", index, status, detail, ...(sessionId ? { sessionId } : {}), stats });
@@ -247,10 +285,10 @@ export type TalkOnDeps = {
   runTurn(request: AfterAsk): Promise<TurnResult>;
   talk: Pick<Talk, "waitForYou">;
   signal: AbortSignal;
-  // The run's last card, and the session, model and effort its last turn ran on.
+  // The run's last card, and the session, model and effort its last turn ran on. No session: the first message starts one.
   card: string;
-  sessionId: string;
-  model: string;
+  sessionId?: string;
+  model?: string;
   effort?: Effort;
 };
 
@@ -262,7 +300,7 @@ export async function talkOn({ runTurn, talk, signal, card, sessionId, model, ef
     const move = await talk.waitForYou({ card, ready: false, signal });
     if (move.kind === "stopped") return;
     if (move.kind !== "message") continue;
-    const result = await runTurn({ prompt: move.text, model, ...(effort ? { effort } : {}), resume });
+    const result = await runTurn({ prompt: move.text, ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(resume ? { resume } : {}) });
     if (result.ok) resume = result.sessionId;
   }
 }

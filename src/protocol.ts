@@ -1,22 +1,33 @@
-import type { Tier } from "./environment.ts";
+import type { ModelOption } from "./skills.ts";
 
-export type PlannerTier = "Light" | "Standard" | "Heavy";
-export type Status = { kind: "next"; tier: PlannerTier } | { kind: "done" } | { kind: "halt"; reason: string } | { kind: "none" };
+// What a step suggests for the step after it, as the model wrote it: each value is one token of at most 100 characters, checked
+// against the session's own models only where it is used (`turnSettings`, src/chains.ts).
+export type Suggestion = { model?: string; effort?: string; skill?: string };
+export type Status = { kind: "next"; suggestion: Suggestion } | { kind: "done" } | { kind: "halt"; reason: string } | { kind: "none" };
 
-const TIER_OF: Record<PlannerTier, Tier> = { Heavy: "strong", Standard: "medium", Light: "weak" };
-const STATUS_LINE = /^COORDINER: (?:NEXT (Light|Standard|Heavy)|(DONE)|HALT (.{1,300}))$/;
+// `NEXT Light|Standard|Heavy` is the line skills gave before the suggestion fields; it still moves the chain on, suggesting nothing.
+const STATUS_LINE = /^COORDINER: (?:NEXT(?: (?:Light|Standard|Heavy))?((?: \S+)*)|(DONE)|HALT (.{1,300}))$/;
+const FIELD = /^(model|effort|skill)=(\S{1,100})$/;
 
-export const tierOf = (planner: PlannerTier): Tier => TIER_OF[planner];
-
-// Only the last non-empty line counts: a marker quoted mid-text (a plan, a file's contents) must not steer the run.
+// Only the last non-empty line counts: a marker quoted mid-text (a plan, a file's contents) must not steer the run. A NEXT line with
+// anything but known fields, each at most once, is not a status line.
 export function parseStatus(text: string): Status {
   const last = text.trimEnd().split("\n").at(-1)!.trim();
   const match = STATUS_LINE.exec(last);
   if (!match) return { kind: "none" };
-  if (match[1]) return { kind: "next", tier: match[1] as PlannerTier };
   if (match[2]) return { kind: "done" };
-  return { kind: "halt", reason: match[3]! };
+  if (match[3]) return { kind: "halt", reason: match[3] };
+  const suggestion: Suggestion = {};
+  for (const token of match[1]!.split(" ").filter(Boolean)) {
+    const field = FIELD.exec(token);
+    if (!field || field[1]! in suggestion) return { kind: "none" };
+    suggestion[field[1] as keyof Suggestion] = field[2]!;
+  }
+  return { kind: "next", suggestion };
 }
+
+// The fields a NEXT line gave, as the step's detail shows them.
+export const suggested = (s: Suggestion): string => (["skill", "model", "effort"] as const).flatMap((k) => (s[k] ? [`${k}=${s[k]}`] : [])).join(" ");
 
 export const withoutStatus = (text: string): string => text.trimEnd().split("\n").slice(0, -1).join("\n").trimEnd();
 
@@ -26,10 +37,10 @@ export const replyOf = (text: string): string => (parseStatus(text).kind === "no
 export const UNATTENDED_NOTE = [
   "This session is driven by coordiner, an unattended pipeline running a chain of skills. Nobody is at the keyboard.",
   "Finish the skill's work, then end your turn. Do not offer a next-step picker or start another skill.",
-  "Planning: instead of the approval picker, end with the line `COORDINER: NEXT <tier>`, where <tier> (Light, Standard or Heavy) is the tier of the plan's first step.",
-  "Implementing: at every tier stop in the plan, end with `COORDINER: NEXT <tier>` naming the next step's tier. When the whole plan is done, end with `COORDINER: DONE`.",
-  "Reviewing: end with `COORDINER: NEXT <tier>` naming the tier the fixes need, or `COORDINER: DONE` when there is nothing to fix.",
-  "Fixing findings: stop at tier changes as when implementing, and end with `COORDINER: DONE` once every finding is handled.",
+  "Planning: instead of the approval picker, end with the line `COORDINER: NEXT`, suggesting the model and effort of the plan's first step (below).",
+  "Implementing: at every stop in the plan where the model or effort changes, end with `COORDINER: NEXT`, suggesting the next step's model and effort. When the whole plan is done, end with `COORDINER: DONE`.",
+  "Reviewing: end with `COORDINER: NEXT`, suggesting the model and effort the fixes need, or `COORDINER: DONE` when there is nothing to fix.",
+  "Fixing findings: stop where the model or effort changes, as when implementing, and end with `COORDINER: DONE` once every finding is handled.",
   "Rolling history: end with `COORDINER: DONE` after the commit brief.",
   "Any other skill: when its work is done, end with `COORDINER: DONE`.",
   "A decision the plan reserves for the user, or a one-way door, is a question (below), not a halt.",
@@ -46,7 +57,7 @@ export const INTERACTIVE_NOTE = [
   "Ask what you need through AskUserQuestion, as often as the skill calls for; the user answers each question in the chat.",
   "Do not offer a next-step picker or start another skill: the user moves the chain on with coordiner's Continue button.",
   "Continue runs only the next skill in the chain, and ends the run when there is none, so do not tell the user that Continue runs a skill you name: name the next skill, and leave how to start it to coordiner.",
-  "When this skill's work is done, end your final message with the status line the skill would give in an unattended run: `COORDINER: NEXT <tier>` (Light, Standard or Heavy) for the next step's tier, `COORDINER: DONE` when the skill is finished, or `COORDINER: HALT <one-line reason>` when the user must act outside this session.",
+  "When this skill's work is done, end your final message with the status line the skill would give in an unattended run: `COORDINER: NEXT` when a next step follows (with the model and effort it needs, as below), `COORDINER: DONE` when the skill is finished, or `COORDINER: HALT <one-line reason>` when the user must act outside this session.",
   "Until the work is done, end your turn without a status line; the user replies in the chat.",
 ].join(" ");
 
@@ -58,3 +69,21 @@ export const AFTER_NOTE = [
   "Ask what you need through AskUserQuestion; the user answers each question in the chat.",
   "Do not offer a next-step picker. Start another skill only when the user asks for one.",
 ].join(" ");
+
+// A chat opened on its own (Open Chat): no chain ran before it, and none follows unless the user starts one.
+export const CHAT_NOTE = [
+  "This session was started from coordiner's chat, with no chain of skills: the user is talking to you directly in coordiner's chat.",
+  "Answer them directly. No COORDINER status line is needed, and there is no Continue button in this chat; do not tell the user to press one.",
+  "Ask what you need through AskUserQuestion; the user answers each question in the chat.",
+  "Do not offer a next-step picker. Start a skill only when the user asks for one.",
+].join(" ");
+
+// What a NEXT line may suggest, with the models this session offers. Appended to the unattended and interactive notes; the model's
+// suggestion is only a suggestion: coordiner checks it against the same list, and the card's own settings decide when it applies.
+export function suggestionNote(offered: readonly ModelOption[] | undefined): string {
+  const how =
+    "A `COORDINER: NEXT` line may suggest how the next step runs, with fields after NEXT: `model=<id>` and `effort=<level>`, for example `COORDINER: NEXT model=<id> effort=medium`. Leave out a field you have no reason to set.";
+  if (!offered || offered.length === 0) return `${how} This session's models could not be listed, so suggest only the effort (low, medium, high, xhigh or max).`;
+  const list = offered.map((m) => `${m.id} (${m.label}; ${m.efforts.length > 0 ? `effort ${m.efforts.join(", ")}` : "no effort setting"})`).join("; ");
+  return `${how} Use only these model ids, and an effort the model takes: ${list}. When a plan gives a step a tier, suggest the strongest listed model for Heavy, a mid one for Standard and the lightest for Light, with the plan's effort.`;
+}

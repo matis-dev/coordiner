@@ -14,7 +14,7 @@ import { awakeHelper, keepAwake, type Helper, type Spawned } from "./awake.ts";
 import { canGoOnAlone, needsYou } from "./chat-logic.ts";
 import { runReason } from "./editor-logic.ts";
 import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
-import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type Models } from "./environment.ts";
+import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv } from "./environment.ts";
 import { byWorktree, continuePoint, journalsOf, MAX_JOURNAL_BYTES, parseJournal, readNewest, type Continuation, type Line, type PastRun } from "./history.ts";
 import { createJournal, journalFileName, type JournalRecord, type LastTurn } from "./journal.ts";
 import { replyOf } from "./protocol.ts";
@@ -23,12 +23,12 @@ import { oneRun, type OneRun } from "./one-run.ts";
 import { actOnChat, createRunChat, IDLE_CHAT, stations, type ChatAction, type Decision, type RunChat, type TurnMode } from "./run-chat.ts";
 import { listCommands, runTurn, type TurnControl, type TurnResult } from "./session.ts";
 import { proposeSetup, runSetup } from "./setup.ts";
-import { commonEfforts, modelOptions, mskillsPresent, palette, type ModelOption, type PaletteEntry } from "./skills.ts";
+import { defaultModelOf, modelOptions, mskillsPresent, palette, type ModelOption, type PaletteEntry } from "./skills.ts";
 import { plain } from "./text.ts";
 import type { QuestionWait } from "./unattended.ts";
 import { applyTask, liveProcess, stopLine, type Process } from "./processes.ts";
 import type { Entry } from "./transcript.ts";
-import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, plural, processItem, sessionItem, startItems, stepItem, worktreeItem, type ItemView, type StepView } from "./view.ts";
+import { currentItem, finishedMessage, nothingToReviewMessage, pickedChain, plural, processItem, sessionItem, shownTemplates, startItems, stepItem, worktreeItem, type ItemView, type StepView } from "./view.ts";
 import {
   addWorktree,
   changedFiles,
@@ -150,7 +150,8 @@ class SessionsProvider implements vscode.TreeDataProvider<RunItem> {
         item.id = `wt:${line.path}`;
         item.collapsibleState = this.runsOf(element).length > 0 ? Collapsed : None;
         // The actions each kind offers, inline and in the context menu (package.json).
-        item.contextValue = line.where !== "here" ? "gone" : continuation ? "worktree-continue" : "worktree";
+        // The checkout offers none: no chain runs there and nothing is removed from it.
+        item.contextValue = line.where === "checkout" ? "checkout" : line.where !== "here" ? "gone" : continuation ? "worktree-continue" : "worktree";
         return item;
       }
       case "past": {
@@ -209,14 +210,6 @@ async function pointTo(show: (message: string, ...items: string[]) => Thenable<s
   else if (choice === OPEN_WORKTREE && worktree) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(worktree), { forceNewWindow: true });
 }
 
-function readModels(config: vscode.WorkspaceConfiguration): Models {
-  return {
-    strong: config.get<string>("models.strong", "claude-opus-5-5"),
-    medium: config.get<string>("models.medium", "claude-sonnet-5-5"),
-    weak: config.get<string>("models.weak", "claude-haiku-5-5"),
-  };
-}
-
 const sessionEnvFor = (config: vscode.WorkspaceConfiguration) => sessionEnv(process.env, config.get<string>("extraPath", ""));
 const isExecutable = (path: string) => access(path, constants.X_OK).then(() => true, () => false);
 const bundledClaude = () => bundledClaudePath(vscode.extensions.getExtension("anthropic.claude-code")?.extensionPath, process.platform);
@@ -235,7 +228,7 @@ async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<vo
   const env = sessionEnvFor(config);
   const claude = await claudeFor(config, env);
   output.show(true);
-  output.appendLine("Checking the environment: three short model calls and one resume.");
+  output.appendLine("Checking the environment: two short model calls and the session's model list.");
   const results = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "Coordiner: checking the environment" },
     () =>
@@ -243,7 +236,13 @@ async function checkEnvironmentCommand(output: vscode.OutputChannel): Promise<vo
         runTurn,
         nodeVersion: async (env) => (await run("node", ["--version"], { env })).stdout.trim(),
         claude,
-        models: readModels(config),
+        listModels: async (claudePath) => {
+          const listed = await listCommands({ cwd, env, claudePath });
+          if (!listed.ok) return listed;
+          if (!listed.models) return { ok: false, error: `the session did not list its models: ${listed.modelsError ?? "no reason given"}.` };
+          const defaultModel = defaultModelOf(listed.models);
+          return { ok: true, options: modelOptions(listed.models), ...(defaultModel ? { defaultModel } : {}) };
+        },
         cwd,
         env,
         canUseTool: noTools,
@@ -395,14 +394,16 @@ async function announce(outcome: Outcome, heading: string, worktree: Worktree, c
 type RunState = { abort?: AbortController; chainId?: string; through?: number; chat?: RunChat; stopProcess?: (process: Process) => Promise<void>; after?: After; open?: { title: string; file: string }; opening?: string };
 
 // Where a next chain runs: the worktree of the run before, that run's name, and its last reply, which becomes the input.
-type Here = { worktree: Worktree; name: string; slug: string; card: string; input: string };
+// `checkout`: the chat runs in the repo's own checkout (Open Chat, Here), where no chain runs.
+type Here = { worktree: Worktree; name: string; slug: string; card: string; input: string; checkout?: true };
 
 // Where a run goes, when not in a new worktree: after a run, on its last reply; in an existing worktree, on an input asked for as
 // usual; or a stopped run continued at its card.
 type Where = { kind: "after"; here: Here } | { kind: "in"; worktree: Worktree; slug: string } | { kind: "continue"; run: PastRun; continuation: Continuation };
 
-// The run's last session, which the user keeps talking to after the run until they end the chat or confirm a new run.
-type After = { abort: AbortController; chat: RunChat; here: Here; sessionId: string };
+// The run's last session, which the user keeps talking to after the run until they end the chat or confirm a new run. No session
+// yet: a chat opened on its own, before its first message.
+type After = { abort: AbortController; chat: RunChat; here: Here; sessionId?: string };
 
 type Journal = (record: JournalRecord) => Promise<void>;
 
@@ -417,7 +418,6 @@ type Place = {
   name: string;
   slug: string;
   worktree: Worktree;
-  models: Models;
   journal: Journal;
   journalFile: string;
   questions: QuestionWait;
@@ -445,6 +445,8 @@ type RunContext = {
   sessionsChanged: () => void;
   // Looks at the saved chains between the saves queued before and after, so a check made there holds until the next save.
   savedChains: <T>(look: (chains: readonly Chain[]) => T) => Promise<T>;
+  // The models the open folder's session offers, and its default model, as the chains editor last listed them.
+  models: () => { offered?: readonly ModelOption[]; defaultModel?: string };
 };
 
 // The run's announcement waits on a notification, so it comes after the slot is given back: the chat after the run needs the slot.
@@ -523,8 +525,19 @@ async function confirmRun(message: string, detail: string, memory: vscode.Mement
   return wait;
 }
 
+// A chat's own worktree: one button, since a chat asks its questions of the user, who is there. Its questions always wait.
+async function confirmChat(name: string, setup: readonly string[] | undefined, dirty: boolean): Promise<QuestionWait | undefined> {
+  const detail = [
+    dirty ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
+    setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
+    "Git writes and GitHub publishes are denied in the chat's session.",
+  ].filter(Boolean).join("\n\n");
+  const choice = await vscode.window.showWarningMessage(`Open a chat in a new worktree for "${plain(name)}"?`, { modal: true, detail }, "Open Chat");
+  return choice === "Open Chat" ? "always" : undefined;
+}
+
 // What the sessions run with: the editor's environment and the claude to start.
-async function sessionTools(): Promise<{ env: Record<string, string | undefined>; claudePath: string; models: Models } | undefined> {
+async function sessionTools(): Promise<{ env: Record<string, string | undefined>; claudePath: string } | undefined> {
   const config = vscode.workspace.getConfiguration("coordiner");
   const env = sessionEnvFor(config);
   const claude = await claudeFor(config, env);
@@ -532,7 +545,7 @@ async function sessionTools(): Promise<{ env: Record<string, string | undefined>
     void vscode.window.showErrorMessage(`Coordiner: ${claude.error}`);
     return undefined;
   }
-  return { env, claudePath: claude.path, models: readModels(config) };
+  return { env, claudePath: claude.path };
 }
 
 // What every run's confirm modal says about how the chain runs.
@@ -594,8 +607,9 @@ async function stillListed(worktree: Worktree): Promise<boolean> {
   return false;
 }
 
-// A new worktree for the run: the repo, the chain's input, the confirm modal, then the worktree and its setup.
-async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | undefined> {
+// A new worktree for the run: the repo, the chain's input, the confirm modal, then the worktree and its setup. For a chat (Open
+// Chat), the chain has no sessions, the input is only a name, and the confirm asks nothing about unattended questions.
+async function prepareWorktree(chain: Chain, ctx: RunContext, chat = false): Promise<Place | undefined> {
   const { output } = ctx;
   const folder = openFolder();
   if (folder === undefined) {
@@ -634,7 +648,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
     repo.dirty.length > 0 ? "WARNING: your checkout has uncommitted changes. They are not in the new worktree." : undefined,
     setup ? `Setup command in the new worktree: ${setup.join(" ")}` : "No setup command (no lockfile found).",
   ].filter(Boolean).join("\n\n");
-  const questions = await confirmRun(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, detail, ctx.memory);
+  const questions = chat ? await confirmChat(input.name, setup, repo.dirty.length > 0) : await confirmRun(`Run ${plain(chain.name)} for "${plain(input.name)}"?`, detail, ctx.memory);
   if (!questions) return undefined;
   endAfter(ctx.state);
 
@@ -646,7 +660,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
   }
   output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
   const worktree = { root: repo.root, path: added.path, branch: added.branch };
-  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, models: tools.models, questions, definition: chain, input: input.text });
+  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", ...(chat ? { kind: "chat" as const } : {}), chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, questions, definition: chain, input: input.text });
   if (setup) {
     const result = await runSetup(setup, added.path, tools.env, exec);
     if (!result.ok) {
@@ -656,7 +670,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext): Promise<Place | u
       return undefined;
     }
   }
-  return { chain: filled.chain, definition: chain, input: input.text, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
+  return { chain: filled.chain, definition: chain, input: input.text, name: input.name, slug, worktree, journal, journalFile, questions };
 }
 
 // A chain in a worktree that is already there: no new worktree and no setup. After a run, its input is that run's last reply; in a
@@ -703,8 +717,8 @@ async function confirmHere(chain: Chain, where: Extract<Where, { kind: "after" |
   const questions = await confirmRun(where.kind === "after" ? `Run ${plain(chain.name)} in the same worktree?` : `Run ${plain(chain.name)} in ${plain(slug)}?`, detail, ctx.memory);
   if (!questions) return undefined;
   endAfter(ctx.state);
-  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, models: tools.models, questions, definition: chain, input: input.text });
-  return { chain: filled.chain, definition: chain, input: input.text, name: input.name, slug, worktree, models: tools.models, journal, journalFile, questions };
+  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, questions, definition: chain, input: input.text });
+  return { chain: filled.chain, definition: chain, input: input.text, name: input.name, slug, worktree, journal, journalFile, questions };
 }
 
 // A stopped run, continued at its card in its own worktree. It goes on in the same journal, so reopening it later shows all of it.
@@ -726,7 +740,7 @@ async function confirmContinue({ run, continuation }: Extract<Where, { kind: "co
   void journal({ type: "continued", position: from.at, questions });
   ctx.output.appendLine(`Journal: ${join(journalDir(ctx), run.file)}`);
   // continuePoint gives a continuation only for a run whose definition and input it read.
-  return { chain, definition: run.definition!, input: run.input!, name: run.story, slug: slugOf(run.worktree), worktree, models: tools.models, journal, journalFile: run.file, questions, from, past: { steps: run.steps, entries: run.entries } };
+  return { chain, definition: run.definition!, input: run.input!, name: run.story, slug: slugOf(run.worktree), worktree, journal, journalFile: run.file, questions, from, past: { steps: run.steps, entries: run.entries } };
 }
 
 type Turn = (request: AfterAsk & { mode: TurnMode }, signal: AbortSignal) => Promise<TurnResult>;
@@ -777,7 +791,8 @@ function sessionTurns(chat: RunChat, worktree: Worktree, required: () => readonl
     if (!result.ok && result.undelivered) chat.talk.giveBack(result.undelivered);
     if (result.sessionId) {
       const reply = result.ok ? replyOf(result.resultText) : (last?.reply ?? "");
-      last = { sessionId: result.sessionId, model: request.model, ...(request.effort ? { effort: request.effort } : {}), card, reply };
+      const model = result.ok ? result.model : request.model;
+      last = { sessionId: result.sessionId, ...(model ? { model } : {}), ...(request.effort ? { effort: request.effort } : {}), card, reply };
       void journal({ type: "turn", ...last });
     }
     return result;
@@ -788,7 +803,8 @@ function sessionTurns(chat: RunChat, worktree: Worktree, required: () => readonl
 // Runs the chain in its place, then leaves the chat open on the last session. Returns the run's announcement.
 async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>> {
   const { state, provider, reveal, output } = ctx;
-  const { chain, name, worktree, models, journal, questions } = place;
+  const { chain, name, worktree, journal, questions } = place;
+  const models = ctx.models();
   const abort = new AbortController();
   const log = (line: string) => {
     output.appendLine(line);
@@ -803,6 +819,7 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     needsYou: ctx.needsYou,
     log,
     questions,
+    ...(models.offered ? { offered: models.offered } : {}),
     line: stations(chain),
     ...(place.past ? { past: place.past.entries } : {}),
     ...(place.from?.resume ? { resumes: true } : {}),
@@ -818,7 +835,8 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     void journal(event);
     chat.stepped(event);
     if (event.type === "step-started") {
-      provider.update([...provider.steps, { label: event.label, tier: event.tier, model: event.model, ...(event.effort ? { effort: event.effort } : {}), status: "running" }]);
+      provider.update([...provider.steps, { label: event.label, ...(event.model ? { model: event.model } : {}), ...(event.effort ? { effort: event.effort } : {}), ...(event.note ? { note: event.note } : {}), status: "running" }]);
+      if (event.note) log(`Coordiner: ${plain(event.label)}: ${plain(event.note)}`);
       reveal(provider.steps[event.index]!);
       return;
     }
@@ -853,7 +871,7 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
   try {
     outcome = await runChain(chain, {
       runTurn: ({ interactive, ...request }) => turn({ ...request, mode: interactive ? "interactive" : "unattended" }, abort.signal),
-      models,
+      ...models,
       emit,
       signal: abort.signal,
       talk: chat.talk,
@@ -877,14 +895,15 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
 }
 
 // The chat after the run: each message is a turn of the run's last session, and each turn holds the slot, so a new run waits
-// for it. A failed turn is shown in the transcript and the chat stays open.
+// for it. A failed turn is shown in the transcript and the chat stays open. A chat opened on its own has no session until its first
+// message.
 function talkAfter(
-  last: LastTurn,
-  { chat, place, ctx, stopProcess, turn }: { chat: RunChat; place: Pick<Place, "worktree" | "name" | "slug">; ctx: RunContext; stopProcess: RunState["stopProcess"]; turn: Turn },
+  last: Omit<LastTurn, "sessionId"> & { sessionId?: string },
+  { chat, place, ctx, stopProcess, turn, checkout }: { chat: RunChat; place: Pick<Place, "worktree" | "name" | "slug">; ctx: RunContext; stopProcess: RunState["stopProcess"]; turn: Turn; checkout?: boolean },
 ): void {
   const abort = new AbortController();
-  const here: Here = { worktree: place.worktree, name: place.name, slug: place.slug, card: last.card, input: last.reply };
-  const after: After = { abort, chat, here, sessionId: last.sessionId };
+  const here: Here = { worktree: place.worktree, name: place.name, slug: place.slug, card: last.card, input: last.reply, ...(checkout ? { checkout: true as const } : {}) };
+  const after: After = { abort, chat, here, ...(last.sessionId ? { sessionId: last.sessionId } : {}) };
   Object.assign(ctx.state, { after, stopProcess });
   ctx.onRunChange();
   const runAfterTurn = async (request: AfterAsk): Promise<TurnResult> => {
@@ -899,7 +918,96 @@ function talkAfter(
     }
     return result;
   };
-  void talkOn({ runTurn: runAfterTurn, talk: chat.talk, signal: abort.signal, card: last.card, sessionId: last.sessionId, model: last.model, ...(last.effort ? { effort: last.effort } : {}) });
+  void talkOn({
+    runTurn: runAfterTurn,
+    talk: chat.talk,
+    signal: abort.signal,
+    card: last.card,
+    ...(last.sessionId ? { sessionId: last.sessionId } : {}),
+    ...(last.model ? { model: last.model } : {}),
+    ...(last.effort ? { effort: last.effort } : {}),
+  });
+}
+
+// ── Open Chat ─────────────────────────────────────────────────────────────────
+
+// A chat runs no chain: its journal names this one, with no sessions.
+const CHAT_CHAIN: Chain = { id: "chat", name: "Chat", sessions: [] };
+const CHAT_CARD = "Chat";
+
+// Coordiner's worktrees are on coordiner/<slug> branches; anything else is the user's own checkout, where no chain runs.
+const inCheckout = (worktree: Worktree): boolean => !worktree.branch.startsWith("coordiner/");
+
+// A chat with Claude and no chain: in the open folder's checkout, or in a new worktree. It is the chat after a run, from its first
+// message, with the same git guard; it holds the run slot while it is set up, so it waits for a run, and a run waits for it.
+async function openChatCommand(editor: ChainsEditor, ctx: RunContext): Promise<void> {
+  const picked = await vscode.window.showQuickPick(
+    [
+      { label: "Here", detail: "In the open folder. Claude edits your checkout directly: no worktree, no setup.", where: "here" as const },
+      { label: "New worktree", detail: "Asks for a name, then makes <repo>.coordiner/<name> on its own branch and installs its dependencies.", where: "worktree" as const },
+    ],
+    { title: "Open Chat", placeHolder: "Where should the chat's session run?" },
+  );
+  if (!picked) return;
+  let opened = false;
+  const took = await ctx.slot.run(async () => void (opened = picked.where === "here" ? await chatHere(ctx) : await chatInWorktree(ctx)));
+  if (!took) void vscode.window.showWarningMessage("Coordiner: a run or a turn of the chat is going. Stop it first, then open a chat.");
+  else if (opened) await editor.open();
+}
+
+// The open folder's checkout: the top of its git repository, or the folder itself outside one, where the chat runs but is not
+// listed in Sessions (they list a repository's lines of work).
+async function chatHere(ctx: RunContext): Promise<boolean> {
+  const folder = openFolder();
+  if (folder === undefined) {
+    void vscode.window.showErrorMessage("Coordiner: open a folder first. The chat runs in the open folder.");
+    return false;
+  }
+  if (!(await sessionTools())) return false;
+  let top = folder;
+  let root = folder;
+  let branch = "";
+  try {
+    top = (await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder })).stdout.trim();
+    // From a linked worktree, the repo is still the main checkout: Sessions lists the runs of that one (loadLines).
+    const listed = await listWorktrees(top, exec);
+    root = listed.ok ? listed.main : top;
+    branch = (await currentBranch(top, exec)) ?? "";
+  } catch {
+    ctx.output.appendLine(`Coordiner: ${folder} is not in a git repository, so this chat is not listed in Sessions.`);
+  }
+  endAfter(ctx.state);
+  const name = basename(top) || top;
+  const slug = slugOf(top);
+  const worktree: Worktree = { root, path: top, branch };
+  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", kind: "chat", chain: CHAT_CHAIN.name, story: name, repo: root, worktree: top, branch, questions: "always", definition: CHAT_CHAIN, input: "" });
+  openChatOn({ worktree, name, slug, journal, journalFile }, ctx, inCheckout(worktree));
+  return true;
+}
+
+async function chatInWorktree(ctx: RunContext): Promise<boolean> {
+  const place = await prepareWorktree(CHAT_CHAIN, ctx, true);
+  if (!place) return false;
+  openChatOn(place, ctx, false);
+  return true;
+}
+
+// The chat opens waiting for the first message, on the session's default model as discovery last named it.
+function openChatOn(place: Pick<Place, "worktree" | "name" | "slug" | "journal" | "journalFile">, ctx: RunContext, checkout: boolean): void {
+  const { worktree, name, journal, journalFile } = place;
+  const log = (line: string) => {
+    ctx.output.appendLine(line);
+    void journal({ type: "log", line });
+  };
+  const title = `${CHAT_CHAIN.name} · ${plain(name)}`;
+  const chat = createRunChat({ title, post: ctx.postChat, record: (r) => void journal(r), moved: ctx.onRunChange, needsYou: ctx.needsYou, log, questions: "always", freeChat: true });
+  Object.assign(ctx.state, { chat, chainId: undefined, open: { title, file: journalFile } });
+  ctx.provider.update([]);
+  const { turn, stopProcess } = sessionTurns(chat, worktree, () => [], journal, ctx, log);
+  chat.reopened(undefined, { card: CHAT_CARD });
+  const { defaultModel } = ctx.models();
+  talkAfter({ card: CHAT_CARD, reply: "", ...(defaultModel ? { model: defaultModel } : {}) }, { chat, place, ctx, stopProcess, turn, checkout });
+  ctx.sessionsChanged();
 }
 
 // Reopens an earlier session from its journal: its transcript, and, while its worktree and session are still there, the chat after
@@ -945,7 +1053,18 @@ async function reopen(file: string, ctx: RunContext): Promise<boolean> {
     void journal({ type: "log", line });
   };
   const title = `${run.chain} · ${run.story}`;
-  const chat = createRunChat({ title, post: ctx.postChat, record: (r) => void journal(r), moved: ctx.onRunChange, needsYou: ctx.needsYou, log, questions: run.questions, past: run.entries, ...(run.definition ? { line: stations(run.definition) } : {}) });
+  const chat = createRunChat({
+    title,
+    post: ctx.postChat,
+    record: (r) => void journal(r),
+    moved: ctx.onRunChange,
+    needsYou: ctx.needsYou,
+    log,
+    questions: run.questions,
+    past: run.entries,
+    ...(run.definition ? { line: stations(run.definition) } : {}),
+    freeChat: run.chat === true,
+  });
   Object.assign(state, { chat, chainId: undefined, open: { title, file: run.file } });
   provider.update(run.steps);
   const there = await exists(run.worktree);
@@ -953,10 +1072,10 @@ async function reopen(file: string, ctx: RunContext): Promise<boolean> {
     const worktree: Worktree = { root: run.repo, path: run.worktree, branch: run.branch };
     // A chat turn runs no skill of its own, so no skill is required of the session.
     const { turn, stopProcess } = sessionTurns(chat, worktree, () => [], journal, ctx, log);
-    chat.reopened(run.ending, { card: run.last.card });
-    talkAfter(run.last, { chat, place: { worktree, name: run.story, slug: slugOf(run.worktree) }, ctx, stopProcess, turn });
+    chat.reopened(run.chat ? undefined : run.ending, { card: run.last.card });
+    talkAfter(run.last, { chat, place: { worktree, name: run.story, slug: slugOf(run.worktree) }, ctx, stopProcess, turn, checkout: run.chat && inCheckout(worktree) });
   } else {
-    chat.reopened(run.ending);
+    chat.reopened(run.chat ? undefined : run.ending);
     ctx.onRunChange();
     if (!there) void vscode.window.showWarningMessage(`Coordiner: ${plain(run.worktree)} no longer exists, so the session's chat is read-only.`);
   }
@@ -1001,7 +1120,7 @@ async function loadLines(ctx: RunContext, skipped: Set<string>): Promise<Worktre
     skipped.add("worktree list");
     worktrees = [...new Map(runs.filter((r) => present.has(r.worktree)).map((r) => [r.worktree, { path: r.worktree, branch: r.branch }])).values()];
   }
-  const lines = byWorktree(runs, worktrees, (p) => present.has(p));
+  const lines = byWorktree(runs, worktrees, (p) => present.has(p), root);
   return Promise.all(
     lines.map(async (line): Promise<WorktreeRow> => {
       const state = line.where === "here" ? await worktreeState(root, line, exec) : {};
@@ -1043,6 +1162,8 @@ async function loadSessions(ctx: RunContext, skipped: Set<string>, root: string)
 
 // ── Chains editor ─────────────────────────────────────────────────────────────
 
+const REMOVED_TEMPLATES = "coordiner.removedTemplates";
+
 const STARTED_KEEP_ORDER = "A change was not saved: the sessions the run has started keep their cards in order until it ends. The editor shows your chains as last saved.";
 
 // The sessions the run has started, which the lanes lock; nothing once it has ended.
@@ -1062,14 +1183,18 @@ class ChainsEditor {
   private paletteError?: string;
   private mskills?: boolean;
   private models?: ModelOption[];
+  private defaultModel?: string;
   private modelsError?: string;
   private readonly extension: vscode.Uri;
   private readonly store: ChainStore;
   private readonly ctx: RunContext;
+  // The user's memory across workspaces: the templates they removed.
+  private readonly global: vscode.Memento;
 
-  constructor(extension: vscode.Uri, file: string, ctx: RunContext) {
+  constructor(extension: vscode.Uri, file: string, ctx: RunContext, global: vscode.Memento) {
     this.extension = extension;
     this.ctx = ctx;
+    this.global = global;
     const fs: StoreFs = {
       readFile: (path) => readFile(path, "utf8"),
       writeFile: (path, text) => writeFile(path, text, "utf8"),
@@ -1118,7 +1243,18 @@ class ChainsEditor {
   // The saved chains, read once whether or not the editor was opened; an unreadable file leaves only the templates.
   async startable(): Promise<{ templates: readonly Chain[]; chains: readonly Chain[] }> {
     await this.store.load();
-    return { templates: TEMPLATES, chains: this.store.chains };
+    return { templates: shownTemplates(TEMPLATES, this.removedTemplates(), this.mskills), chains: this.store.chains };
+  }
+
+  // Only ids a template has: the memento is the user's, but an id from an older version may name a template that is gone.
+  private removedTemplates(): string[] {
+    const stored = this.global.get<unknown>(REMOVED_TEMPLATES);
+    return Array.isArray(stored) ? TEMPLATES.filter((t) => stored.includes(t.id)).map((t) => t.id) : [];
+  }
+
+  private async setRemovedTemplates(ids: readonly string[]): Promise<void> {
+    await this.global.update(REMOVED_TEMPLATES, [...new Set(ids)]);
+    this.post();
   }
 
   // The same checks for Run in the editor and for Start…. Start… can come before the editor was ever opened, so the skills are
@@ -1135,14 +1271,19 @@ class ChainsEditor {
     await runChainCommand(structuredClone(chain), this.ctx, where);
   }
 
-  // What discovery found, for the Run checks here and in the webview. The tier efforts follow the settings as they are now.
-  private discovered(): Pick<EditorState, "mskills" | "palette" | "models" | "tierEfforts"> {
-    const tiers = Object.values(readModels(vscode.workspace.getConfiguration("coordiner")));
+  // What discovery found, for the Run checks here and in the webview.
+  private discovered(): Pick<EditorState, "mskills" | "palette" | "models" | "defaultModel"> {
     return {
       ...(this.mskills !== undefined ? { mskills: this.mskills } : {}),
       ...(this.palette ? { palette: this.palette } : {}),
-      ...(this.models ? { models: this.models, tierEfforts: commonEfforts(this.models, tiers) } : {}),
+      ...(this.models ? { models: this.models } : {}),
+      ...(this.defaultModel ? { defaultModel: this.defaultModel } : {}),
     };
+  }
+
+  // What a run's steps may run on, as discovery last listed it.
+  listedModels(): { offered?: readonly ModelOption[]; defaultModel?: string } {
+    return { ...(this.models ? { offered: this.models } : {}), ...(this.defaultModel ? { defaultModel: this.defaultModel } : {}) };
   }
 
   // The saved chains, loaded first, looked at in turn with the saves (ChainStore.inTurn).
@@ -1162,7 +1303,8 @@ class ChainsEditor {
     const { error, unsaved } = this.store;
     const state: EditorState = {
       type: "state",
-      templates: TEMPLATES,
+      templates: shownTemplates(TEMPLATES, this.removedTemplates(), this.mskills),
+      removedTemplates: this.mskills === false ? [] : this.removedTemplates(),
       chains: this.store.chains,
       running: this.ctx.slot.busy(),
       ...runningAt(run),
@@ -1224,6 +1366,15 @@ class ChainsEditor {
       case "checkEnvironment":
         await vscode.commands.executeCommand("coordiner.checkEnvironment");
         return;
+      case "removeTemplate":
+        await this.setRemovedTemplates([...this.removedTemplates(), message.id]);
+        return;
+      case "restoreTemplate":
+        await this.setRemovedTemplates(this.removedTemplates().filter((id) => id !== message.id));
+        return;
+      case "restoreTemplates":
+        await this.setRemovedTemplates([]);
+        return;
       default:
         this.chat(message);
     }
@@ -1247,7 +1398,10 @@ class ChainsEditor {
       copyResume: () => void (after && this.copyResume(after)),
       // The user runs it, if they choose to; coordiner only puts it on the clipboard.
       copyText: (text: string) => void vscode.env.clipboard.writeText(text),
-      nextChain: () => void (after && startCommand(this, { kind: "after", here: after.here })),
+      nextChain: () => {
+        if (after?.here.checkout) void vscode.window.showInformationMessage("Coordiner: chains run in their own worktree, not in your checkout. Choose Start… to run one.");
+        else if (after) void startCommand(this, { kind: "after", here: after.here });
+      },
       mergeSteps: () => void (after && this.mergeSteps(after)),
     };
     if (!actOnChat(chat.talk, actions, message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);
@@ -1272,6 +1426,10 @@ class ChainsEditor {
 
   // Built here from the worktree and the session id, never from the page.
   private async copyResume({ here, sessionId }: After): Promise<void> {
+    if (!sessionId) {
+      await vscode.window.showInformationMessage("Coordiner: this chat has no session yet. Send a message first; the session starts with it.");
+      return;
+    }
     const command = resumeCommand(here.worktree.path, sessionId);
     if (command) await vscode.env.clipboard.writeText(command);
     else await vscode.window.showWarningMessage(`Coordiner: no resume command for this session; its worktree path has a control character. Run claude --resume ${sessionId} in the worktree.`);
@@ -1283,6 +1441,7 @@ class ChainsEditor {
     this.palette = undefined;
     this.paletteError = undefined;
     this.models = undefined;
+    this.defaultModel = undefined;
     this.modelsError = undefined;
     if (cwd === undefined) {
       this.paletteError = "open a folder first; skills are listed for the open folder.";
@@ -1297,7 +1456,10 @@ class ChainsEditor {
     if (result.ok) {
       this.palette = palette(result.commands);
       this.mskills = mskillsPresent(result.commands);
-      if (result.models) this.models = modelOptions(result.models);
+      if (result.models) {
+        this.models = modelOptions(result.models);
+        this.defaultModel = defaultModelOf(result.models);
+      }
       if (result.modelsError) this.modelsError = plain(result.modelsError);
     } else {
       this.paletteError = plain(result.error);
@@ -1365,6 +1527,11 @@ async function openWorktreeCommand(item: unknown, ctx: RunContext): Promise<void
 async function removeCommand(item: unknown, ctx: RunContext): Promise<void> {
   const row = rowOf(item, ctx);
   if (!row) return;
+  // The menu offers no Remove on the checkout's row; a call that names it anyway removes nothing.
+  if (row.line.where === "checkout") {
+    void vscode.window.showWarningMessage(`Coordiner: ${plain(row.line.slug)} is your checkout. Coordiner removes only the worktrees it made.`);
+    return;
+  }
   if (row.open) {
     void vscode.window.showWarningMessage(`Coordiner: ${plain(row.line.slug)} is open in this window. Remove it from the window of its repository.`);
     return;
@@ -1503,8 +1670,9 @@ export function activate(context: vscode.ExtensionContext): void {
     needsYou: (card) => editor?.needsYou(card),
     sessionsChanged,
     savedChains: (look) => editor!.savedChains(look),
+    models: () => editor!.listedModels(),
   };
-  editor = new ChainsEditor(context.extensionUri, join(context.globalStorageUri.fsPath, "chains.json"), ctx);
+  editor = new ChainsEditor(context.extensionUri, join(context.globalStorageUri.fsPath, "chains.json"), ctx, context.globalState);
   const story = TEMPLATES.find((t) => t.id === "story")!;
   sessionsChanged();
 
@@ -1524,9 +1692,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("coordiner.startHere", (item: unknown) => startHereCommand(item, editor, ctx)),
     vscode.commands.registerCommand("coordiner.openWorktree", (item: unknown) => openWorktreeCommand(item, ctx)),
     vscode.commands.registerCommand("coordiner.removeWorktree", (item: unknown) => removeCommand(item, ctx)),
-    vscode.commands.registerCommand("coordiner.runStory", () => runChainCommand(story, ctx)),
+    vscode.commands.registerCommand("coordiner.runStory", () => editor.run(story)),
     vscode.commands.registerCommand("coordiner.start", () => startCommand(editor)),
     vscode.commands.registerCommand("coordiner.openChains", () => editor.open()),
+    vscode.commands.registerCommand("coordiner.openChat", () => openChatCommand(editor, ctx)),
     // The argument is the tree item the button sits on.
     vscode.commands.registerCommand("coordiner.stopProcess", async (item: unknown) => {
       const process = liveProcess(provider.processes, (item as { id?: unknown } | undefined)?.id);

@@ -7,10 +7,22 @@ const chain = { id: "mine", name: "Mine", sessions: [{ cards: [defaultCard("acme
 
 describe("parseEditorMessage", () => {
   it("accepts each message type with exactly its fields", () => {
-    for (const type of ["ready", "refreshPalette", "openMskills", "checkEnvironment"]) assert.deepEqual(parseEditorMessage({ type }), { type });
+    for (const type of ["ready", "refreshPalette", "openMskills", "checkEnvironment", "restoreTemplates"]) assert.deepEqual(parseEditorMessage({ type }), { type });
+    assert.deepEqual(parseEditorMessage({ type: "removeTemplate", id: "bug" }), { type: "removeTemplate", id: "bug" });
+    assert.deepEqual(parseEditorMessage({ type: "restoreTemplate", id: "kickoff" }), { type: "restoreTemplate", id: "kickoff" });
     assert.deepEqual(parseEditorMessage({ type: "delete", id: "mine" }), { type: "delete", id: "mine" });
     assert.deepEqual(parseEditorMessage({ type: "run", id: "story" }), { type: "run", id: "story" });
     assert.deepEqual(parseEditorMessage({ type: "save", chain }), { type: "save", chain });
+  });
+
+  it("takes only a template's id to remove or restore, and no extra field", () => {
+    for (const type of ["removeTemplate", "restoreTemplate"]) {
+      assert.equal(parseEditorMessage({ type, id: "mine" }), undefined);
+      assert.equal(parseEditorMessage({ type, id: "__proto__" }), undefined);
+      assert.equal(parseEditorMessage({ type, id: 1 }), undefined);
+      assert.equal(parseEditorMessage({ type, id: "bug", also: "story" }), undefined);
+    }
+    assert.equal(parseEditorMessage({ type: "restoreTemplates", ids: ["bug"] }), undefined);
   });
 
   it("drops an openMskills message that carries its own URL", () => {

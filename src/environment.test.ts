@@ -1,10 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
-import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type CheckDeps, type Models } from "./environment.ts";
+import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv, type CheckDeps } from "./environment.ts";
 import { REQUIRED_COMMANDS, type TurnRequest, type TurnResult } from "./session.ts";
 
-const models: Models = { strong: "m-strong", medium: "m-medium", weak: "m-weak" };
 const canUseTool: CanUseTool = async (_name, input) => ({ behavior: "deny", message: String(input) });
 
 describe("sessionEnv", () => {
@@ -78,7 +77,13 @@ describe("findClaude", () => {
   });
 });
 
-const deps = (turn: (request: TurnRequest) => TurnResult, nodeVersion: CheckDeps["nodeVersion"] = async () => "v24.15.0") => {
+const OFFERED = [
+  { id: "m-default", label: "Default", efforts: [] },
+  { id: "m-other", label: "Other", efforts: [] },
+];
+type Listed = Awaited<ReturnType<CheckDeps["listModels"]>>;
+
+const deps = (turn: (request: TurnRequest) => TurnResult, nodeVersion: CheckDeps["nodeVersion"] = async () => "v24.15.0", listed: Listed = { ok: true, options: OFFERED, defaultModel: "m-default" }) => {
   const requests: TurnRequest[] = [];
   const value: CheckDeps = {
     runTurn: async (request) => {
@@ -87,7 +92,7 @@ const deps = (turn: (request: TurnRequest) => TurnResult, nodeVersion: CheckDeps
     },
     nodeVersion,
     claude: { ok: true, path: "/h/.local/bin/claude" },
-    models,
+    listModels: async () => listed,
     cwd: "/repo",
     env: { PATH: "/bin" },
     canUseTool,
@@ -95,39 +100,33 @@ const deps = (turn: (request: TurnRequest) => TurnResult, nodeVersion: CheckDeps
   return { value, requests };
 };
 
-const ok = (request: TurnRequest): TurnResult => ({ ok: true, sessionId: `sess-${request.model}`, model: request.model, resultText: "OK", commands: [...REQUIRED_COMMANDS] });
+// A turn that asks for no model runs on the session's default, m-default.
+const ok = (request: TurnRequest): TurnResult => ({ ok: true, sessionId: `sess-${request.model ?? "m-default"}`, model: request.model ?? "m-default", resultText: "OK", commands: [...REQUIRED_COMMANDS] });
 
 describe("checkEnvironment", () => {
-  it("passes every check when sessions, the model switch and node all work", async () => {
+  it("passes every check when the session, its models, the model switch and node all work", async () => {
     const { value, requests } = deps(ok);
     const results = await checkEnvironment(value);
-    assert.deepEqual(results.map((r) => [r.name, r.ok]), [
-      ["claude executable", true],
-      ["strong tier", true],
-      ["medium tier", true],
-      ["weak tier", true],
-      ["m-skills", true],
-      ["model switch on resume", true],
-      ["node on PATH", true],
+    assert.deepEqual(results, [
+      { name: "claude executable", ok: true, detail: "/h/.local/bin/claude" },
+      { name: "default model", ok: true, detail: "session ran m-default" },
+      { name: "models", ok: true, detail: "Default, Other" },
+      { name: "m-skills", ok: true, detail: "installed" },
+      { name: "model switch on resume", ok: true, detail: "resumed on m-other" },
+      { name: "node on PATH", ok: true, detail: "v24.15.0" },
     ]);
-    assert.equal(results[0]!.detail, "/h/.local/bin/claude");
-    assert.equal(results[1]!.detail, "session ran m-strong");
-    assert.equal(results[4]!.detail, "installed");
-    assert.equal(results[5]!.detail, "strong session resumed on m-weak");
-    assert.equal(results[6]!.detail, "v24.15.0");
-    assert.equal(requests.length, 4);
+    assert.equal(requests.length, 2);
   });
 
-  it("resumes the strong-tier session on the weak model", async () => {
+  it("asks for no model first, then resumes that session on another listed model", async () => {
     const { value, requests } = deps(ok);
     await checkEnvironment(value);
-    const resumed = requests[3]!;
-    assert.equal(resumed.resume, "sess-m-strong");
-    assert.equal(resumed.model, "m-weak");
+    assert.equal(Object.hasOwn(requests[0]!, "model"), false);
     assert.equal(requests[0]!.resume, undefined);
+    assert.deepEqual([requests[1]!.model, requests[1]!.resume], ["m-other", "sess-m-default"]);
   });
 
-  it("asks each tier for one tool-free turn in the given working directory and env", async () => {
+  it("asks for one tool-free turn each time, in the given working directory and env", async () => {
     const { value, requests } = deps(ok);
     await checkEnvironment(value);
     for (const request of requests) {
@@ -140,34 +139,46 @@ describe("checkEnvironment", () => {
     }
   });
 
-  it("names the failing tier and its setting, and skips the switch check when strong fails", async () => {
-    const { value, requests } = deps((request) => (request.model === "m-strong" ? { ok: false, error: "model_not_found" } : ok(request)));
+  it("says why the first session failed, and skips the m-skills row and the switch", async () => {
+    const { value, requests } = deps(() => ({ ok: false, error: "not logged in." }));
     const results = await checkEnvironment(value);
-    assert.equal(results[1]!.ok, false);
-    assert.match(results[1]!.detail, /m-strong: model_not_found Fix: coordiner\.models\.strong\./);
+    assert.deepEqual(results[1], { name: "default model", ok: false, detail: "not logged in. Fix: run claude in a terminal and check it signs in." });
     assert.equal(results.some((r) => r.name === "m-skills"), false);
-    assert.deepEqual(results[4], { name: "model switch on resume", ok: false, detail: "not run: the strong-tier session did not start." });
-    assert.equal(requests.length, 3);
+    assert.deepEqual(results.find((r) => r.name === "model switch on resume"), { name: "model switch on resume", ok: false, detail: "not run: the first session did not start." });
+    assert.equal(requests.length, 1);
   });
 
-  it("reports a failed model switch as a re-plan point", async () => {
-    const { value } = deps((request) => (request.resume ? { ok: false, error: "the session runs m-strong, not the requested m-weak." } : ok(request)));
+  it("reports models that could not be listed, and does not try a switch without a second model", async () => {
+    const { value, requests } = deps(ok, undefined, { ok: false, error: "the session did not list its models: timeout." });
+    const results = await checkEnvironment(value);
+    assert.deepEqual(results.find((r) => r.name === "models"), { name: "models", ok: false, detail: "the session did not list its models: timeout. Cards then run on the default model, unchecked." });
+    assert.deepEqual(results.find((r) => r.name === "model switch on resume"), { name: "model switch on resume", ok: true, detail: "not run: the session offers no second model to switch to." });
+    assert.equal(requests.length, 1);
+  });
+
+  it("says so when the session lists no models at all", async () => {
+    const { value } = deps(ok, undefined, { ok: true, options: [] });
+    assert.deepEqual((await checkEnvironment(value)).find((r) => r.name === "models"), { name: "models", ok: true, detail: "none listed; cards run on the default model" });
+  });
+
+  it("reports a failed model switch, saying what it stops", async () => {
+    const { value } = deps((request) => (request.resume ? { ok: false, error: "the session runs m-default, not the requested m-other." } : ok(request)));
     const switchCheck = (await checkEnvironment(value)).find((r) => r.name === "model switch on resume")!;
     assert.equal(switchCheck.ok, false);
-    assert.match(switchCheck.detail, /stop and re-plan/);
+    assert.match(switchCheck.detail, /suggested model cannot take over its session/);
   });
 
-  it("asks no tier for any command, so a missing m-skills cannot fail the tiers", async () => {
+  it("asks for no command, so a missing m-skills cannot fail a check", async () => {
     const { value, requests } = deps(ok);
     await checkEnvironment(value);
     assert.ok(requests.every((r) => r.requiredCommands.length === 0));
   });
 
-  it("reports a missing m-skills as information with the link, not as a failure", async () => {
+  it("reports a missing m-skills as a suggestion with the link, not as a failure", async () => {
     const { value } = deps((request) => ({ ...(ok(request) as Extract<TurnResult, { ok: true }>), commands: ["acme:lint"] }));
     const row = (await checkEnvironment(value)).find((r) => r.name === "m-skills")!;
     assert.equal(row.ok, true);
-    assert.match(row.detail, /not installed.*github\.com\/matis-dev\/m-skills/);
+    assert.match(row.detail, /not installed\. With it you get the starter chains.*github\.com\/matis-dev\/m-skills/);
   });
 
   it("points at coordiner.extraPath when node is missing", async () => {
@@ -184,11 +195,10 @@ describe("checkEnvironment", () => {
     value.claude = { ok: false, error: "Claude Code was not found. Fix: coordiner.claudePath." };
     const results = await checkEnvironment(value);
     assert.equal(requests.length, 0);
-    assert.deepEqual(results.slice(0, 5), [
+    assert.deepEqual(results.slice(0, 4), [
       { name: "claude executable", ok: false, detail: "Claude Code was not found. Fix: coordiner.claudePath." },
-      { name: "strong tier", ok: false, detail: "not run: no claude executable." },
-      { name: "medium tier", ok: false, detail: "not run: no claude executable." },
-      { name: "weak tier", ok: false, detail: "not run: no claude executable." },
+      { name: "default model", ok: false, detail: "not run: no claude executable." },
+      { name: "models", ok: false, detail: "not run: no claude executable." },
       { name: "model switch on resume", ok: false, detail: "not run: no claude executable." },
     ]);
     assert.deepEqual(results.at(-1), { name: "node on PATH", ok: true, detail: "v24.15.0" });

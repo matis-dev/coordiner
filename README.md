@@ -7,8 +7,12 @@
 <p align="center"><strong>Chains of Claude Code skills, run unattended, each in its own git worktree.</strong></p>
 
 <p align="center">
-  <a href="https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner"><img src="https://img.shields.io/badge/VS%20Code%20Marketplace-v0.5.2-007ACC" alt="VS Code Marketplace version"></a>
-  <a href="https://open-vsx.org/extension/matis-dev/coordiner"><img src="https://img.shields.io/badge/Open%20VSX-v0.5.2-purple" alt="Open VSX version"></a>
+  <img src="media/screenshot.png" alt="The Coordiner chains editor: the chain list on the left, a chain's sessions as rows of skill cards with their model and effort, and the run's chat underneath" width="900">
+</p>
+
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=matis-dev.coordiner"><img src="https://img.shields.io/badge/VS%20Code%20Marketplace-v0.5.3-007ACC" alt="VS Code Marketplace version"></a>
+  <a href="https://open-vsx.org/extension/matis-dev/coordiner"><img src="https://img.shields.io/badge/Open%20VSX-v0.5.3-purple" alt="Open VSX version"></a>
   <img src="https://img.shields.io/github/license/matis-dev/coordiner" alt="License: MIT">
   <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A51.135-007ACC" alt="VS Code 1.135 or newer">
 </p>
@@ -24,7 +28,7 @@ To use the extension:
 - **VS Code or VSCodium 1.135 or newer** (`engines.vscode` in [package.json](package.json)).
 - **git**.
 - **Claude Code, installed and signed in on this machine.** Sessions run your installed `claude` with your existing login: the one set in `coordiner.claudePath`, else the first `claude` on PATH, else `~/.local/bin/claude`, else the one bundled with the Claude Code editor extension.
-- **Recommended: the [m-skills](https://github.com/matis-dev/m-skills) plugin**, enabled in your Claude Code settings. Coordiner is built around it, and every shipped template uses its skills. Chains made only of your own skills run without it. A chain refuses to start when a skill it uses is not available in the session.
+- **Recommended: the [m-skills](https://github.com/matis-dev/m-skills) plugin**, enabled in your Claude Code settings. Coordiner is built around it: the starter templates use its skills, and only after an m-skills step can a card take its model and effort from the step before it (see [Choose a card's model and effort](#choose-a-cards-model-and-effort)). Chains made only of your own skills run without it. A chain refuses to start when a skill it uses is not available in the session.
 
 To build from source or package a `.vsix` (not needed to use the extension):
 
@@ -96,13 +100,14 @@ For a build of your own changes. To use the released extension, [install it from
 
 ## Check your setup
 
-Run **Coordiner: Check Environment** from the Command Palette. It first checks that sessions can find `claude`; without it nothing else that needs a session runs, and a chain refuses to start. Then it makes three short model calls (one per tier), resumes the first session on another model, reports whether m-skills is installed (information only, never a failure), and checks that `node` is on the PATH sessions get. Results are in the **Coordiner** output channel, one line per check; a passing run ends with the message "every environment check passed".
+Run **Coordiner: Check Environment** from the Command Palette. It first checks that sessions can find `claude`; without it nothing else that needs a session runs, and a chain refuses to start. Then it makes one short model call on the session's default model, lists the models the session offers, resumes the first session on another of them, reports whether m-skills is installed (information only, never a failure), and checks that `node` is on the PATH sessions get. Results are in the **Coordiner** output channel, one line per check; a passing run ends with the message "every environment check passed".
 
 If a check fails, the line names the setting that fixes it:
 
 | Failing check | Fix |
 |---|---|
-| `strong tier`, `medium tier` or `weak tier` | Set a full model ID in `coordiner.models.strong`, `.medium` or `.weak`. |
+| `default model` | Run `claude` in a terminal and check that it starts and is signed in. |
+| `models` | The session would not list its models. Runs still work: cards on **Default** run on the session's default model, unchecked. |
 | `claude executable` | Set `coordiner.claudePath` to the full path of `claude`. A flatpak editor's PATH has no `~/.local/bin`, and a `claude` link there breaks when its target moves. |
 | `node on PATH` | Set `coordiner.extraPath` to the folder that contains `node`, for example `~/.nvm/versions/node/v24.21.0/bin`. Editors started from a launcher or a flatpak often lack your shell's PATH. |
 
@@ -183,6 +188,8 @@ To run something without opening the editor, run **Coordiner: Start…** (the **
 
 Run **Coordiner: Open Chains** (the **Open Chains** button in the **Start** view, or the list button in the **Sessions** view's title bar). Templates, single skills and your own chains are on the left; the selected chain's sessions are on the right, each a row of skill cards, with a **fresh context** divider where a new conversation starts.
 
+The templates show only while m-skills is installed, since they are built on it; without it, the list says so and offers the install. **Remove template** in a template's toolbar takes it out of the list and out of **Start…** (with **Undo** under the toolbar); **Restore templates**, below the templates in the list, brings back every one you removed. **Run Story…** still runs Story after you remove it.
+
 Each template is named after what you bring to it, and **Run** asks for exactly that:
 
 | Template | You bring | Run asks | Session 1 | Session 2 |
@@ -231,11 +238,17 @@ You can keep editing a chain while it runs. Each session is read from your saved
 
 Each card has a **Model** and an **Effort** list, and a **Pause for me** checkbox that makes it wait for you after each turn. On a template, changing any of them saves your own copy of the template (named "<template> copy", under **My chains**), selects it, and keeps focus on the same control; the template stays as it was.
 
-- **By tier**, the default, runs the card on its tier's model from the `coordiner.models.*` settings, and the plan's `NEXT <tier>` lines switch it as the run goes.
-- Pick a model to pin the card to it for every turn, loop turns and reminders included.
-- **Effort** lists the levels the card's model takes; on **By tier**, only the levels all three tier models take. **Model default** leaves it to the model.
+- **Default**, named after the model it is (for example "Default (Opus 5.5)"), runs the card on the session's default model.
+- Pick a model to run the card on it for every turn, loop turns and reminders included.
+- **Effort** lists the levels the card's model takes, and is off with the reason shown when the model takes none. **Model default** leaves it to the model.
 
-The lists come from the same session that lists the skills. If it cannot list its models, the editor says so: cards on **By tier** run on their tier's model, and a pinned card keeps its model, which the session checks when it starts. A card set to a model or effort the session does not offer is marked, and **Run** stays off until you change it. The **Sessions** view shows each step's model and effort. Sessions always run in auto mode with Coordiner's git guard; there is no other permission mode.
+A step can suggest the model and effort of the step after it: planning names them for the plan's first step, implementing for each next step of the plan, and a review for its fixes. Coordiner tells each session which models it offers, and takes a suggestion only for a model in that list and an effort that model takes; anything else is dropped and said under the step in the **Sessions** view and in the **Coordiner** output. How a card treats a suggestion:
+
+- **Model** or **Effort** left on its default takes the suggestion. One you set wins over it.
+- **Take model and effort from the previous step**, shown on a card that follows an m-skills step in the same session while m-skills is installed, turns both lists off: the suggestion wins, and the lists are only used when the step before suggests nothing. The templates' implementing cards come with it ticked.
+- A suggestion that names another skill than the next card does not change the chain: the card in the chain runs, and the **Sessions** view says what was suggested.
+
+The lists come from the same session that lists the skills. If it cannot list its models, the editor says so: cards on **Default** run on the session's own default model, unchecked, and a card with a model keeps it, which the session checks when it starts. A card set to a model or effort the session does not offer is marked, and **Run** stays off until you change it. The **Sessions** view shows each step's model and effort. Sessions always run in auto mode with Coordiner's git guard; there is no other permission mode.
 
 ### Talk to a run in the chat
 
@@ -254,11 +267,24 @@ The run's chat sits under the chains in the chains editor. Until the first run o
 
 Only unattended turns count toward the 20-turn cap, and **Continue** on a card that reached it gives it 20 more. Your messages and answers, and the answers taken without you, are written to the run journal.
 
-The skill list comes from asking a Claude Code session in the open folder which skills it offers. No prompt is sent, so it costs no model turn. It runs once per window; **Refresh skills**, at the foot of the chains list, re-lists after you install or change skills. While m-skills is not installed, each chain that uses it is marked **needs m-skills** in the list.
+The skill list comes from asking a Claude Code session in the open folder which skills it offers. No prompt is sent, so it costs no model turn. It runs once per window; **Refresh skills**, at the foot of the chains list, re-lists after you install or change skills. While m-skills is not installed, each of your chains that uses it is marked **uses m-skills** in the list.
+
+**Filter**, beside each session's skill list, narrows it to the skills whose name holds what you type, and says how many match.
 
 Chains are saved in the extension's global storage (`chains.json`), never in your repository. A file that cannot be read is set aside as `chains.json.bak-<time>` and the editor says so.
 
 Every session Coordiner starts denies `git` writes (commit, push, branch creation, reset and the rest), `--no-verify`, and `gh` commands that publish, whichever skills the chain uses. Read-only git and `gh` stay open. A denial is logged in the **Coordiner** output and the run journal.
+
+## Talk to Claude without a chain
+
+**Open Chat** (in the **Start** view, the **Sessions** view's title bar, or **Coordiner: Open Chat**) opens the chains editor's chat on a new Claude Code session, with no chain. It asks where the session runs:
+
+- **Here**: in the open folder's checkout, at once. Claude edits your files directly, uncommitted changes included, so commit or stash first if you want a clean way back.
+- **New worktree**: asks for a name, then makes `<repo>.coordiner/<name>` on branch `coordiner/<name>` and installs its dependencies, as a run does.
+
+The chat is the same as after a run: Markdown replies, the tools each turn used, questions as forms, **Copy**, and **Copy resume command** once the first message has started the session. It runs on the session's default model, with the same git guard as every session. It is refused while a run or a chat turn is going.
+
+The chat is listed in the **Sessions** view as "chat": under its worktree's row, or, for **Here** in your own checkout (the repository's main one, or a worktree of yours that is not on a `coordiner/` branch), under a row for that checkout, which offers no actions. **Start the next chain here** is refused from a chat in your checkout, since chains run in their own worktree; use **Start…**.
 
 ## Keep the computer awake
 

@@ -30,6 +30,9 @@ export type Entry =
   | { kind: "merge"; branch: string; target?: string; steps: MergeStep[] }
   | { kind: "dropped" };
 
+// How a card that sent no model names it: it ran on the session's default, whatever that was.
+export const DEFAULT_MODEL = "default model";
+
 // A tool's input scrolls in a small box on the page, so it can be longer than one line has room for.
 export const MAX_TOOL_INPUT = 2000;
 

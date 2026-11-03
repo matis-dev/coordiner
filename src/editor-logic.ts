@@ -1,4 +1,4 @@
-import { INPUT_KINDS, inputOf, INPUTS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, runnable, skillDefault, usesMskills, type Card, type Chain, type Effort } from "./chains.ts";
+import { afterMskills, INPUT_KINDS, inputOf, INPUTS, MAX_CARDS, MAX_NAME, MAX_SESSIONS, runnable, usesMskills, type Card, type Chain, type Effort } from "./chains.ts";
 import type { Slot } from "./chain-edit.ts";
 import type { ModelOption } from "./skills.ts";
 
@@ -9,15 +9,15 @@ export type EditorView = {
   mskills?: boolean;
   palette?: readonly { skill: string }[];
   models?: readonly ModelOption[];
-  tierEfforts?: readonly Effort[];
+  // The model a card on Default runs on.
+  defaultModel?: string;
   locked?: { chainId: string; through: number };
 };
 
 // Until the models are listed nothing is offered, and nothing is refused: the session's own model check still guards the turn.
 function effortsFor(model: string | undefined, view: EditorView): readonly Effort[] {
   if (!view.models) return [];
-  if (model === undefined) return view.tierEfforts ?? [];
-  return view.models.find((m) => m.id === model)?.efforts ?? [];
+  return view.models.find((m) => m.id === (model ?? view.defaultModel))?.efforts ?? [];
 }
 export const effortChoices = (card: Card, view: EditorView): readonly Effort[] => effortsFor(card.model, view);
 // A new model keeps the card's effort only when it takes that effort too.
@@ -30,12 +30,13 @@ const effortOffered = (card: Card, view: EditorView): boolean => card.effort ===
 export function effortReason(card: Card, view: EditorView): string | undefined {
   if (effortChoices(card, view).length > 0) return undefined;
   if (!view.models) return "Effort can be set once the session's models are listed.";
-  return card.model === undefined ? "The tier models do not share an effort setting; pin a model to set one." : "This model has no effort setting.";
+  if (card.model === undefined && view.defaultModel === undefined) return "The session names no default model; pick a model to set an effort.";
+  return card.model === undefined ? "The default model has no effort setting." : "This model has no effort setting.";
 }
 
-// A pinned loop card keeps its model through the plan's tier stops.
-export const pinNote = (card: Card): string | undefined =>
-  card.model !== undefined && skillDefault(card.skill).kind === "loop" ? "Pinned: NEXT <tier> does not change this card's model." : undefined;
+// A card can take its model and effort from the step before it where a run would let it (`afterMskills`), and only while m-skills
+// is installed.
+export const followAvailable = (chain: Chain, s: number, i: number, view: EditorView): boolean => view.mskills === true && afterMskills(chain.sessions[s]?.cards ?? [], i);
 
 export function runReason(chain: Chain, view: EditorView): string | undefined {
   if (view.running) return "A run is in progress. Stop it in the chat below or with Coordiner: Stop Run to start another.";
@@ -46,7 +47,7 @@ export function runReason(chain: Chain, view: EditorView): string | undefined {
   const stale = cards.find((c) => !modelOffered(c, view));
   if (stale) return `${stale.label}: model ${stale.model} is not offered by this session.`;
   const unoffered = cards.find((c) => !effortOffered(c, view));
-  if (unoffered) return `${unoffered.label}: effort ${unoffered.effort} is not available for ${unoffered.model ?? "its tier's models"}.`;
+  if (unoffered) return `${unoffered.label}: effort ${unoffered.effort} is not available for ${unoffered.model ?? "the default model"}.`;
   return undefined;
 }
 
@@ -110,6 +111,22 @@ export const addKey = (s: number): string => `add-${s}`;
 export const modelKey = (s: number, i: number): string => `model-${s}-${i}`;
 export const effortKey = (s: number, i: number): string => `effort-${s}-${i}`;
 export const pauseKey = (s: number, i: number): string => `pause-${s}-${i}`;
+export const followKey = (s: number, i: number): string => `follow-${s}-${i}`;
+export const filterKey = (s: number): string => `filter-${s}`;
+
+// The skills whose name or label holds the filter's text, in any case; an empty filter keeps them all.
+export function filterPalette<T extends { skill: string; label: string }>(palette: readonly T[], query: string): readonly T[] {
+  const q = query.trim().toLowerCase();
+  return q === "" ? palette : palette.filter((p) => p.skill.toLowerCase().includes(q) || p.label.toLowerCase().includes(q));
+}
+
+export const matchCount = (n: number): string => (n === 0 ? "No skills match" : n === 1 ? "1 skill matches" : `${n} skills match`);
+
+// What the Model list calls Default: the model it is, once the session has named it.
+export const defaultLabel = (view: EditorView): string => {
+  const model = view.models?.find((m) => m.id === view.defaultModel);
+  return model ? `Default (${model.label})` : "Default";
+};
 
 // Why a session's cards cannot change places: the run has started it.
 export const lockReason = (chain: Chain, s: number, view: EditorView): string | undefined =>

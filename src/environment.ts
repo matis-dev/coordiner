@@ -2,10 +2,7 @@ import { delimiter, join } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { MSKILLS_URL } from "./chains.ts";
 import type { TurnRequest, TurnResult } from "./session.ts";
-import { mskillsPresent } from "./skills.ts";
-
-export type Tier = "strong" | "medium" | "weak";
-export type Models = Record<Tier, string>;
+import { mskillsPresent, type ModelOption } from "./skills.ts";
 
 export type CheckResult = { name: string; ok: boolean; detail: string };
 
@@ -13,7 +10,8 @@ export type CheckDeps = {
   runTurn(request: TurnRequest): Promise<TurnResult>;
   nodeVersion(env: Record<string, string | undefined>): Promise<string>;
   claude: ClaudeLookup;
-  models: Models;
+  // The models a session in `cwd` offers, and its default model's id; an error says why they could not be listed.
+  listModels(claudePath: string): Promise<{ ok: true; options: readonly ModelOption[]; defaultModel?: string } | { ok: false; error: string }>;
   cwd: string;
   env: Record<string, string | undefined>;
   canUseTool: CanUseTool;
@@ -57,7 +55,7 @@ export async function checkEnvironment(deps: CheckDeps): Promise<CheckResult[]> 
     ? [{ name: "claude executable", ok: true, detail: claude.path }, ...(await sessionChecks(deps, claude.path))]
     : [
         { name: "claude executable", ok: false, detail: claude.error },
-        ...["strong tier", "medium tier", "weak tier", "model switch on resume"].map((name) => ({ name, ok: false, detail: "not run: no claude executable." })),
+        ...["default model", "models", "model switch on resume"].map((name) => ({ name, ok: false, detail: "not run: no claude executable." })),
       ];
 
   try {
@@ -69,43 +67,39 @@ export async function checkEnvironment(deps: CheckDeps): Promise<CheckResult[]> 
 }
 
 async function sessionChecks(deps: CheckDeps, claudePath: string): Promise<CheckResult[]> {
-  const { models, cwd, env, canUseTool } = deps;
-  const results: CheckResult[] = [];
-  const turn = (request: Partial<TurnRequest> & { model: string }) =>
-    deps.runTurn({ prompt: PING, cwd, env, claudePath, canUseTool, maxTurns: 1, requiredCommands: [], ...request });
+  const { cwd, env, canUseTool } = deps;
+  const turn = (request: Partial<TurnRequest>) => deps.runTurn({ prompt: PING, cwd, env, claudePath, canUseTool, maxTurns: 1, requiredCommands: [], ...request });
 
-  let strongSession: string | undefined;
-  let commands: string[] | undefined;
-  for (const tier of ["strong", "medium", "weak"] as const) {
-    const result = await turn({ model: models[tier] });
-    if (tier === "strong" && result.ok) {
-      strongSession = result.sessionId;
-      commands = result.commands;
-    }
-    results.push({
-      name: `${tier} tier`,
-      ok: result.ok,
-      detail: result.ok ? `session ran ${result.model}` : `${models[tier]}: ${result.error} Fix: coordiner.models.${tier}.`,
-    });
-  }
+  // No model asked for: the session runs its own default, as a card left on Default does when the models cannot be listed.
+  const first = await turn({});
+  const results: CheckResult[] = [{ name: "default model", ok: first.ok, detail: first.ok ? `session ran ${first.model}` : `${first.error} Fix: run claude in a terminal and check it signs in.` }];
+
+  const listed = await deps.listModels(claudePath);
+  results.push(
+    listed.ok
+      ? { name: "models", ok: true, detail: listed.options.length > 0 ? listed.options.map((o) => o.label).join(", ") : "none listed; cards run on the default model" }
+      : { name: "models", ok: false, detail: `${listed.error} Cards then run on the default model, unchecked.` },
+  );
 
   // m-skills is recommended, not required: its absence is reported, never counted as a failure.
-  if (commands !== undefined) {
+  if (first.ok) {
     results.push({
       name: "m-skills",
       ok: true,
-      detail: mskillsPresent(commands) ? "installed" : `not installed. The shipped templates need it: ${MSKILLS_URL}`,
+      detail: mskillsPresent(first.commands) ? "installed" : `not installed. With it you get the starter chains, and cards that take their model and effort from the step before: ${MSKILLS_URL}`,
     });
   }
 
-  if (strongSession === undefined) {
-    results.push({ name: "model switch on resume", ok: false, detail: "not run: the strong-tier session did not start." });
-  } else {
-    const result = await turn({ model: models.weak, resume: strongSession });
+  // A step's suggestion switches the model of a session it resumes.
+  const other = listed.ok ? listed.options.find((o) => o.id !== (first.ok ? first.model : listed.defaultModel)) : undefined;
+  if (!first.ok) results.push({ name: "model switch on resume", ok: false, detail: "not run: the first session did not start." });
+  else if (!other) results.push({ name: "model switch on resume", ok: true, detail: "not run: the session offers no second model to switch to." });
+  else {
+    const result = await turn({ model: other.id, resume: first.sessionId });
     results.push({
       name: "model switch on resume",
       ok: result.ok,
-      detail: result.ok ? `strong session resumed on ${result.model}` : `${result.error} Slice 1 needs this: stop and re-plan.`,
+      detail: result.ok ? `resumed on ${result.model}` : `${result.error} A step's suggested model cannot take over its session.`,
     });
   }
   return results;

@@ -42,7 +42,8 @@ export type TurnResult =
 export type TurnRequest = {
   prompt: string;
   cwd: string;
-  model: string;
+  // Absent: the session's own default model, which is then not checked.
+  model?: string;
   // Absent: the model's own default.
   effort?: Effort;
   // The slash commands this turn needs; the session refuses to work without them.
@@ -198,7 +199,7 @@ async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effo
       prompt: input.messages,
       options: {
         cwd,
-        model,
+        ...(model ? { model } : {}),
         env,
         abortController,
         settingSources: ["user", "project"],
@@ -224,7 +225,7 @@ async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effo
         return true;
       },
     });
-    let reportedModel = model;
+    let reportedModel = model ?? "";
     let commands: string[] = [];
     for await (const message of messages) {
       if (message.type === "system" && message.subtype === "init") {
@@ -237,9 +238,9 @@ async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effo
           abortController.abort();
           return { ok: false, sessionId, error: problem };
         }
-        if (message.model !== model) {
+        if (model !== undefined && message.model !== model) {
           abortController.abort();
-          return { ok: false, sessionId, error: `the session runs ${message.model}, not the requested ${model}. Set a full model ID in the Coordiner settings.` };
+          return { ok: false, sessionId, error: `the session runs ${message.model}, not the requested ${model}. Pick another model on the card.` };
         }
       }
       if (message.type === "assistant" && message.parent_tool_use_id === null) onMessage?.(message);

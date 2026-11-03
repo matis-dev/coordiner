@@ -18,7 +18,7 @@ let current: JSDOM | undefined;
 type Posted = Record<string, unknown> & { type: string };
 const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("acme:a"), defaultCard("acme:b"), defaultCard("acme:c")] }] };
 const other: Chain = { id: "other", name: "Other", sessions: [{ cards: [defaultCard("acme:lint")] }] };
-const base = (): Omit<EditorState, "type"> => ({ templates: TEMPLATES, chains: [own, other], running: false, mskills: true, palette: palette([...REQUIRED_COMMANDS, "acme:a", "acme:b", "acme:c", "acme:lint"]) });
+const base = (): Omit<EditorState, "type"> => ({ templates: TEMPLATES, removedTemplates: [], chains: [own, other], running: false, mskills: true, palette: palette([...REQUIRED_COMMANDS, "acme:a", "acme:b", "acme:c", "acme:lint"]) });
 
 async function open(stored?: { selectedId: string }) {
   const html = editorHtml({ cspSource: "test:", nonce: "n", scriptUri: "", styleUri: "", chainEditUri: CHAIN_EDIT });
@@ -88,14 +88,13 @@ describe("chains webview: loading", () => {
     assert.ok(page.named("Own"));
   });
 
-  it("marks each chain that needs m-skills while it is not installed, the user's own included, and no other", async () => {
+  it("marks each of your chains that uses m-skills while it is not installed, and no other", async () => {
     const mine: Chain = { id: "mine", name: "Mine", sessions: [{ cards: [defaultCard("m-skills:planning-architect")] }] };
     const page = await open();
-    page.send({ mskills: false, chains: [own, mine] });
+    page.send({ mskills: false, templates: [], chains: [own, mine] });
     const rail = page.doc.getElementById("rail")!;
-    assert.equal(rail.querySelectorAll(".badge").length, 11);
-    assert.ok(page.named("Story, needs m-skills"), "the badge is spoken as part of the name, separated");
-    assert.ok(page.named("Mine, needs m-skills"));
+    assert.equal(rail.querySelectorAll(".badge").length, 1);
+    assert.ok(page.named("Mine, uses m-skills"), "the badge is spoken as part of the name, separated");
     assert.ok(page.named("Own"));
   });
 
@@ -191,6 +190,46 @@ describe("chains webview: selecting and copying", () => {
     assert.equal(page.doc.querySelector("#detail h2")!.textContent, "Story copy");
     assert.equal(page.focused(), page.doc.querySelector("#detail h2"));
     assert.equal(page.status(), "Created Story copy");
+  });
+
+  it("removes a template, shows the next chain with Undo, and says so", async () => {
+    const page = await open({ selectedId: "idea" });
+    page.send();
+    page.named("Remove template").click();
+    assert.deepEqual(page.posted.at(-1), { type: "removeTemplate", id: "idea" });
+    assert.equal(page.all("#rail button").some((b) => b.textContent === "Idea"), false);
+    assert.equal(page.doc.querySelector("#detail h2")!.textContent, "Bug");
+    assert.equal(page.focused(), page.doc.querySelector("#detail h2"));
+    assert.equal(page.status(), "Removed the template Idea");
+    assert.equal(page.doc.querySelector("#detail .notice span")!.textContent, "Removed the template Idea.");
+    assert.equal(page.named("Restore templates (1)").dataset.focus, "restore-templates");
+    page.named("Undo remove template Idea").click();
+    assert.deepEqual(page.posted.at(-1), { type: "restoreTemplate", id: "idea" });
+    assert.equal(page.status(), "Restored the template Idea");
+    // The template comes back with the extension's next state, its heading focused.
+    page.send();
+    assert.equal(page.doc.querySelector("#detail h2")!.textContent, "Idea");
+    assert.equal(page.focused(), page.doc.querySelector("#detail h2"));
+  });
+
+  it("removes the last chain in the list and lands on the one before it", async () => {
+    const page = await open({ selectedId: "other" });
+    page.send({ templates: [], chains: [own, other] });
+    page.send({ templates: TEMPLATES.slice(-1), chains: [] });
+    page.named("Remove template").click();
+    assert.equal(page.doc.getElementById("detail")!.children.length, 0);
+    assert.equal(page.focused()?.dataset.focus, "new-chain");
+  });
+
+  it("restores every removed template, focusing the first of them in the list", async () => {
+    const page = await open();
+    page.send({ templates: TEMPLATES.filter((t) => t.id !== "bug" && t.id !== "kickoff"), removedTemplates: ["kickoff", "bug"] });
+    page.named("Restore templates (2)").click();
+    assert.deepEqual(page.posted.at(-1), { type: "restoreTemplates" });
+    assert.equal(page.status(), "Restored the templates");
+    page.send();
+    assert.equal(page.focused()?.dataset.focus, "rail-bug");
+    assert.equal(page.all("#rail button").some((b) => b.textContent === "Restore templates (0)"), false);
   });
 
   it("creates an empty chain", async () => {
@@ -393,6 +432,56 @@ describe("chains webview: editing a chain", () => {
     assert.equal(page.status(), "Added lint");
   });
 
+  describe("filtering the skills", () => {
+    const type = (page: Awaited<ReturnType<typeof open>>, text: string) => {
+      const filter = page.doc.getElementById("filter-0") as HTMLInputElement;
+      filter.focus();
+      filter.value = text;
+      filter.dispatchEvent(new page.w.Event("input", { bubbles: true }));
+      return filter;
+    };
+    const skills = (page: Awaited<ReturnType<typeof open>>) => [...(page.doc.getElementById("palette-0") as HTMLSelectElement).options].map((o) => o.value);
+
+    it("narrows the list to the skills whose name holds the text, says how many, and keeps focus in the filter", async () => {
+      const page = await open({ selectedId: "own" });
+      page.send();
+      assert.equal(page.doc.querySelector('label[for="filter-0"]')!.textContent, "Filter skills for session 1");
+      const filter = type(page, "LINT");
+      assert.deepEqual(skills(page), ["acme:lint"]);
+      await new Promise((resolve) => page.w.requestAnimationFrame(resolve));
+      assert.equal(page.status(), "1 skill matches");
+      assert.equal(page.focused(), filter);
+      page.named("Add").click();
+      assert.deepEqual(page.cardSkills(), ["acme:a", "acme:b", "acme:c", "acme:lint"]);
+    });
+
+    it("says when nothing matches, and turns Add off with the reason said aloud", async () => {
+      const page = await open({ selectedId: "own" });
+      page.send();
+      type(page, "zzz");
+      assert.deepEqual(skills(page), [""]);
+      assert.equal((page.doc.getElementById("palette-0") as HTMLSelectElement).options[0]!.textContent, "No skills match");
+      assert.equal(page.named("Add").getAttribute("aria-disabled"), "true");
+      page.named("Add").click();
+      await new Promise((resolve) => page.w.requestAnimationFrame(resolve));
+      assert.equal(page.status(), "No skill matches the filter. Change it to add one.");
+      assert.equal(page.saves().length, 0);
+      type(page, "");
+      assert.equal(page.named("Add").getAttribute("aria-disabled"), "false");
+      assert.equal(skills(page).length, 8);
+    });
+
+    it("keeps the filter's text across a new state, once focus has left it", async () => {
+      const page = await open({ selectedId: "own" });
+      page.send();
+      type(page, "acme");
+      page.named("Refresh skills").focus();
+      page.send({ running: true });
+      assert.equal((page.doc.getElementById("filter-0") as HTMLInputElement).value, "acme");
+      assert.deepEqual(skills(page), ["acme:a", "acme:b", "acme:c", "acme:lint"]);
+    });
+  });
+
   it("keeps the skill picked in the palette, and focus on it, when a state arrives before Add", async () => {
     const page = await open({ selectedId: "own" });
     page.send();
@@ -570,7 +659,7 @@ describe("chains webview: editing a chain", () => {
     assert.equal(page.doc.querySelector("#rail")!.lastElementChild!.textContent, "Refresh skills");
     assert.equal(page.all("button").filter((b) => b.textContent === "Refresh skills").length, 1);
     page.select("Story");
-    assert.deepEqual(toolbar(), ["Run Story", "Duplicate to edit"]);
+    assert.deepEqual(toolbar(), ["Run Story", "Duplicate to edit", "Remove template"]);
     assert.equal(page.doc.querySelector("#chain-name"), null);
   });
 
@@ -629,8 +718,9 @@ describe("chains webview: model and effort", () => {
   const models = [
     { id: "m-opus", label: "Opus", efforts: ["low", "high"] as Effort[] },
     { id: "m-haiku", label: "Haiku", efforts: [] as Effort[] },
+    { id: "m-sonnet", label: "Sonnet", efforts: ["low"] as Effort[] },
   ];
-  const listed = { models, tierEfforts: ["low"] as Effort[] };
+  const listed = { models, defaultModel: "m-sonnet" };
   const withB = (patch: Partial<Card>): Chain => ({ ...own, sessions: [{ cards: [own.sessions[0]!.cards[0]!, { ...own.sessions[0]!.cards[1]!, ...patch }, own.sessions[0]!.cards[2]!] }] });
   const options = (page: Awaited<ReturnType<typeof open>>, id: string) => [...(page.doc.getElementById(id) as HTMLSelectElement).options].map((o) => o.textContent);
   const choose = (page: Awaited<ReturnType<typeof open>>, id: string, value: string) => {
@@ -639,12 +729,12 @@ describe("chains webview: model and effort", () => {
     field.dispatchEvent(new page.w.Event("change", { bubbles: true }));
   };
 
-  it("labels both selects with the card's name and offers the listed models and the tier efforts", async () => {
+  it("labels both selects with the card's name and offers Default, named after its model, the listed models and the default's efforts", async () => {
     const page = await open({ selectedId: "own" });
     page.send(listed);
     assert.equal(page.doc.querySelector('label[for="model-0-1"]')!.textContent, "Model for b");
     assert.equal(page.doc.querySelector('label[for="effort-0-1"]')!.textContent, "Effort for b");
-    assert.deepEqual(options(page, "model-0-1"), ["By tier", "Opus", "Haiku"]);
+    assert.deepEqual(options(page, "model-0-1"), ["Default (Sonnet)", "Opus", "Haiku", "Sonnet"]);
     assert.deepEqual(options(page, "effort-0-1"), ["Model default", "low"]);
     assert.equal((page.doc.getElementById("model-0-1") as HTMLSelectElement).value, "");
   });
@@ -742,7 +832,7 @@ describe("chains webview: model and effort", () => {
     const page = await open({ selectedId: "own" });
     page.send({ modelsError: "unsupported" });
     assert.ok(
-      page.all("#detail .note").some((n) => n.textContent === "Cards on By tier run on their tier's model, and a pinned card keeps its model, checked when its session starts. Models could not be listed: unsupported"),
+      page.all("#detail .note").some((n) => n.textContent === "Cards on Default run on the session's own default model, unchecked, and a card with a model keeps it, checked when its session starts. Models could not be listed: unsupported"),
     );
   });
 
@@ -750,17 +840,72 @@ describe("chains webview: model and effort", () => {
     const page = await open({ selectedId: "own" });
     page.send({ modelsError: "unsupported", chains: [withB({ model: "m-opus" }), other] });
     const model = page.doc.getElementById("model-0-1") as HTMLSelectElement;
-    assert.deepEqual(options(page, "model-0-1"), ["By tier", "m-opus"]);
+    assert.deepEqual(options(page, "model-0-1"), ["Default", "m-opus"]);
     assert.equal(model.selectedOptions[0]!.textContent, "m-opus");
     assert.ok(!page.all(".card .flag").some((f) => f.textContent === "Model not offered by this session"));
     assert.equal(page.named("Run Own").getAttribute("aria-disabled"), "false");
   });
 
-  it("notes that a pinned loop card keeps its model through tier stops", async () => {
-    const loop: Chain = { id: "own", name: "Own", sessions: [{ cards: [{ ...defaultCard("m-skills:implementing-architect"), model: "m-opus" }] }] };
-    const page = await open({ selectedId: "own" });
-    page.send({ ...listed, chains: [loop] });
-    assert.ok(page.all(".card-settings .note").some((n) => n.textContent === "Pinned: NEXT <tier> does not change this card's model."));
+  describe("taking model and effort from the previous step", () => {
+    const planned = (follow: boolean): Chain => ({
+      id: "own",
+      name: "Own",
+      sessions: [{ cards: [defaultCard("m-skills:planning-architect"), { ...defaultCard("m-skills:implementing-architect"), model: "m-opus", ...(follow ? { follow: true as const } : {}) }] }],
+    });
+    const box = (page: Awaited<ReturnType<typeof open>>) => page.doc.getElementById("follow-1") as HTMLInputElement | null;
+    const ticked = (page: Awaited<ReturnType<typeof open>>, id: string) => page.doc.getElementById(id) as HTMLSelectElement;
+
+    it("offers it after an m-skills card, and turns both lists off while it is ticked, saying they are the fallback", async () => {
+      const page = await open({ selectedId: "own" });
+      page.send({ ...listed, mskills: true, chains: [planned(true)] });
+      const follow = page.doc.getElementById("follow-0-1") as HTMLInputElement;
+      assert.equal(follow.checked, true);
+      assert.equal(follow.closest("label")!.textContent, " Take model and effort from the previous step for Implement");
+      assert.equal(page.doc.getElementById(follow.getAttribute("aria-describedby")!)!.textContent, "Model and Effort below are used only when the previous step suggests nothing.");
+      assert.equal(ticked(page, "model-0-1").disabled, true);
+      assert.equal(ticked(page, "effort-0-1").disabled, true);
+      assert.equal(ticked(page, "model-0-1").value, "m-opus");
+      assert.equal(page.doc.getElementById("follow-0-0"), null, "the first card of a session has no step before it");
+      assert.equal(box(page), null);
+    });
+
+    it("saves the box, keeps focus on it, and turns the lists back on when it is cleared", async () => {
+      const page = await open({ selectedId: "own" });
+      page.send({ ...listed, mskills: true, chains: [planned(false)] });
+      const follow = page.doc.getElementById("follow-0-1") as HTMLInputElement;
+      assert.equal(ticked(page, "model-0-1").disabled, false);
+      assert.match(page.doc.getElementById("follow-why-0-1")!.textContent!, /they win over the previous step's suggestion/);
+      follow.checked = true;
+      follow.dispatchEvent(new page.w.Event("change", { bubbles: true }));
+      assert.equal(page.saves()[0]!.sessions[0]!.cards[1]!.follow, true);
+      assert.equal(page.focused()?.id, "follow-0-1");
+      assert.equal(ticked(page, "model-0-1").disabled, true);
+      const again = page.doc.getElementById("follow-0-1") as HTMLInputElement;
+      again.checked = false;
+      again.dispatchEvent(new page.w.Event("change", { bubbles: true }));
+      assert.equal(Object.hasOwn(page.saves()[1]!.sessions[0]!.cards[1]!, "follow"), false);
+    });
+
+    it("hides it while m-skills is not installed or not yet known, leaving the lists on and the stored choice as it was", async () => {
+      for (const mskills of [false, undefined]) {
+        const page = await open({ selectedId: "own" });
+        page.send({ ...listed, mskills, chains: [planned(true)] });
+        assert.equal(page.doc.getElementById("follow-0-1"), null);
+        assert.equal(ticked(page, "model-0-1").disabled, false);
+        assert.equal(page.saves().length, 0);
+      }
+    });
+
+    it("copies a template when its box is changed", async () => {
+      const page = await open({ selectedId: "story" });
+      page.send({ ...listed, mskills: true });
+      const follow = page.doc.getElementById("follow-0-1") as HTMLInputElement;
+      assert.equal(follow.checked, true, "the Story template's Implement card follows its plan");
+      follow.checked = false;
+      follow.dispatchEvent(new page.w.Event("change", { bubbles: true }));
+      assert.equal(page.saves()[0]!.name, "Story copy");
+      assert.equal(page.focused()?.id, "follow-0-1");
+    });
   });
 });
 
@@ -903,15 +1048,29 @@ describe("chains webview: running", () => {
 });
 
 describe("chains webview: m-skills and skill listing", () => {
-  it("shows the m-skills banner with its link button, and locks the templates, when m-skills is missing", async () => {
-    const page = await open();
-    page.send({ mskills: false });
+  it("suggests m-skills with its link button when it is missing, and marks your chains that use it", async () => {
+    const mine: Chain = { id: "mine", name: "Mine", sessions: [{ cards: [defaultCard("m-skills:planning-architect")] }] };
+    const page = await open({ selectedId: "mine" });
+    // The extension sends no templates while m-skills is missing.
+    page.send({ mskills: false, templates: [], chains: [mine, other] });
     const banner = page.doc.querySelector("#banner section")!;
     assert.equal(banner.getAttribute("aria-labelledby"), "mskills-h");
-    assert.match(banner.textContent!, /m-skills is not installed/);
+    assert.match(banner.textContent!, /More with m-skills.*starter chains built on it show in the list, and a card can take its model and effort from the step before it/);
     page.named("Install m-skills (opens its page)").click();
     assert.deepEqual(page.posted.at(-1), { type: "openMskills" });
     assert.match(page.doc.getElementById("run-reason")!.textContent!, /Needs m-skills/);
+    assert.equal(page.named("Mine, uses m-skills").textContent, "Mine, uses m-skills");
+    assert.ok(page.all("#rail .note").some((n) => n.textContent === "Starter chains built on m-skills show here once it is installed."));
+    assert.deepEqual(page.all("#rail h2").map((h) => h.textContent), ["My chains"]);
+  });
+
+  it("opens on your first chain when there are no templates, and on nothing when there are no chains either", async () => {
+    const page = await open();
+    page.send({ mskills: false, templates: [] });
+    assert.equal(page.doc.querySelector("#detail h2")!.textContent, "Own");
+    page.send({ mskills: false, templates: [], chains: [] });
+    assert.equal(page.doc.getElementById("detail")!.children.length, 0);
+    assert.ok(page.all("#rail .note").some((n) => n.textContent === "No chains yet. Make one with New empty chain."));
   });
 
   it("shows no banner when m-skills is installed or not yet known", async () => {

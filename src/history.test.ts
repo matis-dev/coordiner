@@ -8,7 +8,7 @@ import { continueAfter, fillInput, pickUpAfter, restateAfter } from "./run.ts";
 const START = { at: "2026-10-27T15:34:11.325Z", type: "run-started", chain: "Story", story: "11", repo: "/r", worktree: "/r.coordiner/11", branch: "coordiner/11", models: {}, questions: "timed" };
 const journal = (...records: object[]) => [START, ...records].map((r) => JSON.stringify(r)).join("\n") + "\n";
 const parse = (...records: object[]) => parseJournal(journal(...records), "11.jsonl")!;
-const started = (index: number, label: string, extra: object = {}) => ({ type: "step-started", index, label, tier: "strong", model: "claude-opus-5-5", ...extra });
+const started = (index: number, label: string, extra: object = {}) => ({ type: "step-started", index, label, model: "claude-opus-5-5", ...extra });
 
 describe("parseJournal", () => {
   it("reads where the run happened and how it ended", () => {
@@ -154,26 +154,50 @@ describe("parseJournal", () => {
     assert.equal(parseJournal(JSON.stringify({ ...START, repo: 7 }), "f"), undefined);
   });
 
+  it("reads a chat opened on its own: marked, and never closed mid-run, since it has no outcome", () => {
+    const text = [{ ...START, kind: "chat", chain: "Chat", definition: { id: "chat", name: "Chat", sessions: [] }, input: "" }, { type: "turn", sessionId: "s-1", card: "Chat", reply: "hi" }]
+      .map((r) => JSON.stringify(r))
+      .join("\n");
+    const run = parseJournal(text, "c.jsonl")!;
+    assert.equal(run.chat, true);
+    assert.deepEqual(run.entries, []);
+    assert.deepEqual(run.last, { sessionId: "s-1", card: "Chat", reply: "hi" });
+    assert.equal(parse().chat, undefined);
+  });
+
   it("has no last time when the start record has none", () => {
     const { at: _at, ...undated } = START;
     assert.equal(parseJournal(JSON.stringify(undated), "f")!.lastAt, "");
   });
 
   it("marks a run with no outcome as closed mid-run, its running step stopped", () => {
-    const run = parse(started(0, "Plan"), { type: "step-finished", index: 0, status: "done", detail: "next: Standard" }, started(1, "Implement", { tier: "medium", model: "claude-sonnet-5-5", effort: "high" }));
+    const run = parse(started(0, "Plan"), { type: "step-finished", index: 0, status: "done", detail: "next: Standard" }, started(1, "Implement", { model: "claude-sonnet-5-5", effort: "high" }));
     assert.equal(run.outcome, undefined);
     assert.deepEqual(run.entries, [{ kind: "end", status: "stopped", reason: CLOSED_MID_RUN }]);
     assert.deepEqual(run.ending, { status: "stopped", reason: CLOSED_MID_RUN });
     assert.deepEqual(run.steps, [
-      { label: "Plan", tier: "strong", model: "claude-opus-5-5", status: "done", detail: "next: Standard" },
-      { label: "Implement", tier: "medium", model: "claude-sonnet-5-5", effort: "high", status: "stopped", detail: CLOSED_MID_RUN },
+      { label: "Plan", model: "claude-opus-5-5", status: "done", detail: "next: Standard" },
+      { label: "Implement", model: "claude-sonnet-5-5", effort: "high", status: "stopped", detail: CLOSED_MID_RUN },
+    ]);
+  });
+
+  it("reads a step journaled with a tier, from before the tiers were dropped, and one with no model or with a note", () => {
+    const run = parse(
+      started(0, "Plan", { tier: "strong" }),
+      started(1, "Implement", { model: undefined, note: "no suggestion\u001b" }),
+      { type: "step-finished", index: 1, status: "done", detail: "done", sessionId: "s-2" },
+    );
+    assert.deepEqual(run.last, { sessionId: "s-2", card: "Implement", reply: "" });
+    assert.deepEqual(run.steps.map(({ status: _s, detail: _d, ...rest }) => rest), [
+      { label: "Plan", model: "claude-opus-5-5" },
+      { label: "Implement", note: "no suggestion" },
     ]);
   });
 
   it("drops steps of the wrong shape or out of order, and finishes only a step it has", () => {
     const run = parse(
       started(1, "Skipped ahead"),
-      started(0, "Plan", { tier: "huge" }),
+      started(0, "Plan", { label: 7 }),
       started(0, "Plan", { model: "bad model" }),
       started(0, "Plan", { effort: "extreme" }),
       { type: "step-finished", index: 3, status: "done", detail: "" },
@@ -182,7 +206,7 @@ describe("parseJournal", () => {
       { type: "step-finished", index: 0, status: "halted", detail: "needs \u001byou" },
       { type: "outcome", outcome: { status: "halted", reason: "needs you" } },
     );
-    assert.deepEqual(run.steps, [{ label: "Plan", tier: "strong", model: "claude-opus-5-5", status: "halted", detail: "needs you" }]);
+    assert.deepEqual(run.steps, [{ label: "Plan", model: "claude-opus-5-5", status: "halted", detail: "needs you" }]);
   });
 
   it("talks to the session of the latest turn record", () => {
@@ -227,7 +251,7 @@ describe("continuePoint", () => {
   const filledStory = (fillInput(shape, "Story 11: Export") as { ok: true; chain: typeof STORY }).chain;
   const plan = started(0, "Plan", { position: { session: 0, card: 0 } });
   const planned = { type: "step-finished", index: 0, status: "done", detail: "next: Light", sessionId: "s-1" };
-  const implement = started(1, "Implement", { tier: "weak", model: "claude-haiku-5-5", position: { session: 0, card: 1 } });
+  const implement = started(1, "Implement", { model: "claude-haiku-5-5", position: { session: 0, card: 1 } });
 
   it("keeps the journaled chain and its input", () => {
     const run = defined();
@@ -269,9 +293,15 @@ describe("continuePoint", () => {
     assert.deepEqual(halt({ session: 2, card: 1 }).lastCard?.at, { session: 0, card: 0 });
   });
 
-  it("retries a stopped card in its session, on the tier it ran on", () => {
+  it("carries no suggestion over from a step that ran on the default model at its default effort", () => {
+    const onDefault = started(1, "Implement", { model: undefined, position: { session: 0, card: 1 } });
+    const point = continuePoint(defined(plan, planned, onDefault, { type: "outcome", outcome: { status: "stopped" } }))!;
+    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, resume: "s-1", prompt: cardPrompt(filledStory.sessions[0]!.cards[1]!) });
+  });
+
+  it("retries a stopped card in its session, with the model it ran on as the suggestion", () => {
     const point = continuePoint(defined(plan, planned, implement, { type: "step-finished", index: 1, status: "stopped", detail: "stopped", sessionId: "s-2" }, { type: "outcome", outcome: { status: "stopped" } }))!;
-    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, tier: "weak", resume: "s-2", prompt: pickUpAfter("the user stopped the run") });
+    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, suggestion: { model: "claude-haiku-5-5" }, resume: "s-2", prompt: pickUpAfter("the user stopped the run") });
     assert.deepEqual([point.card, point.reason], ["Implement", "the user stopped the run"]);
     assert.deepEqual(point.chain, filledStory);
   });
@@ -286,7 +316,7 @@ describe("continuePoint", () => {
   it("picks up a run cut off by VS Code closing at the card that was running, in the session before it", () => {
     const point = continuePoint(defined(plan, planned, implement))!;
     // The cut turn left no session id, and none of its turns reached a session, so the card is sent its own prompt again.
-    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, tier: "weak", resume: "s-1", prompt: cardPrompt(filledStory.sessions[0]!.cards[1]!) });
+    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, suggestion: { model: "claude-haiku-5-5" }, resume: "s-1", prompt: cardPrompt(filledStory.sessions[0]!.cards[1]!) });
     assert.equal(point.reason, CLOSED_MID_RUN);
   });
 
@@ -298,7 +328,7 @@ describe("continuePoint", () => {
   it("starts a later session fresh rather than resuming the session before it", () => {
     const review = started(2, "Review", { position: { session: 1, card: 0 } });
     const point = continuePoint(defined(plan, planned, implement, { type: "step-finished", index: 1, status: "done", detail: "done", sessionId: "s-2" }, review))!;
-    assert.deepEqual(point.from, { at: { session: 1, card: 0 }, tier: "strong", prompt: "/m-skills:code-review-architect-uncommitted" });
+    assert.deepEqual(point.from, { at: { session: 1, card: 0 }, suggestion: { model: "claude-opus-5-5" }, prompt: "/m-skills:code-review-architect-uncommitted" });
   });
 
   // Preparing the review can halt or fail before the review card starts: the author's finished card is not the place to go back to.
@@ -323,7 +353,7 @@ describe("continuePoint", () => {
   it("asks a card that had given its reply for its status line again, in its session", () => {
     const waited = { type: "step-finished", index: 1, status: "done", detail: "waiting for you", sessionId: "s-2" };
     const stopped = continuePoint(defined(plan, planned, implement, waited, { type: "outcome", outcome: { status: "stopped" } }))!;
-    assert.deepEqual(stopped.from, { at: { session: 0, card: 1 }, tier: "weak", resume: "s-2", prompt: restateAfter("the user stopped the run") });
+    assert.deepEqual(stopped.from, { at: { session: 0, card: 1 }, suggestion: { model: "claude-haiku-5-5" }, resume: "s-2", prompt: restateAfter("the user stopped the run") });
     assert.equal(continuePoint(defined(plan, planned, implement, waited))!.from.prompt, restateAfter(CLOSED_MID_RUN));
   });
 
@@ -335,11 +365,11 @@ describe("continuePoint", () => {
       { type: "step-finished", index: 1, status: "halted", detail: "needs a decision", sessionId: "s-2" },
       { type: "outcome", outcome: { status: "halted", reason: "needs a decision", at: { session: 0, card: 1 } } },
       { type: "continued", position: { session: 0, card: 1 }, questions: "timed" },
-      started(2, "Implement", { tier: "weak", model: "claude-haiku-5-5", position: { session: 0, card: 1 } }),
+      started(2, "Implement", { model: "claude-haiku-5-5", position: { session: 0, card: 1 } }),
       { type: "step-finished", index: 2, status: "done", detail: "done", sessionId: "s-2" },
       started(3, "Review", { position: { session: 1, card: 0 } }),
     );
-    assert.deepEqual(run.lastCard, { at: { session: 1, card: 0 }, tier: "strong", reached: false, finished: false });
+    assert.deepEqual(run.lastCard, { at: { session: 1, card: 0 }, suggestion: { model: "claude-opus-5-5" }, reached: false, finished: false });
   });
 
   it("offers nothing for a run that finished, found nothing to review, or was refused", () => {
@@ -451,6 +481,18 @@ describe("readNewest", () => {
 describe("byWorktree", () => {
   const run = (file: string, worktree: string, lastAt: string) => ({ file, worktree, branch: `coordiner/${worktree.split("/").at(-1)}`, lastAt }) as PastRun;
   const all = () => true;
+
+  it("puts the repo's own checkout on a line of its own, wherever git lists it", () => {
+    const lines = byWorktree([run("c", "/r", "2026-10-28T10:00:00.000Z")], [], all, "/r");
+    assert.deepEqual(lines.map((l) => [l.path, l.where]), [["/r", "checkout"]]);
+    assert.equal(byWorktree([run("c", "/r", "2026-10-28T10:00:00.000Z")], [], all)[0]!.where, "unregistered");
+  });
+
+  it("puts a chat in a worktree of the user's own on a checkout line, and one whose folder is gone on a gone line", () => {
+    const own = { ...run("c", "/r-feature", "2026-10-28T10:00:00.000Z"), branch: "feature" };
+    assert.equal(byWorktree([own], [], all, "/r")[0]!.where, "checkout");
+    assert.equal(byWorktree([own], [], () => false, "/r")[0]!.where, "gone");
+  });
 
   it("puts the runs of one worktree under one line, newest run first", () => {
     const runs = [run("b", "/r.coordiner/x", "2026-10-28T10:00:00.000Z"), run("a", "/r.coordiner/x", "2026-10-27T10:00:00.000Z")];

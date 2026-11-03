@@ -2,13 +2,14 @@ import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent
 import { canGoOnAlone, needsYou as waitsForUser, type CacheClock, type TurnClock } from "./chat-logic.ts";
 import type { ChatMessage, ChatView, EditorMessage, Ending } from "./editor-protocol.ts";
 import type { JournaledEntry, JournalRecord } from "./journal.ts";
-import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
+import { AFTER_NOTE, CHAT_NOTE, INTERACTIVE_NOTE, suggestionNote, UNATTENDED_NOTE } from "./protocol.ts";
 import type { Chain, Effort } from "./chains.ts";
 import type { Outcome, RunEvent, StepStatus } from "./run.ts";
 import type { Spend } from "./session.ts";
+import type { ModelOption } from "./skills.ts";
 import { Talk, type TalkSnapshot } from "./talk.ts";
 import { plain } from "./text.ts";
-import { endEntry, entriesFrom, Transcript, type Entry, type Worked } from "./transcript.ts";
+import { DEFAULT_MODEL, endEntry, entriesFrom, Transcript, type Entry, type Worked } from "./transcript.ts";
 import { interactiveCanUseTool, sleep as realSleep, unattendedCanUseTool, type DecidedAfter, type QuestionWait } from "./unattended.ts";
 
 // One run's chat, wired to the outside: the chains editor (through `post`), the journal, and the editor's attention. Kept out of
@@ -36,6 +37,10 @@ export type RunChatDeps = {
   line?: string[][];
   // The run picks up in a session it resumes, whose first totals already carry the turns before this run.
   resumes?: boolean;
+  // The models the session offers, which a NEXT line may suggest; none when they could not be listed.
+  offered?: readonly ModelOption[];
+  // A chat opened on its own (Open Chat): no run came before it.
+  freeChat?: boolean;
 };
 
 // A question the run answered with its Recommended option, without the user.
@@ -66,8 +71,9 @@ export type RunChat = {
   forTurn(mode: TurnMode): TurnSetup;
   // The run is over: the transcript says how it ended. With `after`, the chat stays open on the run's last session.
   ended(outcome: Outcome, after?: { card: string }): void;
-  // A reopened session's chat, whose transcript already says how it ended. With `after`, it stays open on that session.
-  reopened(ending: Ending, after?: { card: string }): void;
+  // A reopened session's chat, whose transcript already says how it ended (no ending: a chat opened on its own). With `after`, it
+  // stays open on that session.
+  reopened(ending: Ending | undefined, after?: { card: string }): void;
   // A turn of the chat after the run failed.
   failed(card: string, error: string): void;
   // The steps to land the worktree's work, as git reads now; not journaled.
@@ -107,7 +113,7 @@ const NOTHING: Worked = { ms: 0, turns: 0 };
 // The chain's card labels by session: the line of stations the chat's head draws.
 export const stations = (chain: Pick<Chain, "sessions">): string[][] => chain.sessions.map((session) => session.cards.map((card) => plain(card.label)));
 
-export function createRunChat({ title, post, record, moved, needsYou, log, questions, now = Date.now, sleep = realSleep, past = [], line, resumes = false }: RunChatDeps): RunChat {
+export function createRunChat({ title, post, record, moved, needsYou, log, questions, now = Date.now, sleep = realSleep, past = [], line, resumes = false, offered, freeChat = false }: RunChatDeps): RunChat {
   const transcript = new Transcript();
   transcript.add(past);
   let stationsLine = line;
@@ -150,6 +156,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
     ...(snapshot.phase === "waiting" && cache ? { cache } : {}),
     ...(snapshot.phase === "running" && turn ? { turn } : {}),
     ...(ending ? { ending } : {}),
+    ...(freeChat ? { freeChat: true as const } : {}),
   });
   const talk = new Talk({
     changed: (snapshot) => {
@@ -205,7 +212,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
     entries: () => transcript.entries(),
     forTurn: (mode) => ({
       canUseTool: mode === "unattended" ? unattendedCanUseTool({ wait: questions, ask, sleep, now, log, decided }) : interactiveCanUseTool(ask, log),
-      systemPromptAppend: NOTES[mode],
+      systemPromptAppend: mode === "after" ? (freeChat ? CHAT_NOTE : AFTER_NOTE) : `${NOTES[mode]} ${suggestionNote(offered)}`,
       onMessage: (message) => {
         cache = cacheFrom(message.message.usage, now(), cache);
         const snapshot = talk.snapshot();
@@ -233,7 +240,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
     decided: () => decisions.map((d) => ({ ...d })),
     stepped: (event) => {
       if (event.type === "step-started") {
-        card = { ...card, card: card.card ?? talk.snapshot().card, model: event.model, ...(event.effort ? { effort: event.effort } : {}) };
+        card = { ...card, card: card.card ?? talk.snapshot().card, model: event.model ?? DEFAULT_MODEL, ...(event.effort ? { effort: event.effort } : {}) };
         return;
       }
       const { usage } = event.stats;
@@ -257,7 +264,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
   };
 }
 
-const NOTES: Record<TurnMode, string> = { unattended: UNATTENDED_NOTE, interactive: INTERACTIVE_NOTE, after: AFTER_NOTE };
+const NOTES: Record<Exclude<TurnMode, "after">, string> = { unattended: UNATTENDED_NOTE, interactive: INTERACTIVE_NOTE };
 
 export type ChatAction = Extract<EditorMessage, { type: `chat${string}` }>;
 

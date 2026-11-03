@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatMessage } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
-import { AFTER_NOTE, INTERACTIVE_NOTE, UNATTENDED_NOTE } from "./protocol.ts";
+import { AFTER_NOTE, CHAT_NOTE, INTERACTIVE_NOTE, suggestionNote, UNATTENDED_NOTE } from "./protocol.ts";
 import type { Entry } from "./transcript.ts";
 import { actOnChat, cacheFrom, createRunChat, IDLE_CHAT, spentSince, stations } from "./run-chat.ts";
 import { QUESTION_WAIT_MS, type QuestionWait } from "./unattended.ts";
@@ -208,7 +208,7 @@ describe("createRunChat: forTurn", () => {
   it("gives an unattended turn the unattended note and Recommended answers", async () => {
     const { chat, logs, waiting } = setup();
     const setupTurn = chat.forTurn("unattended");
-    assert.equal(setupTurn.systemPromptAppend, UNATTENDED_NOTE);
+    assert.equal(setupTurn.systemPromptAppend, `${UNATTENDED_NOTE} ${suggestionNote(undefined)}`);
     const result = await setupTurn.canUseTool("AskUserQuestion", { questions: [question] }, toolOptions());
     assert.deepEqual(result?.behavior === "allow" && result.updatedInput?.answers, { "Which \u001b[31mstore?": "Files (Recommended)" });
     assert.equal(logs.length, 1);
@@ -242,11 +242,35 @@ describe("createRunChat: forTurn", () => {
     wake();
   });
 
+  it("marks a chat opened on its own, which opens waiting on its card with no ending", () => {
+    const chat = createRunChat({ title: "Chat · app", post: () => undefined, record: () => undefined, moved: () => undefined, needsYou: () => undefined, log: () => undefined, questions: "always", freeChat: true });
+    chat.reopened(undefined, { card: "Chat" });
+    const view = chat.view();
+    assert.equal(view.freeChat, true);
+    assert.equal(view.ending, undefined);
+    assert.equal(view.afterRun, true);
+    assert.equal(view.card, "Chat");
+  });
+
+  it("tells a chat opened on its own that no chain ran, instead of the note for after a run", () => {
+    const chat = createRunChat({ title: "Chat · app", post: () => undefined, record: () => undefined, moved: () => undefined, needsYou: () => undefined, log: () => undefined, questions: "always", freeChat: true });
+    assert.equal(chat.forTurn("after").systemPromptAppend, CHAT_NOTE);
+    assert.doesNotMatch(CHAT_NOTE, /Start the next chain/);
+  });
+
+  it("lists the models the session offers in the note, so a NEXT line can suggest one", () => {
+    const offered = [{ id: "m-big", label: "Big", efforts: ["high" as const] }];
+    const chat = createRunChat({ title: "t", post: () => undefined, record: () => undefined, moved: () => undefined, needsYou: () => undefined, log: () => undefined, questions: "never", offered });
+    assert.equal(chat.forTurn("unattended").systemPromptAppend, `${UNATTENDED_NOTE} ${suggestionNote(offered)}`);
+    assert.match(chat.forTurn("interactive").systemPromptAppend, /m-big \(Big; effort high\)/);
+    assert.equal(chat.forTurn("after").systemPromptAppend, AFTER_NOTE);
+  });
+
   it("gives an interactive turn the interactive note, and asks the user", async () => {
     const { chat } = setup();
     chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });
     const setupTurn = chat.forTurn("interactive");
-    assert.equal(setupTurn.systemPromptAppend, INTERACTIVE_NOTE);
+    assert.equal(setupTurn.systemPromptAppend, `${INTERACTIVE_NOTE} ${suggestionNote(undefined)}`);
     const pending = setupTurn.canUseTool("AskUserQuestion", { questions: [question] }, toolOptions());
     chat.talk.answer(chat.view().question!.id, [{ picked: [], other: "Postgres" }]);
     const result = await pending;
@@ -427,10 +451,20 @@ describe("what each card and session worked and spent", () => {
   type Chat = ReturnType<typeof setup>["chat"];
   const at = (chat: Chat, card: string, index: number, session = 0) => chat.talk.at({ card, index, session, attended: false });
   const turn = (chat: Chat, ms: number, usage?: ReturnType<typeof spend>, status: "done" | "halted" | "stopped" = "done") => {
-    chat.stepped({ type: "step-started", index: 0, label: "x", tier: "weak", model: "model-a", effort: "high", position: { session: 0, card: 0 } });
+    chat.stepped({ type: "step-started", index: 0, label: "x", model: "model-a", effort: "high", position: { session: 0, card: 0 } });
     chat.stepped({ type: "step-finished", index: 0, status, detail: "", stats: { ms, ...(usage ? { usage } : {}) } });
   };
   const kinds = (entries: Entry[]) => entries.map((e) => e.kind);
+
+  it("names the default model on a card that asked for none", () => {
+    const { chat, posted } = setup();
+    at(chat, "Chat", 0);
+    chat.stepped({ type: "step-started", index: 0, label: "Chat", position: { session: 0, card: 0 } });
+    chat.stepped({ type: "step-finished", index: 0, status: "done", detail: "", stats: { ms: 1000 } });
+    chat.ended({ status: "done", text: "" });
+    const entries = posted.flatMap((m) => (m.type === "chatAppend" ? m.entries : []));
+    assert.equal(entries.find((e) => e.kind === "card-end")?.kind === "card-end" && (entries.find((e) => e.kind === "card-end") as { model: string }).model, "default model");
+  });
 
   it("takes a turn's spend out of the session's running totals, and a lower total as a fresh count", () => {
     assert.deepEqual(spentSince(undefined, spend(1, 10)), spend(1, 10));
@@ -533,7 +567,7 @@ describe("what each card and session worked and spent", () => {
   it("leaves the effort out when the card has none, and writes no card row for turns whose start it never saw", () => {
     const { chat, appended } = setup();
     at(chat, "Plan", 0);
-    chat.stepped({ type: "step-started", index: 0, label: "Plan", tier: "weak", model: "model-a", position: { session: 0, card: 0 } });
+    chat.stepped({ type: "step-started", index: 0, label: "Plan", model: "model-a", position: { session: 0, card: 0 } });
     chat.stepped({ type: "step-finished", index: 0, status: "done", detail: "", stats: { ms: 5 } });
     at(chat, "Review", 1);
     chat.stepped({ type: "step-finished", index: 1, status: "done", detail: "", stats: { ms: 7 } });

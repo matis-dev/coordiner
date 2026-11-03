@@ -30,6 +30,8 @@ export async function start() {
   let notice;
   // The skill picked in each session's palette, by chain and session: a re-render (a run moving on, say) keeps it.
   const picks = new Map();
+  // What each session's skill filter holds, by chain and session, so a re-render keeps it.
+  const filters = new Map();
   // The card being dragged, { chainId, from, label }: set only by a drag this page started, so a file or text dragged in from
   // outside is never dropped. The node showing where it would land carries a drop-* class.
   let dragging;
@@ -57,7 +59,7 @@ export async function start() {
   const chat = startChat({ vscode, root: chatRoot, logic: chatLogic, maxChars: chainsModule.MAX_INPUT_CHARS, announce, remember });
 
   const allChains = () => [...state.templates, ...state.chains];
-  const selected = () => allChains().find((c) => c.id === selectedId) ?? state.templates[0];
+  const selected = () => allChains().find((c) => c.id === selectedId) ?? state.templates[0] ?? state.chains[0];
   const newId = () => logic.newChainId(Date.now());
 
   function select(id) {
@@ -108,8 +110,12 @@ export async function start() {
         el(
           "section",
           { class: "banner", "aria-labelledby": "mskills-h" },
-          el("h2", { id: "mskills-h" }, "m-skills is not installed"),
-          el("p", {}, "Coordiner is built around m-skills, and the shipped templates use its skills. Chains of your own skills work without it."),
+          el("h2", { id: "mskills-h" }, "More with m-skills"),
+          el(
+            "p",
+            {},
+            "With the m-skills plugin installed, starter chains built on it show in the list, and a card can take its model and effort from the step before it. Chains of your own skills work without it.",
+          ),
           el("button", { type: "button", "data-focus": "install-mskills", onclick: () => vscode.postMessage({ type: "openMskills" }) }, "Install m-skills (opens its page)"),
         ),
       );
@@ -125,20 +131,58 @@ export async function start() {
         { type: "button", "aria-pressed": String(chain.id === selected()?.id), "data-focus": `rail-${chain.id}`, onclick: () => select(chain.id) },
         el("span", {}, chain.name),
         // Only while m-skills is missing does the badge tell one chain from another: it marks the ones that will not run. The separator
-        // keeps the spoken name "Story, needs m-skills" instead of "Storyneeds m-skills".
-        state.mskills === false && chainsModule.usesMskills(chain) ? [el("span", { class: "visually-hidden" }, ", "), el("span", { class: "badge" }, "needs m-skills")] : undefined,
+        // keeps the spoken name "Mine, uses m-skills" instead of "Mineuses m-skills".
+        state.mskills === false && chainsModule.usesMskills(chain) ? [el("span", { class: "visually-hidden" }, ", "), el("span", { class: "badge" }, "uses m-skills")] : undefined,
       ),
     );
   }
 
+  // A removed template leaves the rail and Start… until restored. The chain shown in its place carries the Undo.
+  function removeTemplate(chain) {
+    const rest = allChains().filter((c) => c.id !== chain.id);
+    const next = rest[allChains().findIndex((c) => c.id === chain.id)] ?? rest.at(-1);
+    state = { ...state, templates: state.templates.filter((t) => t.id !== chain.id), removedTemplates: [...state.removedTemplates, chain.id] };
+    vscode.postMessage({ type: "removeTemplate", id: chain.id });
+    selectedId = next?.id;
+    remember({ selectedId });
+    notice = next && { chainId: next.id, text: `Removed the template ${chain.name}.`, undo: { name: `Undo remove template ${chain.name}`, act: () => restoreTemplate(chain) } };
+    pendingFocus = next ? "chain-title" : "new-chain";
+    render();
+    announce(`Removed the template ${chain.name}`);
+  }
+
+  // The template comes back with the state the extension sends; focus waits for it on the template's heading.
+  function restoreTemplate(chain) {
+    vscode.postMessage({ type: "restoreTemplate", id: chain.id });
+    notice = undefined;
+    selectedId = chain.id;
+    remember({ selectedId });
+    pendingFocus = "chain-title";
+    announce(`Restored the template ${chain.name}`);
+  }
+
+  function restoreTemplates() {
+    const first = chainsModule.TEMPLATES.find((t) => state.removedTemplates.includes(t.id));
+    vscode.postMessage({ type: "restoreTemplates" });
+    pendingFocus = `rail-${first.id}`;
+    announce("Restored the templates");
+  }
+
   function renderRail() {
-    rail.replaceChildren(
-      el("h2", {}, "Templates"),
-      el("ul", {}, state.templates.filter((t) => !chainsModule.singleSkill(t)).map(railItem)),
-      el("h2", {}, "Single skills"),
-      el("ul", {}, state.templates.filter(chainsModule.singleSkill).map(railItem)),
+    const flows = state.templates.filter((t) => !chainsModule.singleSkill(t));
+    const singles = state.templates.filter(chainsModule.singleSkill);
+    const removed = state.removedTemplates ?? [];
+    const parts = [
+      ...(flows.length > 0 ? [el("h2", {}, "Templates"), el("ul", {}, flows.map(railItem))] : []),
+      ...(singles.length > 0 ? [el("h2", {}, "Single skills"), el("ul", {}, singles.map(railItem))] : []),
+      state.mskills === false ? el("p", { class: "note" }, "Starter chains built on m-skills show here once it is installed.") : undefined,
+      removed.length > 0
+        ? el("button", { type: "button", class: "refresh", "data-focus": "restore-templates", onclick: restoreTemplates }, `Restore templates (${removed.length})`)
+        : undefined,
       el("h2", {}, "My chains"),
-      state.chains.length > 0 ? el("ul", {}, state.chains.map(railItem)) : el("p", { class: "note" }, "No chains yet. Duplicate a template to start."),
+      state.chains.length > 0
+        ? el("ul", {}, state.chains.map(railItem))
+        : el("p", { class: "note" }, state.templates.length > 0 ? "No chains yet. Duplicate a template to start." : "No chains yet. Make one with New empty chain."),
       el(
         "button",
         { type: "button", "data-focus": "new-chain", onclick: () => {
@@ -152,7 +196,8 @@ export async function start() {
       ),
       // The skill list is the window's, not a chain's, so it is refreshed from here.
       el("button", { type: "button", class: "refresh", "data-focus": "refresh-skills", onclick: () => vscode.postMessage({ type: "refreshPalette" }) }, "Refresh skills"),
-    );
+    ];
+    rail.replaceChildren(...parts.filter((part) => part !== undefined));
   }
 
   function card(chain, s, i, c, editable) {
@@ -280,30 +325,45 @@ export async function start() {
 
   // Model, effort and pause, each a native control whose label names the card, on every card: on a template, a change makes a copy.
   // A stored value the session does not offer stays selected, marked, so the card shows what Run would refuse rather than quietly
-  // changing it.
+  // changing it. After an m-skills step, "Take model and effort from the previous step" turns both lists off: they are only the
+  // fallback for when that step suggests nothing. A stored choice is kept while the box is hidden (m-skills not installed).
   function settings(chain, s, i, c) {
     const label = c.label;
     const modelId = logic.modelKey(s, i);
     const effortId = logic.effortKey(s, i);
     const pauseId = logic.pauseKey(s, i);
+    const followId = logic.followKey(s, i);
     const models = state.models ?? [];
     const efforts = logic.effortChoices(c, state);
-    // Until the session lists its models, a pinned one is shown as stored: only a listed session can say it does not offer it.
+    // Until the session lists its models, a stored one is shown as stored: only a listed session can say it does not offer it.
     const unlisted = c.model !== undefined && !models.some((m) => m.id === c.model);
     const why = logic.effortReason(c, state);
-    const note = logic.pinNote(c);
+    const canFollow = logic.followAvailable(chain, s, i, state);
+    const following = canFollow && c.follow === true;
     const named = (text) => [text, el("span", { class: "visually-hidden" }, ` for ${label}`)];
     return el(
       "div",
       { class: "card-settings" },
+      canFollow
+        ? el(
+            "label",
+            { class: "follow" },
+            el("input", { type: "checkbox", id: followId, "data-focus": followId, checked: following, "aria-describedby": `follow-why-${s}-${i}`, onchange: (e) => saveSetting(chain, (to) => edit.setFollow(to, s, i, e.target.checked), label, followId) }),
+            " Take model and effort from the previous step",
+            el("span", { class: "visually-hidden" }, ` for ${label}`),
+          )
+        : undefined,
+      canFollow
+        ? el("p", { id: `follow-why-${s}-${i}`, class: "note" }, following ? "Model and Effort below are used only when the previous step suggests nothing." : "Set Model or Effort here and they win over the previous step's suggestion; left on Default, the suggestion is used.")
+        : undefined,
       el("label", { for: modelId }, named("Model")),
       el(
         "select",
-        { id: modelId, "data-focus": modelId, onchange: (e) => {
+        { id: modelId, "data-focus": modelId, disabled: following, onchange: (e) => {
           const model = e.target.value || undefined;
           saveSetting(chain, (to) => edit.setModel(to, s, i, model, logic.effortAfterModel(c, model, state)), label, modelId);
         } },
-        el("option", { value: "" }, "By tier"),
+        el("option", { value: "" }, logic.defaultLabel(state)),
         models.map((m) => el("option", { value: m.id, selected: m.id === c.model }, m.label)),
         unlisted ? el("option", { value: c.model, selected: true }, logic.modelOffered(c, state) ? c.model : `${c.model} (not offered by this session)`) : undefined,
       ),
@@ -311,7 +371,7 @@ export async function start() {
       el(
         "select",
         // Off only when there is nothing to pick; an effort the model no longer takes can still be set back to the default.
-        { id: effortId, "data-focus": effortId, "aria-disabled": String(why !== undefined && c.effort === undefined), "aria-describedby": why ? `effort-why-${s}-${i}` : undefined, title: why, onchange: (e) => {
+        { id: effortId, "data-focus": effortId, disabled: following, "aria-disabled": String(why !== undefined && c.effort === undefined), "aria-describedby": why ? `effort-why-${s}-${i}` : undefined, title: why, onchange: (e) => {
           saveSetting(chain, (to) => edit.setEffort(to, s, i, e.target.value || undefined), label, effortId);
         } },
         el("option", { value: "" }, "Model default"),
@@ -319,7 +379,6 @@ export async function start() {
         c.effort !== undefined && !efforts.includes(c.effort) ? el("option", { value: c.effort, selected: true }, `${c.effort} (not offered)`) : undefined,
       ),
       why ? el("p", { id: `effort-why-${s}-${i}`, class: "reason" }, why) : undefined,
-      note ? el("p", { class: "note" }, note) : undefined,
       el(
         "label",
         { class: "pause" },
@@ -343,23 +402,40 @@ export async function start() {
     }
     const key = `${chain.id}:${s}`;
     const full = logic.addCardReason(chain, s);
-    const options = state.palette.map((p) => el("option", { value: p.skill, selected: p.skill === picks.get(key) }, p.mskills ? `${p.label} (${p.skill})` : p.skill));
-    return el(
-      "div",
-      { class: "add-skill" },
-      el("label", { for: id }, `Add a skill to session ${s + 1}`),
-      el("select", { id, "data-focus": id, onchange: (e) => picks.set(key, e.target.value) }, options),
-      el(
-        "button",
-        { type: "button", class: "outline", "data-focus": logic.addKey(s), "aria-disabled": String(full !== undefined), "aria-describedby": full ? `full-${s}` : undefined, title: full, onclick: () => {
+    const filterId = logic.filterKey(s);
+    // Typing in the filter narrows the list in place, so focus and the caret stay where they are.
+    const options = (query) => {
+      const shown = logic.filterPalette(state.palette, query);
+      return shown.length > 0
+        ? shown.map((p) => el("option", { value: p.skill, selected: p.skill === picks.get(key) }, p.mskills ? `${p.label} (${p.skill})` : p.skill))
+        : [el("option", { value: "" }, logic.matchCount(0))];
+    };
+    const query = filters.get(key) ?? "";
+    const select = el("select", { id, "data-focus": id, onchange: (e) => picks.set(key, e.target.value) }, options(query));
+    const add = el(
+      "button",
+      { type: "button", class: "outline", "data-focus": logic.addKey(s), "aria-disabled": String(full !== undefined || select.value === ""), "aria-describedby": full ? `full-${s}` : undefined, title: full, onclick: () => {
           if (full) return announce(full);
           const skill = document.getElementById(id).value;
-          if (!skill) return;
+          if (!skill) return announce("No skill matches the filter. Change it to add one.");
           const next = edit.addCard(chain, s, skill);
           save(next, `Added ${next.sessions[s].cards.at(-1).label}`, logic.removeKey(s, next.sessions[s].cards.length - 1));
         } },
-        "Add",
-      ),
+      "Add",
+    );
+    return el(
+      "div",
+      { class: "add-skill" },
+      el("label", { for: filterId }, "Filter", el("span", { class: "visually-hidden" }, ` skills for session ${s + 1}`)),
+      el("input", { type: "search", id: filterId, "data-focus": filterId, class: "filter", value: query, autocomplete: "off", spellcheck: "false", oninput: (e) => {
+        filters.set(key, e.target.value);
+        select.replaceChildren(...options(e.target.value));
+        add.setAttribute("aria-disabled", String(full !== undefined || select.value === ""));
+        announce(logic.matchCount(logic.filterPalette(state.palette, e.target.value).length));
+      } }),
+      el("label", { for: id }, `Add a skill to session ${s + 1}`),
+      select,
+      add,
       full ? el("p", { id: `full-${s}`, class: "reason" }, full) : undefined,
     );
   }
@@ -395,7 +471,9 @@ export async function start() {
         `Run ${chain.name}`,
       ),
       el("button", { type: "button", class: "accent", "data-focus": "duplicate", onclick: () => copyOf(chain) }, editable ? "Duplicate" : "Duplicate to edit"),
-      editable ? el("button", { type: "button", class: "end danger", "data-focus": "delete-chain", onclick: () => vscode.postMessage({ type: "delete", id: chain.id }) }, "Delete chain") : undefined,
+      editable
+        ? el("button", { type: "button", class: "end danger", "data-focus": "delete-chain", onclick: () => vscode.postMessage({ type: "delete", id: chain.id }) }, "Delete chain")
+        : el("button", { type: "button", class: "end danger", "data-focus": "remove-template", onclick: () => removeTemplate(chain) }, "Remove template"),
     ];
     parts.push(el("div", { class: "toolbar" }, toolbar));
     // Not a live region: the status region already said it once.
@@ -406,7 +484,7 @@ export async function start() {
           "p",
           { class: "notice" },
           el("span", {}, notice.text),
-          undo ? el("button", { type: "button", "aria-label": undo.name, "data-focus": "undo", onclick: () => save(undo.chain, undo.said, undo.focus) }, "Undo") : undefined,
+          undo ? el("button", { type: "button", "aria-label": undo.name, "data-focus": "undo", onclick: () => (undo.act ? undo.act() : save(undo.chain, undo.said, undo.focus)) }, "Undo") : undefined,
         ),
       );
     }
@@ -414,7 +492,7 @@ export async function start() {
     parts.push(el("p", { class: "starts" }, logic.startsFrom(chain)));
     if (editable) {
       parts.push(el("p", { class: "note" }, logic.PLACEHOLDER_NOTE));
-      if (state.modelsError) parts.push(el("p", { class: "note" }, `Cards on By tier run on their tier's model, and a pinned card keeps its model, checked when its session starts. Models could not be listed: ${state.modelsError}`));
+      if (state.modelsError) parts.push(el("p", { class: "note" }, `Cards on Default run on the session's own default model, unchecked, and a card with a model keeps it, checked when its session starts. Models could not be listed: ${state.modelsError}`));
     }
 
     chain.sessions.forEach((session, s) => {

@@ -31,8 +31,10 @@ export function modelOptions(models: readonly ModelInfo[]): ModelOption[] {
   return options;
 }
 
-// A card on its tier can land on any of the three tier models, so it may only ask for an effort all of them take.
-export function commonEfforts(options: readonly ModelOption[], tierModels: readonly string[]): Effort[] {
-  const found = tierModels.map((id) => options.find((o) => o.id === id));
-  return found.every((o) => o !== undefined) ? EFFORTS.filter((e) => found.every((o) => o.efforts.includes(e))) : [];
+// The model a card on Default runs on: the one the session's "default" row resolves to, requested by id so the session's own model
+// check still holds. None when the session names no default, or one that is not one plain token.
+export function defaultModelOf(models: readonly ModelInfo[]): string | undefined {
+  const row = models.find((m) => m.value === "default");
+  const id = row && (row.resolvedModel ?? row.value);
+  return id !== undefined && id !== "default" && MODEL.test(id) ? id : undefined;
 }

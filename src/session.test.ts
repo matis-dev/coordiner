@@ -330,8 +330,19 @@ describe("runTurn", () => {
     });
     const result = await runTurn({ ...base, query });
     assert.equal(result.ok, false);
-    assert.match(!result.ok ? result.error : "", /runs model-b, not the requested model-a/);
+    assert.match(!result.ok ? result.error : "", /runs model-b, not the requested model-a\. Pick another model on the card\./);
     assert.equal(aborted, true);
+  });
+
+  it("asks for no model when none is given, and takes whichever the session runs", async () => {
+    const { query, seen } = fakeQuery(async function* () {
+      yield init({ model: "model-b" });
+      yield success("hi");
+    });
+    const { model: _model, ...noModel } = base;
+    const result = await runTurn({ ...noModel, query });
+    assert.equal(result.ok && result.model, "model-b");
+    assert.equal(Object.hasOwn(seen.options!, "model"), false);
   });
 
   it("reports an error result with its subtype", async () => {

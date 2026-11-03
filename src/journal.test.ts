@@ -39,7 +39,7 @@ describe("createJournal", () => {
     const lines: string[] = [];
     const journal = createJournal(async (line) => void lines.push(line), clock, () => undefined);
     const definition = { id: "mine", name: "Mine", sessions: [{ cards: [{ skill: "lint", args: "{{idea}}", label: "Lint", pause: false }] }] };
-    await journal({ type: "run-started", chain: "Mine", story: "s", repo: "/r", worktree: "/w", branch: "coordiner/s", models: { strong: "a", medium: "b", weak: "c" }, questions: "timed", definition, input: "an idea" });
+    await journal({ type: "run-started", chain: "Mine", story: "s", repo: "/r", worktree: "/w", branch: "coordiner/s", questions: "timed", definition, input: "an idea" });
     await journal({ type: "continued", position: { session: 0, card: 0 }, questions: "never" });
     assert.deepEqual(JSON.parse(lines[0]!).definition, definition);
     assert.equal(JSON.parse(lines[0]!).input, "an idea");
