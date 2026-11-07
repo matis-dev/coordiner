@@ -1,4 +1,5 @@
 import type { Chain, Effort } from "./chains.ts";
+import type { ImageMeta } from "./images.ts";
 import type { At, Outcome, RunEvent } from "./run.ts";
 import type { Entry } from "./transcript.ts";
 import type { DecidedAfter, QuestionWait } from "./unattended.ts";
@@ -14,7 +15,7 @@ export type JournaledEntry = Extract<Entry, { kind: "assistant" | "tool" | "divi
 // written before the tiers were dropped also carry the tier models (`models`), which nothing reads. `kind: "chat"`: a chat opened
 // on its own (Open Chat), with no chain; its definition has no sessions.
 export type JournalRecord =
-  | { type: "run-started"; kind?: "chat"; chain: string; story: string; repo: string; worktree: string; branch: string; questions: QuestionWait; definition: Chain; input: string }
+  | { type: "run-started"; kind?: "chat"; chain: string; story: string; repo: string; worktree: string; branch: string; questions: QuestionWait; definition: Chain; input: string; inputImages?: ImageMeta[] }
   // The run was continued at that card; what follows belongs to it, up to its own outcome.
   | { type: "continued"; position: At; questions: QuestionWait }
   // The chain as the run picked it up when a session started, before `input` filled it: from here on, the definition.
@@ -22,7 +23,8 @@ export type JournalRecord =
   | RunEvent
   | { type: "log"; line: string }
   // What the user said in the run's chat, and how they answered a skill's question.
-  | { type: "you"; card: string; text: string }
+  // `images`: what each attached image's chip said; never its data.
+  | { type: "you"; card: string; text: string; images?: ImageMeta[] }
   | { type: "answer"; card: string; question: string; answer: string }
   // A question answered with its Recommended option without the user.
   | { type: "decided"; card: string; question: string; answer: string; after: DecidedAfter }

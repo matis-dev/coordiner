@@ -1,3 +1,4 @@
+import { said as words, type ImageRef } from "./images.ts";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -62,7 +63,7 @@ describe("createRunChat", () => {
   it("sends every change to the editor with the title, and says when the run moves to another card or session", () => {
     const { chat, updates, moves } = setup();
     chat.talk.at({ card: "Plan", index: 0, session: 0, attended: false });
-    chat.talk.send("keep it small");
+    chat.talk.send(words("keep it small"));
     assert.equal(moves(), 1);
     chat.talk.at({ card: "Plan", index: 0, session: 0, attended: false });
     assert.equal(moves(), 1);
@@ -91,12 +92,12 @@ describe("createRunChat", () => {
     const signal = new AbortController().signal;
     const wait = chat.talk.waitForYou({ card: "Brainstorm", ready: false, signal });
     assert.equal(moves(), 2);
-    chat.talk.send("desktop");
+    chat.talk.send(words("desktop"));
     await wait;
     assert.equal(moves(), 3);
     void chat.talk.ask([question], signal);
     assert.equal(moves(), 4);
-    chat.talk.send("one more thing");
+    chat.talk.send(words("one more thing"));
     assert.equal(moves(), 4);
   });
 
@@ -105,10 +106,10 @@ describe("createRunChat", () => {
     chat.talk.at({ card: "Brainstorm", index: 0, session: 0, attended: true });
     const signal = new AbortController().signal;
     const move = chat.talk.waitForYou({ card: "Brainstorm", ready: false, signal });
-    chat.talk.send("desktop");
+    chat.talk.send(words("desktop"));
     await move;
     void chat.talk.ask([question], signal);
-    chat.talk.send("one more thing");
+    chat.talk.send(words("one more thing"));
     assert.deepEqual(waiting, ["Brainstorm", "Brainstorm"]);
   });
 
@@ -187,7 +188,7 @@ describe("createRunChat", () => {
   it("shows and records what the user said, with the card it went to", () => {
     const { chat, appended, records } = setup();
     chat.talk.at({ card: "Implement", index: 0, session: 0, attended: false });
-    chat.talk.send("use the helper");
+    chat.talk.send(words("use the helper"));
     chat.talk.takeQueued("Implement");
     assert.deepEqual(appended(), [{ kind: "you", card: "Implement", text: "use the helper" }]);
     assert.deepEqual(records, [{ type: "you", card: "Implement", text: "use the helper" }]);
@@ -294,10 +295,10 @@ describe("actOnChat", () => {
   it("passes each chat message to the run's chat, and stops the run on chatStop", async () => {
     const { chat } = setup();
     let stopped = 0;
-    const stop = { stop: () => void stopped++, copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: () => assert.fail("not asked"), mergeSteps: () => assert.fail("not asked") };
+    const stop = { stop: () => void stopped++, copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: () => assert.fail("not asked"), mergeSteps: () => assert.fail("not asked"), images: () => [], release: () => assert.fail("not asked") };
     chat.talk.at({ card: "Implement", index: 0, session: 0, attended: false });
-    assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "one" }), true);
-    assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "  " }), false);
+    assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "one", images: [] }), true);
+    assert.equal(actOnChat(chat.talk, stop, { type: "chatSend", text: "  ", images: [] }), false);
     const id = chat.view().queued[0]!.id;
     assert.equal(actOnChat(chat.talk, stop, { type: "chatWithdraw", id }), true);
     assert.deepEqual(chat.view().queued, []);
@@ -314,7 +315,7 @@ describe("actOnChat", () => {
   it("hands the actions after the run to the extension", () => {
     const { chat } = setup();
     const asked: string[] = [];
-    const actions = { stop: () => void asked.push("stop"), copyResume: () => void asked.push("copy"), nextChain: () => void asked.push("next"), copyText: (text: string) => void asked.push(`text: ${text}`), mergeSteps: () => void asked.push("merge") };
+    const actions = { stop: () => void asked.push("stop"), copyResume: () => void asked.push("copy"), nextChain: () => void asked.push("next"), copyText: (text: string) => void asked.push(`text: ${text}`), mergeSteps: () => void asked.push("merge"), images: () => [], release: () => assert.fail("not asked") };
     assert.equal(actOnChat(chat.talk, actions, { type: "chatCopyResume" }), true);
     assert.equal(actOnChat(chat.talk, actions, { type: "chatNextChain" }), true);
     assert.equal(actOnChat(chat.talk, actions, { type: "chatMergeSteps" }), true);
@@ -324,7 +325,7 @@ describe("actOnChat", () => {
   it("hands a command to copy to the extension, at any time", () => {
     const { chat } = setup();
     const asked: string[] = [];
-    const actions = { stop: () => assert.fail("not asked"), copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: (text: string) => void asked.push(text), mergeSteps: () => assert.fail("not asked") };
+    const actions = { stop: () => assert.fail("not asked"), copyResume: () => assert.fail("not asked"), nextChain: () => assert.fail("not asked"), copyText: (text: string) => void asked.push(text), mergeSteps: () => assert.fail("not asked"), images: () => [], release: () => assert.fail("not asked") };
     assert.equal(actOnChat(chat.talk, actions, { type: "chatCopyText", text: "docker --version" }), true);
     assert.deepEqual(asked, ["docker --version"]);
   });
@@ -349,7 +350,7 @@ describe("createRunChat: the end of the run", () => {
     const signal = new AbortController().signal;
     const wait = chat.talk.waitForYou({ card: "Kickoff", ready: false, signal });
     assert.equal(moves(), before, "waiting after the run is not news");
-    chat.talk.send("one more thing");
+    chat.talk.send(words("one more thing"));
     await wait;
     assert.equal(chat.view().phase, "running");
     assert.equal(moves(), before + 1);
@@ -402,7 +403,7 @@ describe("createRunChat: the journal", () => {
     const { chat, records } = setup();
     chat.talk.at({ card: "Plan", index: 0, session: 0, attended: true });
     chat.forTurn("interactive").onMessage(said("the plan"));
-    chat.talk.send("keep it small");
+    chat.talk.send(words("keep it small"));
     chat.talk.takeQueued("Plan");
     chat.talk.at({ card: "Review", index: 0, session: 1, attended: true });
     chat.failed("Review", "no network");
@@ -590,5 +591,58 @@ describe("what each card and session worked and spent", () => {
     chat.relined([["Plan"], ["Fix", "Review"]]);
     assert.deepEqual(chat.view().line, [["Plan"], ["Fix", "Review"]]);
     assert.deepEqual(updates().at(-1), { type: "chatUpdate", chat: chat.view() });
+  });
+});
+
+describe("images in the run's chat", () => {
+  const shot: ImageRef = { id: "i1", name: "ticket.png", bytes: 2048, mediaType: "image/png" };
+
+  it("shows a message's images as chips that keep their id, and journals only what each chip says", () => {
+    const { chat, records, appended } = setup();
+    chat.talk.at({ card: "Plan", index: 0, session: 0, attended: true });
+    chat.talk.waitForYou({ card: "Plan", ready: false, signal: new AbortController().signal });
+    chat.talk.send(words("see the ticket", [shot]));
+    assert.deepEqual(appended().at(-1), { kind: "you", card: "Plan", text: "see the ticket", images: [shot] });
+    assert.deepEqual(records.at(-1), { type: "you", card: "Plan", text: "see the ticket", images: [{ name: "ticket.png", bytes: 2048, mediaType: "image/png" }] });
+    assert.equal(JSON.stringify(records).includes("i1"), false, "no id or data in the journal");
+  });
+
+  it("shows and journals what the user gave the run, images and all, as their message to its card", () => {
+    const { chat, records, appended } = setup();
+    chat.gave("Brainstorm", words("", [shot]));
+    assert.deepEqual(appended().at(-1), { kind: "you", card: "Brainstorm", text: "", images: [shot] });
+    assert.deepEqual(records.at(-1), { type: "you", card: "Brainstorm", text: "", images: [{ name: "ticket.png", bytes: 2048, mediaType: "image/png" }] });
+  });
+
+  it("leaves images out of a message without any", () => {
+    const { chat, records } = setup();
+    chat.gave("Plan", words("text only"));
+    assert.deepEqual(records.at(-1), { type: "you", card: "Plan", text: "text only" });
+  });
+
+  it("sends the images a message names when the chat holds them all, and refuses the message when one is not held", () => {
+    const { chat } = setup();
+    const held = new Map([["i1", shot]]);
+    const actions = { stop: () => undefined, copyResume: () => undefined, nextChain: () => undefined, copyText: () => undefined, mergeSteps: () => undefined, images: (ids: readonly string[]) => (ids.every((id) => held.has(id)) ? ids.map((id) => held.get(id)!) : undefined), release: () => assert.fail("not asked") };
+    chat.talk.at({ card: "Implement", index: 0, session: 0, attended: false });
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatSend", text: "", images: ["i1"] }), true);
+    assert.deepEqual(chat.view().queued.map((q) => q.images), [[shot]]);
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatSend", text: "and this", images: ["i1", "gone"] }), false);
+    assert.equal(chat.view().queued.length, 1);
+  });
+
+  it("lets go of a withdrawn message's images, and of none for a message without any", () => {
+    const { chat } = setup();
+    const released: string[][] = [];
+    const actions = { stop: () => undefined, copyResume: () => undefined, nextChain: () => undefined, copyText: () => undefined, mergeSteps: () => undefined, images: (ids: readonly string[]) => ids.map(() => shot), release: (ids: readonly string[]) => void released.push([...ids]) };
+    chat.talk.at({ card: "Implement", index: 0, session: 0, attended: false });
+    actOnChat(chat.talk, actions, { type: "chatSend", text: "look", images: [shot.id] });
+    actOnChat(chat.talk, actions, { type: "chatSend", text: "words only", images: [] });
+    const [withImages, without] = chat.view().queued;
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatWithdraw", id: without!.id }), true);
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatWithdraw", id: withImages!.id }), true);
+    assert.equal(actOnChat(chat.talk, actions, { type: "chatWithdraw", id: "m99" }), true);
+    assert.deepEqual(released, [[shot.id]]);
+    assert.deepEqual(chat.view().queued, []);
   });
 });

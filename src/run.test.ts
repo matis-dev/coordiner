@@ -2,7 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { storyText } from "./backlog.ts";
 import { defaultCard, EFFORTS, MAX_INPUT_CHARS, TEMPLATES, type Chain } from "./chains.ts";
-import { continueAfter, fillInput, pickUpAfter, restateAfter, MAX_TURNS, remainingCommands, runChain, runSession, talkOn, type AfterAsk, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
+import { continueAfter, fillInput, inputCard, pickUpAfter, restateAfter, MAX_TURNS, remainingCommands, runChain, runSession, talkOn, type AfterAsk, type ChainDeps, type Outcome, type RunDeps, type RunEvent, type TurnAsk } from "./run.ts";
+import { IMAGES_NOTE } from "./protocol.ts";
+import { said, type ImageRef } from "./images.ts";
 import type { TurnResult } from "./session.ts";
 import { Talk, type Move, type WaitRequest } from "./talk.ts";
 import type { ReviewPrep } from "./worktree.ts";
@@ -46,7 +48,7 @@ function harness(script: Array<TurnResult | ((talk: Talk) => TurnResult)>, signa
       at: (where) => talk.at(where),
       takeQueued: (card) => talk.takeQueued(card),
       pausePending: () => talk.pausePending(),
-      giveBack: (texts) => talk.giveBack(texts),
+      giveBack: (messages) => talk.giveBack(messages),
       waitForYou: (request) => {
         waits.push(request);
         const move = talk.waitForYou(request);
@@ -69,8 +71,8 @@ describe("runSession: session one", () => {
     const { deps, requests, events } = harness([reply("plan\nCOORDINER: NEXT model=m-small", 1), reply("built\nCOORDINER: DONE", 2)]);
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "built" });
     assert.deepEqual(requests.map((r) => [r.model, r.resume]), [["m-default", undefined], ["m-small", "sess-1"]]);
-    assert.equal(requests[0]!.prompt, "/m-skills:planning-architect Story 1: Login\n\nAdd a login form.");
-    assert.equal(requests[1]!.prompt, "/m-skills:implementing-architect Implement the approved plan above.");
+    assert.equal(requests[0]!.prompt.text, "/m-skills:planning-architect Story 1: Login\n\nAdd a login form.");
+    assert.equal(requests[1]!.prompt.text, "/m-skills:implementing-architect Implement the approved plan above.");
     assert.deepEqual(events, [
       { type: "step-started", index: 0, label: "Plan", model: "m-default", position: { session: 0, card: 0 } },
       { type: "step-finished", index: 0, status: "done", detail: "next: model=m-small", sessionId: "sess-1", stats: { ms: 1000 } },
@@ -83,7 +85,7 @@ describe("runSession: session one", () => {
     const { deps, requests } = harness([reply("COORDINER: NEXT model=m-small", 1), reply("COORDINER: NEXT model=m-mid", 2), reply("COORDINER: NEXT model=m-big", 3), reply("COORDINER: DONE", 4)]);
     await runSession(AUTHOR_SESSION, deps);
     assert.deepEqual(requests.map((r) => r.model), ["m-default", "m-small", "m-mid", "m-big"]);
-    assert.equal(requests[2]!.prompt, "Continue with the next step of the plan.");
+    assert.equal(requests[2]!.prompt.text, "Continue with the next step of the plan.");
     assert.deepEqual(requests.map((r) => r.resume), [undefined, "sess-1", "sess-2", "sess-3"]);
   });
 
@@ -96,9 +98,9 @@ describe("runSession: session one", () => {
   it("reminds once on the same model when the status line is missing, then continues", async () => {
     const { deps, requests } = harness([reply("plan without marker", 1), reply("COORDINER: NEXT model=m-mid", 2), reply("COORDINER: DONE", 3)]);
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
-    assert.equal(requests[1]!.prompt, "End your reply with your COORDINER status line.");
+    assert.equal(requests[1]!.prompt.text, "End your reply with your COORDINER status line.");
     assert.deepEqual(requests.map((r) => r.model), ["m-default", "m-default", "m-mid"]);
-    assert.equal(requests[2]!.prompt, "/m-skills:implementing-architect Implement the approved plan above.");
+    assert.equal(requests[2]!.prompt.text, "/m-skills:implementing-architect Implement the approved plan above.");
   });
 
   it("halts when the status line is still missing after the reminder", async () => {
@@ -170,7 +172,7 @@ describe("runSession: session one", () => {
 });
 
 describe("runSession: a card that cannot go on parks", () => {
-  const brief = (r: TurnAsk) => [r.prompt, r.model, r.resume, r.interactive];
+  const brief = (r: TurnAsk) => [r.prompt.text, r.model, r.resume, r.interactive];
   const docker = "docker is not installed";
 
   it("parks on a HALT; Continue resumes the same session with the continue prompt and the chain reaches DONE", async () => {
@@ -190,7 +192,7 @@ describe("runSession: a card that cannot go on parks", () => {
     const { deps, requests } = harness(
       [reply("plan\nCOORDINER: NEXT model=m-small", 1), reply(`COORDINER: HALT ${docker}`, 2), reply("checked\nCOORDINER: DONE", 3)],
       undefined,
-      [(t) => void t.send("installed it, check again"), (t) => t.continue()],
+      [(t) => void t.send(said("installed it, check again")), (t) => t.continue()],
     );
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "checked" });
     assert.deepEqual(requests.map(brief).at(-1), ["installed it, check again", "m-small", "sess-2", true]);
@@ -211,11 +213,11 @@ describe("runSession: a card that cannot go on parks", () => {
     const { deps, waits, requests } = harness(
       [reply(`COORDINER: HALT ${docker}`, 1), reply("COORDINER: HALT still no docker", 2), reply("COORDINER: NEXT model=m-small", 3), reply("COORDINER: DONE", 4)],
       undefined,
-      [(t) => void t.send("try now"), (t) => t.continue(), (t) => t.continue()],
+      [(t) => void t.send(said("try now")), (t) => t.continue(), (t) => t.continue()],
     );
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
     assert.deepEqual(waits.map((w) => w.parked), [docker, undefined, "still no docker"]);
-    assert.equal(requests[2]!.prompt, continueAfter("still no docker"));
+    assert.equal(requests[2]!.prompt.text, continueAfter("still no docker"));
   });
 
   it("ends with the halt's outcome and session id when the user stops a parked card", async () => {
@@ -251,7 +253,7 @@ describe("runSession: a card that cannot go on parks", () => {
     const { deps, requests } = harness(
       [reply("COORDINER: NEXT model=m-small", 1), { ok: false, error: "claude was not found" }, reply("COORDINER: DONE", 3)],
       undefined,
-      [(t) => void t.send("fixed the path"), (t) => t.continue()],
+      [(t) => void t.send(said("fixed the path")), (t) => t.continue()],
     );
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
     assert.deepEqual(requests.map(brief).at(-1), ["fixed the path\n\n/m-skills:implementing-architect Implement the approved plan above.", "m-small", "sess-1", true]);
@@ -261,7 +263,7 @@ describe("runSession: a card that cannot go on parks", () => {
     const { deps, waits, requests } = harness([reply("no marker", 1), reply("still none", 2), reply("COORDINER: NEXT model=m-small", 3), reply("COORDINER: DONE", 4)], undefined, [(t) => t.continue()]);
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
     assert.match(waits[0]!.parked ?? "", /did not report a COORDINER status line/);
-    assert.match(requests[2]!.prompt, /^The user has handled what stopped you/);
+    assert.match(requests[2]!.prompt.text, /^The user has handled what stopped you/);
   });
 
   it("parks at the turn cap; Continue gives the card a fresh allowance", async () => {
@@ -271,7 +273,7 @@ describe("runSession: a card that cannot go on parks", () => {
     assert.equal(outcome.status, "failed");
     assert.equal(requests.length, MAX_TURNS * 2);
     assert.deepEqual(waits.map((w) => w.parked), [`the run reached the ${MAX_TURNS}-turn cap without finishing.`, `the run reached the ${MAX_TURNS}-turn cap without finishing.`]);
-    assert.equal(requests[MAX_TURNS]!.prompt, "Continue with the next step of the plan.");
+    assert.equal(requests[MAX_TURNS]!.prompt.text, "Continue with the next step of the plan.");
     assert.equal(requests[MAX_TURNS]!.resume, `sess-${MAX_TURNS}`);
     const started = events.filter((e) => e.type === "step-started").map((e) => e.index);
     assert.deepEqual(started, Array.from({ length: MAX_TURNS * 2 }, (_, i) => i));
@@ -282,7 +284,7 @@ describe("runSession: a card that cannot go on parks", () => {
     const { deps, requests, waits } = harness(
       [...looping, reply("it keeps finding more to do", 98), reply("COORDINER: DONE", 99)],
       undefined,
-      [(t) => void t.send("why are you looping?"), (t) => t.continue()],
+      [(t) => void t.send(said("why are you looping?")), (t) => t.continue()],
     );
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
     assert.deepEqual(waits.map((w) => w.parked), [`the run reached the ${MAX_TURNS}-turn cap without finishing.`, undefined]);
@@ -309,7 +311,7 @@ describe("runSession: session two", () => {
     ]);
     assert.deepEqual(await runSession(REVIEW_SESSION, deps), { status: "done", text: "feat: add login\n\n- form" });
     assert.deepEqual(
-      requests.map((r) => [r.prompt, r.model, r.resume]),
+      requests.map((r) => [r.prompt.text, r.model, r.resume]),
       [
         ["/m-skills:code-review-architect-uncommitted", "m-default", undefined],
         ["/m-skills:implementing-architect fix the findings", "m-small", "sess-1"],
@@ -321,14 +323,14 @@ describe("runSession: session two", () => {
   it("continues fixing across the model changes the fixes suggest", async () => {
     const { deps, requests } = harness([reply("COORDINER: NEXT model=m-small", 1), reply("COORDINER: NEXT model=m-big", 2), reply("COORDINER: DONE", 3), reply("brief\nCOORDINER: DONE", 4)]);
     await runSession(REVIEW_SESSION, deps);
-    assert.deepEqual(requests.map((r) => r.prompt).slice(1, 3), ["/m-skills:implementing-architect fix the findings", "Continue with the next fix."]);
+    assert.deepEqual(requests.map((r) => r.prompt.text).slice(1, 3), ["/m-skills:implementing-architect fix the findings", "Continue with the next fix."]);
     assert.deepEqual(requests.map((r) => r.model), ["m-default", "m-small", "m-big", "m-default"]);
   });
 
   it("goes straight from review to history when there is nothing to fix", async () => {
     const { deps, requests, events } = harness([reply("no findings\nCOORDINER: DONE", 1), reply("brief\nCOORDINER: DONE", 2)]);
     assert.deepEqual(await runSession(REVIEW_SESSION, deps), { status: "done", text: "brief" });
-    assert.deepEqual(requests.map((r) => r.prompt), ["/m-skills:code-review-architect-uncommitted", "/m-skills:rolling-history"]);
+    assert.deepEqual(requests.map((r) => r.prompt.text), ["/m-skills:code-review-architect-uncommitted", "/m-skills:rolling-history"]);
     assert.deepEqual(events.filter((e) => e.type === "step-started").map((e) => e.type === "step-started" && e.label), ["Review", "History"]);
   });
 
@@ -369,7 +371,7 @@ describe("runChain: the Story template", () => {
     const { deps, requests, events, prepared } = storyHarness([...authored, reply("COORDINER: DONE", 3), reply("brief\nCOORDINER: DONE", 4)]);
     assert.deepEqual(await runChain(chain, deps), { status: "done", text: "brief" });
     assert.equal(prepared(), 1);
-    assert.equal(requests[2]!.prompt, "/m-skills:code-review-architect-uncommitted");
+    assert.equal(requests[2]!.prompt.text, "/m-skills:code-review-architect-uncommitted");
     assert.equal(requests[2]!.resume, undefined);
     assert.equal(requests[3]!.resume, "sess-3");
     assert.deepEqual(events.filter((e) => e.type === "step-started").map((e) => e.index), [0, 1, 2, 3]);
@@ -445,7 +447,7 @@ describe("runChain: continuing at a card", () => {
     const { deps, requests, events, prepared } = chainHarness([reply("COORDINER: DONE", 5), reply("COORDINER: DONE", 6), reply("brief\nCOORDINER: DONE", 7)]);
     const from = { at: { session: 0, card: 1 }, suggestion: { model: "m-small" }, resume: "sess-2", prompt: pickUpAfter("the user stopped the run") };
     assert.deepEqual(await runChain(chain, deps, from), { status: "done", text: "brief" });
-    assert.deepEqual(requests.map((r) => [r.prompt, r.resume, r.model]), [
+    assert.deepEqual(requests.map((r) => [r.prompt.text, r.resume, r.model]), [
       [from.prompt, "sess-2", "m-small"],
       ["/m-skills:code-review-architect-uncommitted", undefined, "m-default"],
       ["/m-skills:rolling-history", "sess-6", "m-default"],
@@ -465,7 +467,7 @@ describe("runChain: continuing at a card", () => {
     const { deps, requests, prepared } = chainHarness([reply("brief\nCOORDINER: DONE", 9)]);
     assert.deepEqual(await runChain(chain, deps, { at: { session: 1, card: 2 }, resume: "sess-8", prompt: "/m-skills:rolling-history" }), { status: "done", text: "brief" });
     assert.equal(prepared(), 0);
-    assert.deepEqual(requests.map((r) => [r.prompt, r.resume]), [["/m-skills:rolling-history", "sess-8"]]);
+    assert.deepEqual(requests.map((r) => [r.prompt.text, r.resume]), [["/m-skills:rolling-history", "sess-8"]]);
   });
 
   it("starts the card fresh, on its own settings, when no session or suggestion is given", async () => {
@@ -492,13 +494,13 @@ describe("runChain: continuing at a card", () => {
 describe("runSession: talking with the user", () => {
   const idea = (fillInput(TEMPLATES.find((t) => t.id === "idea")!, "an offline notes app") as { ok: true; chain: Chain }).chain;
   const IDEA_SESSION = idea.sessions[0]!;
-  const brief = (r: TurnAsk) => [r.prompt, r.model, r.resume, r.interactive];
+  const brief = (r: TurnAsk) => [r.prompt.text, r.model, r.resume, r.interactive];
 
   it("waits after a pausing card's first turn, sends the user's message as its next turn, and moves on at Continue", async () => {
     const { deps, requests, waits, events } = harness(
       [reply("Which platforms?", 1), reply("deep dive\nCOORDINER: DONE", 2), reply("plan\nCOORDINER: NEXT model=m-small", 3), reply("built\nCOORDINER: DONE", 4)],
       undefined,
-      [(t) => void t.send("desktop only"), (t) => t.continue()],
+      [(t) => void t.send(said("desktop only")), (t) => t.continue()],
     );
     assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "done", text: "built" });
     assert.deepEqual(requests.map(brief), [
@@ -515,7 +517,7 @@ describe("runSession: talking with the user", () => {
   it("moves a pausing card on at Continue even when it never gave a status line", async () => {
     const { deps, requests } = harness([reply("Which platforms?", 1), reply("plan\nCOORDINER: NEXT model=m-small", 2), reply("built\nCOORDINER: DONE", 3)], undefined, [(t) => t.continue()]);
     assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "done", text: "built" });
-    assert.equal(requests[1]!.prompt, "/m-skills:planning-architect Plan the Deep-Dive Execution Prompt above.");
+    assert.equal(requests[1]!.prompt.text, "/m-skills:planning-architect Plan the Deep-Dive Execution Prompt above.");
     assert.equal(requests[1]!.model, "m-default");
   });
 
@@ -524,14 +526,14 @@ describe("runSession: talking with the user", () => {
     const { deps, requests } = harness(
       [...chatting, reply("plan\nCOORDINER: NEXT model=m-small", 90), reply("built\nCOORDINER: DONE", 91)],
       undefined,
-      [...Array.from({ length: MAX_TURNS + 4 }, () => (t: Talk) => void t.send("go on")), (t) => t.continue()],
+      [...Array.from({ length: MAX_TURNS + 4 }, () => (t: Talk) => void t.send(said("go on"))), (t) => t.continue()],
     );
     assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "done", text: "built" });
     assert.equal(requests.length, MAX_TURNS + 7);
   });
 
   it("halts at Continue when the card's latest status line was a HALT", async () => {
-    const { deps } = harness([reply("COORDINER: HALT the idea needs a budget first", 1), reply("ok, noted", 2)], undefined, [(t) => void t.send("why?"), (t) => t.continue()]);
+    const { deps } = harness([reply("COORDINER: HALT the idea needs a budget first", 1), reply("ok, noted", 2)], undefined, [(t) => void t.send(said("why?")), (t) => t.continue()]);
     assert.deepEqual(await runSession(IDEA_SESSION, deps), { status: "halted", reason: "the idea needs a budget first", sessionId: "sess-2" });
   });
 
@@ -544,7 +546,7 @@ describe("runSession: talking with the user", () => {
 
   it("sends what the user queued during the first turn as the first message of the pause", async () => {
     const { deps, requests } = harness(
-      [(t) => (t.send("and it must sync"), reply("Which platforms?", 1)), reply("noted", 2), reply("plan\nCOORDINER: NEXT model=m-small", 3), reply("COORDINER: DONE", 4)],
+      [(t) => (t.send(said("and it must sync")), reply("Which platforms?", 1)), reply("noted", 2), reply("plan\nCOORDINER: NEXT model=m-small", 3), reply("COORDINER: DONE", 4)],
       undefined,
       [(t) => t.continue()],
     );
@@ -559,10 +561,10 @@ describe("runSession: talking with the user", () => {
     const { deps, requests, waits } = harness(
       [reply("plan\nCOORDINER: NEXT model=m-small", 1), (t) => (t.requestPause(), reply("step 1 done\nCOORDINER: NEXT model=m-mid", 2)), reply("because it is shared", 3), reply("COORDINER: DONE", 4)],
       undefined,
-      [(t) => void t.send("why that helper?"), (t) => t.continue()],
+      [(t) => void t.send(said("why that helper?")), (t) => t.continue()],
     );
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
-    assert.deepEqual(requests.map((r) => [r.prompt, r.model, r.interactive]), [
+    assert.deepEqual(requests.map((r) => [r.prompt.text, r.model, r.interactive]), [
       ["/m-skills:planning-architect Story 1: Login\n\nAdd a login form.", "m-default", false],
       ["/m-skills:implementing-architect Implement the approved plan above.", "m-small", false],
       ["why that helper?", "m-small", true],
@@ -578,7 +580,7 @@ describe("runSession: talking with the user", () => {
       [(t) => t.continue()],
     );
     assert.deepEqual(await runSession(AUTHOR_SESSION, deps), { status: "done", text: "" });
-    assert.deepEqual(requests.map((r) => [r.prompt, r.interactive]).at(-1), ["End your reply with your COORDINER status line.", false]);
+    assert.deepEqual(requests.map((r) => [r.prompt.text, r.interactive]).at(-1), ["End your reply with your COORDINER status line.", false]);
   });
 
   it("parks on an unattended HALT even when a pause was asked for", async () => {
@@ -599,15 +601,15 @@ describe("runSession: talking with the user", () => {
     let during: unknown;
     const h = harness([
       reply("plan\nCOORDINER: NEXT model=m-small", 1),
-      (t) => (t.send("use the existing helper"), reply("COORDINER: NEXT model=m-small", 2)),
-      (t) => ((during = [t.snapshot().session, t.snapshot().nextSession]), t.send("check the docs too"), reply("COORDINER: DONE", 3)),
+      (t) => (t.send(said("use the existing helper")), reply("COORDINER: NEXT model=m-small", 2)),
+      (t) => ((during = [t.snapshot().session, t.snapshot().nextSession]), t.send(said("check the docs too")), reply("COORDINER: DONE", 3)),
       (t) => ((during = [during, t.snapshot().session, t.snapshot().nextSession]), reply("COORDINER: DONE", 4)),
       reply("brief\nCOORDINER: DONE", 5),
     ]);
     const deps: ChainDeps = { ...h.deps, prepareReview: async () => ({ kind: "ready", marked: 0 }) };
     assert.deepEqual(await runChain(chain, deps), { status: "done", text: "brief" });
-    assert.equal(h.requests[2]!.prompt, "use the existing helper\n\nContinue with the next step of the plan.");
-    assert.equal(h.requests[3]!.prompt, "check the docs too\n\n/m-skills:code-review-architect-uncommitted");
+    assert.equal(h.requests[2]!.prompt.text, "use the existing helper\n\nContinue with the next step of the plan.");
+    assert.equal(h.requests[3]!.prompt.text, "check the docs too\n\n/m-skills:code-review-architect-uncommitted");
     assert.equal(h.requests[3]!.resume, undefined);
     assert.deepEqual(during, [[0, "Review"], 1, undefined]);
   });
@@ -649,7 +651,7 @@ describe("runChain: other chains", () => {
     const h = harness([reply("linted\nCOORDINER: DONE", 1)]);
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("acme:lint")] }] };
     assert.deepEqual(await runChain(own, deps(h).deps), { status: "done", text: "linted" });
-    assert.deepEqual(h.requests, [{ prompt: "/acme:lint", model: "m-default", interactive: false }]);
+    assert.deepEqual(h.requests, [{ prompt: said("/acme:lint"), model: "m-default", interactive: false }]);
   });
 
   // A one-card chain has no next card for NEXT to name: the NEXT ends the card as DONE would.
@@ -664,14 +666,14 @@ describe("runChain: other chains", () => {
     const h = harness([reply("COORDINER: NEXT model=m-big", 1), reply("COORDINER: DONE", 2)]);
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a")] }, { cards: [defaultCard("b")] }] };
     assert.deepEqual(await runChain(own, deps(h).deps), { status: "done", text: "" });
-    assert.deepEqual(h.requests.map((r) => [r.prompt, r.model, r.resume]), [["/a", "m-default", undefined], ["/b", "m-default", undefined]]);
+    assert.deepEqual(h.requests.map((r) => [r.prompt.text, r.model, r.resume]), [["/a", "m-default", undefined], ["/b", "m-default", undefined]]);
   });
 
   it("moves between generic cards on NEXT, on the model it suggests", async () => {
     const h = harness([reply("COORDINER: NEXT model=m-big", 1), reply("COORDINER: DONE", 2)]);
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a"), defaultCard("b")] }] };
     assert.equal((await runChain(own, deps(h).deps)).status, "done");
-    assert.deepEqual(h.requests.map((r) => [r.prompt, r.model, r.resume]), [["/a", "m-default", undefined], ["/b", "m-big", "sess-1"]]);
+    assert.deepEqual(h.requests.map((r) => [r.prompt.text, r.model, r.resume]), [["/a", "m-default", undefined], ["/b", "m-big", "sess-1"]]);
   });
 
   it("runs three sessions, each fresh, with step numbers continuing and the review prepared only where a session opens with it", async () => {
@@ -690,7 +692,7 @@ describe("runChain: other chains", () => {
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a"), pinned, defaultCard("b")] }] };
     assert.equal((await runChain(own, deps(h).deps)).status, "done");
     assert.deepEqual(h.requests.map((r) => [r.model, r.effort]), [["m-default", undefined], ["m-pinned", "low"], ["m-pinned", "low"], ["m-pinned", "low"], ["m-default", undefined]]);
-    assert.equal(h.requests[3]!.prompt, "End your reply with your COORDINER status line.");
+    assert.equal(h.requests[3]!.prompt.text, "End your reply with your COORDINER status line.");
     assert.equal(Object.hasOwn(h.requests[0]!, "effort"), false);
     const started = h.events.filter((e) => e.type === "step-started");
     assert.deepEqual(started.map((e) => [e.model, e.effort, e.note]), [["m-default", undefined, undefined], ["m-pinned", "low", undefined], ["m-pinned", "low", undefined], ["m-pinned", "low", undefined], ["m-default", undefined, undefined]]);
@@ -700,7 +702,7 @@ describe("runChain: other chains", () => {
     const h = harness([reply("COORDINER: DONE", 1)]);
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [{ ...defaultCard("acme:lint"), effort: "max" }] }] };
     await runChain(own, deps(h).deps);
-    assert.deepEqual(h.requests, [{ prompt: "/acme:lint", model: "m-default", effort: "max", interactive: false }]);
+    assert.deepEqual(h.requests, [{ prompt: said("/acme:lint"), model: "m-default", effort: "max", interactive: false }]);
   });
 
   it("refuses an empty session and a chain without sessions", async () => {
@@ -715,14 +717,14 @@ describe("runChain: other chains", () => {
     delete loop.next;
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a"), loop] }] };
     await runChain(own, deps(h).deps);
-    assert.equal(h.requests[2]!.prompt, "Continue.");
+    assert.equal(h.requests[2]!.prompt.text, "Continue.");
   });
 
   it("runs the loop card after another skill that ends with DONE, as the unattended note tells it to", async () => {
     const h = harness([reply("spec written\nCOORDINER: DONE", 1), reply("built\nCOORDINER: DONE", 2)]);
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("acme:spec"), defaultCard("m-skills:implementing-architect")] }] };
     assert.deepEqual(await runChain(own, deps(h).deps), { status: "done", text: "built" });
-    assert.deepEqual(h.requests.map((r) => [r.prompt, r.model]), [["/acme:spec", "m-default"], ["/m-skills:implementing-architect", "m-default"]]);
+    assert.deepEqual(h.requests.map((r) => [r.prompt.text, r.model]), [["/acme:spec", "m-default"], ["/m-skills:implementing-architect", "m-default"]]);
   });
 
   it("moves on at a bare NEXT, suggesting nothing", async () => {
@@ -777,7 +779,7 @@ describe("runChain: other chains", () => {
     const h = harness([reply("COORDINER: NEXT skill=m-skills:maintenance-architect model=m-mid", 1), reply("COORDINER: DONE", 2)]);
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a"), defaultCard("b")] }] };
     await runChain(own, deps(h).deps);
-    assert.deepEqual(h.requests.map((r) => [r.prompt, r.model]), [["/a", "m-default"], ["/b", "m-mid"]]);
+    assert.deepEqual(h.requests.map((r) => [r.prompt.text, r.model]), [["/a", "m-default"], ["/b", "m-mid"]]);
     const started = h.events.filter((e) => e.type === "step-started");
     assert.equal(started[1]!.type === "step-started" && started[1]!.note, "the previous step suggested m-skills:maintenance-architect; the chain runs b");
   });
@@ -787,8 +789,8 @@ describe("runChain: other chains", () => {
     const own: Chain = { id: "own", name: "Own", sessions: [{ cards: [defaultCard("a"), defaultCard("b")] }] };
     await runChain(own, { ...deps(h).deps, offered: undefined, defaultModel: undefined });
     assert.deepEqual(h.requests, [
-      { prompt: "/a", interactive: false },
-      { prompt: "/b", effort: "low", interactive: false, resume: "sess-1" },
+      { prompt: said("/a"), interactive: false },
+      { prompt: said("/b"), effort: "low", interactive: false, resume: "sess-1" },
     ]);
     const started = h.events.filter((e) => e.type === "step-started");
     assert.equal(started[1]!.type === "step-started" && started[1]!.note, "suggested model m-mid not used: the session's models could not be listed");
@@ -849,14 +851,14 @@ describe("talkOn", () => {
     });
     return { run, requests, waits };
   }
-  const message = (text: string): Move => ({ kind: "message", text });
+  const message = (text: string): Move => ({ kind: "message", said: said(text) });
 
   it("resumes the run's session with each message, on its model and effort, and follows the session it reports", async () => {
     const { run, requests, waits } = after([message("why?"), message("and then?")], [reply("because", 2), reply("then this", 2)]);
     await run;
     assert.deepEqual(requests, [
-      { prompt: "why?", model: "m-pinned", effort: "high", resume: "sess-1" },
-      { prompt: "and then?", model: "m-pinned", effort: "high", resume: "sess-2" },
+      { prompt: said("why?"), model: "m-pinned", effort: "high", resume: "sess-1" },
+      { prompt: said("and then?"), model: "m-pinned", effort: "high", resume: "sess-2" },
     ]);
     assert.deepEqual(waits.map((w) => [w.card, w.ready, w.nextCard]), [["Kickoff", false, undefined], ["Kickoff", false, undefined], ["Kickoff", false, undefined]]);
   });
@@ -870,7 +872,7 @@ describe("talkOn", () => {
       signal: new AbortController().signal,
       card: "Chat",
     });
-    assert.deepEqual(requests, [{ prompt: "hello" }, { prompt: "more", resume: "sess-7" }]);
+    assert.deepEqual(requests, [{ prompt: said("hello") }, { prompt: said("more"), resume: "sess-7" }]);
   });
 
   it("keeps going after a failed turn, on the session it had", async () => {
@@ -902,9 +904,9 @@ describe("talkOn", () => {
       sessionId: "sess-1",
       model: "m-medium",
     });
-    talk.send("hello");
+    talk.send(said("hello"));
     await run;
-    assert.deepEqual(requests, [{ prompt: "hello", model: "m-medium", resume: "sess-1" }]);
+    assert.deepEqual(requests, [{ prompt: said("hello"), model: "m-medium", resume: "sess-1" }]);
   });
 });
 
@@ -927,17 +929,17 @@ describe("runChain: picking up the saved chain at each session", () => {
     const h = harness([done(1), done(2), done(3)]);
     const { deps, asked } = withPickUp(h, [chainOf(["a"], ["b", "c"]), chainOf(["a"], ["c", "b"])]);
     assert.equal((await runChain(chainOf(["a"], ["b", "c"]), deps)).status, "done");
-    assert.deepEqual(h.requests.map((r) => r.prompt), ["/a", "/c", "/b"]);
+    assert.deepEqual(h.requests.map((r) => r.prompt.text), ["/a", "/c", "/b"]);
     assert.deepEqual(asked, [0, 1]);
   });
 
   it("runs a session added while the run went, and stops where a shorter saved chain ends", async () => {
     const added = harness([done(1), done(2), done(3)]);
     await runChain(chainOf(["a"], ["b"]), withPickUp(added, [chainOf(["a"], ["b"]), chainOf(["a"], ["b"], ["c"])]).deps);
-    assert.deepEqual(added.requests.map((r) => r.prompt), ["/a", "/b", "/c"]);
+    assert.deepEqual(added.requests.map((r) => r.prompt.text), ["/a", "/b", "/c"]);
     const cut = harness([done(1)]);
     assert.deepEqual(await runChain(chainOf(["a"], ["b"]), withPickUp(cut, [chainOf(["a"], ["b"]), chainOf(["a"])]).deps), { status: "done", text: "" });
-    assert.deepEqual(cut.requests.map((r) => r.prompt), ["/a"]);
+    assert.deepEqual(cut.requests.map((r) => r.prompt.text), ["/a"]);
   });
 
   it("waits for the user while a session cannot start, and looks again on Continue", async () => {
@@ -946,7 +948,7 @@ describe("runChain: picking up the saved chain at each session", () => {
     assert.equal((await runChain(chainOf(["a"], []), deps)).status, "done");
     assert.deepEqual(h.waits.map((w) => [w.card, w.parked, w.ready]), [["Session 2", "Session 2 has no skills.", false]]);
     assert.deepEqual(asked, [0, 1, 1]);
-    assert.deepEqual(h.requests.map((r) => r.prompt), ["/a", "/b"]);
+    assert.deepEqual(h.requests.map((r) => r.prompt.text), ["/a", "/b"]);
   });
 
   it("ends halted at the session's first card when the user stops while it cannot start", async () => {
@@ -957,21 +959,21 @@ describe("runChain: picking up the saved chain at each session", () => {
   });
 
   it("takes a message sent while waiting as a look again, and puts it in front of the session's first prompt", async () => {
-    const h = harness([done(1), done(2)], undefined, [(t) => void t.send("use the new API")]);
+    const h = harness([done(1), done(2)], undefined, [(t) => void t.send(said("use the new API"))]);
     const { deps } = withPickUp(h, [chainOf(["a"], []), "Session 2 has no skills.", chainOf(["a"], ["b"])]);
     assert.equal((await runChain(chainOf(["a"], []), deps)).status, "done");
-    assert.match(h.requests[1]!.prompt, /^use the new API\n\n\/b$/);
+    assert.match(h.requests[1]!.prompt.text, /^use the new API\n\n\/b$/);
   });
 
   it("picks up the session a continued run enters at its first card, sending that card's own prompt, unless it resumes a session", async () => {
     const fresh = harness([done(1)]);
     const picked = withPickUp(fresh, [chainOf(["a"], ["new"])]);
     await runChain(chainOf(["a"], ["old"]), picked.deps, { at: { session: 1, card: 0 }, prompt: "/old" });
-    assert.deepEqual([picked.asked, fresh.requests.map((r) => r.prompt)], [[1], ["/new"]]);
+    assert.deepEqual([picked.asked, fresh.requests.map((r) => r.prompt.text)], [[1], ["/new"]]);
     const resumed = harness([done(1)]);
     const kept = withPickUp(resumed, [chainOf(["a"], ["new"])]);
     await runChain(chainOf(["a"], ["old"]), kept.deps, { at: { session: 1, card: 0 }, resume: "sess-9", prompt: "Carry on." });
-    assert.deepEqual([kept.asked, resumed.requests.map((r) => [r.prompt, r.resume])], [[], [["Carry on.", "sess-9"]]]);
+    assert.deepEqual([kept.asked, resumed.requests.map((r) => [r.prompt.text, r.resume])], [[], [["Carry on.", "sess-9"]]]);
   });
 
   it("does not pick up a session a continued run enters at a later card, but does the ones after it", async () => {
@@ -979,7 +981,101 @@ describe("runChain: picking up the saved chain at each session", () => {
     const { deps, asked } = withPickUp(h, []);
     await runChain(chainOf(["a", "b"], ["c"]), deps, { at: { session: 0, card: 1 }, prompt: "/b" });
     assert.deepEqual(asked, [1]);
-    assert.deepEqual(h.requests.map((r) => r.prompt), ["/b", "/c"]);
+    assert.deepEqual(h.requests.map((r) => r.prompt.text), ["/b", "/c"]);
   });
 });
 
+
+describe("images given with the run's input and in the chat", () => {
+  const shot: ImageRef = { id: "i1", name: "ticket.png", bytes: 10, mediaType: "image/png" };
+  const extra: ImageRef = { id: "i2", name: "more.png", bytes: 10, mediaType: "image/png" };
+  const card = (skill: string, args = "") => ({ ...defaultCard(skill), args });
+  const done = (n: number) => reply("COORDINER: DONE", n);
+  const ready = (h: ReturnType<typeof harness>): ChainDeps => ({ ...h.deps, prepareReview: async () => ({ kind: "ready", marked: 0 }) });
+
+  it("finds the card the input goes to: the first holding the placeholder, in any session", () => {
+    const later: Chain = { id: "c", name: "C", sessions: [{ cards: [card("a")] }, { cards: [card("b"), card("c", "{{bug}}"), card("d", "{{bug}} again")] }] };
+    assert.deepEqual(inputCard(later), { session: 1, card: 1 });
+    assert.equal(inputCard({ id: "c", name: "C", sessions: [{ cards: [card("a")] }] }), undefined);
+  });
+
+  it("sends the input's images with the first turn of that card only, not a reminder, a loop's next turn or another card", async () => {
+    const loop = { ...defaultCard("m-skills:implementing-architect"), args: "{{bug}}" };
+    const own: Chain = { id: "c", name: "C", sessions: [{ cards: [card("a"), loop, card("b")] }] };
+    const h = harness([done(1), reply("no status", 2), reply("COORDINER: NEXT", 3), done(4), done(5)]);
+    await runChain(own, { ...ready(h), input: { at: { session: 0, card: 1 }, images: [shot] } });
+    assert.deepEqual(h.requests.map((r) => r.prompt.images.map((i) => i.id)), [[], ["i1"], [], [], []]);
+    assert.equal(h.requests[1]!.prompt.text, "/m-skills:implementing-architect {{bug}}");
+  });
+
+  it("tells the session its images do not reach the next session, only when one follows", async () => {
+    const two: Chain = { id: "c", name: "C", sessions: [{ cards: [card("a", "x")] }, { cards: [card("b")] }] };
+    const h = harness([done(1), done(2)]);
+    await runChain(two, { ...ready(h), input: { at: { session: 0, card: 0 }, images: [shot] } });
+    assert.equal(h.requests[0]!.prompt.text, `/a x\n\n${IMAGES_NOTE}`);
+    assert.equal(h.requests[1]!.prompt.text, "/b");
+
+    const last = harness([done(1), done(2)]);
+    await runChain(two, { ...ready(last), input: { at: { session: 1, card: 0 }, images: [shot] } });
+    assert.deepEqual(last.requests[1]!.prompt, said("/b", [shot]));
+  });
+
+  it("retries a turn that never reached the session with its images once, the user's message in front", async () => {
+    const one: Chain = { id: "c", name: "C", sessions: [{ cards: [card("a")] }] };
+    const h = harness([{ ok: false, error: "spawn failed" }, done(1)], undefined, [(t) => void t.send(said("try again", [extra]))]);
+    await runChain(one, { ...ready(h), input: { at: { session: 0, card: 0 }, images: [shot] } });
+    assert.deepEqual(h.requests[0]!.prompt, said("/a", [shot]));
+    assert.deepEqual(h.requests[1]!.prompt, said("try again\n\n/a", [extra, shot]));
+  });
+
+  it("puts queued images in front of the card's prompt, and the chat's images into a turn of it", async () => {
+    const one: Chain = { id: "c", name: "C", sessions: [{ cards: [{ ...card("a"), pause: true }] }] };
+    const h = harness([(t) => (t.send(said("", [extra])), reply("which one?", 1)), reply("that one?", 2), reply("ok", 3)], undefined, [(t) => void t.send(said("this one", [shot]))]);
+    await runChain(one, ready(h));
+    assert.deepEqual(h.requests.map((r) => r.prompt), [said("/a"), said("", [extra]), said("this one", [shot])]);
+    const queued = harness([(t) => (t.send(said("look", [extra])), done(1)), done(2)]);
+    await runChain({ id: "c", name: "C", sessions: [{ cards: [card("a"), card("b")] }] }, ready(queued));
+    assert.deepEqual(queued.requests[1]!.prompt, said("look\n\n/b", [extra]));
+  });
+
+  it("sends a card's own images with its first turn on every run, in front of the input's", async () => {
+    const saved: ImageRef = { id: "c".repeat(64), name: "mockup.png", bytes: 10, mediaType: "image/png" };
+    const one: Chain = { id: "c", name: "C", sessions: [{ cards: [{ ...card("a", "{{idea}}"), images: [saved] }, card("b")] }] };
+    const h = harness([done(1), done(2)]);
+    await runChain(one, { ...ready(h), input: { at: { session: 0, card: 0 }, images: [shot] } });
+    assert.deepEqual(h.requests.map((r) => r.prompt.images), [[saved, shot], []]);
+  });
+
+  it("sends no input images when a stopped run is continued at that card", async () => {
+    const one: Chain = { id: "c", name: "C", sessions: [{ cards: [card("a")] }] };
+    const h = harness([done(1)]);
+    await runChain(one, { ...ready(h), input: { at: { session: 0, card: 0 }, images: [shot] } }, { at: { session: 0, card: 0 }, resume: "sess-1", prompt: "Carry on." });
+    assert.deepEqual(h.requests[0]!.prompt, said("Carry on."));
+  });
+  it("sends a continued card's own images again with its prompt when that prompt never reached a session, not the input's", async () => {
+    const saved: ImageRef = { id: "c".repeat(64), name: "mockup.png", bytes: 10, mediaType: "image/png" };
+    const one: Chain = { id: "c", name: "C", sessions: [{ cards: [card("a"), { ...card("b", "{{idea}}"), images: [saved] }] }] };
+    const input = { at: { session: 0, card: 1 }, images: [shot] };
+    const unreached = harness([done(1)]);
+    await runChain(one, { ...ready(unreached), input }, { at: { session: 0, card: 1 }, resume: "sess-1", prompt: "/b", unreached: true });
+    assert.deepEqual(unreached.requests[0]!.prompt, said("/b", [saved]));
+    const reached = harness([done(1)]);
+    await runChain(one, { ...ready(reached), input }, { at: { session: 0, card: 1 }, resume: "sess-1", prompt: "Carry on." });
+    assert.deepEqual(reached.requests[0]!.prompt, said("Carry on."), "a card that reached its session has its images there already");
+    const plainCard: Chain = { ...one, sessions: [{ cards: [card("a"), card("b")] }] };
+    const without = harness([done(1)]);
+    await runChain(plainCard, ready(without), { at: { session: 0, card: 1 }, resume: "sess-1", prompt: "/b", unreached: true });
+    assert.deepEqual(without.requests[0]!.prompt, said("/b"));
+  });
+
+  it("sends the chat's images after the run with its turn", async () => {
+    const requests: AfterAsk[] = [];
+    const talk = new Talk({ changed: () => undefined, delivered: () => undefined, answered: () => undefined });
+    const abort = new AbortController();
+    talk.at({ card: "Kickoff", index: 0, session: 0, attended: true });
+    const run = talkOn({ runTurn: async (r) => (requests.push(r), abort.abort(), reply("ok", 1)), talk, signal: abort.signal, card: "Kickoff", sessionId: "sess-1" });
+    talk.send(said("see this", [shot]));
+    await run;
+    assert.deepEqual(requests[0]!.prompt, said("see this", [shot]));
+  });
+});

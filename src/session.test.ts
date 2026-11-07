@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { CanUseTool, HookInput, ModelInfo, Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { said, type ImageRef } from "./images.ts";
 import { listCommands, REQUIRED_COMMANDS, runTurn, spendOf, type ListQueryFn, type QueryFn, type TaskMessage, type TurnControl } from "./session.ts";
 
 // Fixtures carry only the fields runTurn reads; the full SDK message types are far larger.
@@ -11,7 +12,7 @@ const init = (overrides: object = {}) =>
 const success = (text = "done") => msg({ type: "result", subtype: "success", is_error: false, session_id: "sess-1", result: text });
 
 const canUseTool: CanUseTool = async (_name, input) => ({ behavior: "allow", updatedInput: input });
-const base = { prompt: "go", cwd: "/repo", model: "model-a", env: { PATH: "/bin" }, canUseTool, requiredCommands: REQUIRED_COMMANDS };
+const base = { prompt: said("go"), cwd: "/repo", model: "model-a", env: { PATH: "/bin" }, canUseTool, requiredCommands: REQUIRED_COMMANDS };
 const pushCall = { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: ["git", "push"].join(" ") } } as unknown as HookInput;
 const decision = (out: object) => (out as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision;
 
@@ -87,7 +88,7 @@ describe("runTurn", () => {
       const stream = prompt![Symbol.asyncIterator]();
       await stream.next();
       const next = stream.next();
-      assert.equal(control.inject(text), true);
+      assert.equal(control.inject(said(text)), true);
       return (await next).value as SDKUserMessage;
     };
 
@@ -112,7 +113,7 @@ describe("runTurn", () => {
       assert.equal(injected!.message.content, "use the helper");
       assert.equal(injected!.priority, "now");
       assert.match(injected!.uuid!, /^[0-9a-f-]{36}$/);
-      assert.equal(control!.inject("too late"), false, "the turn has ended");
+      assert.equal(control!.inject(said("too late")), false, "the turn has ended");
       assert.deepEqual(await texts(seen.prompt), [], "the stream is closed");
     });
 
@@ -120,9 +121,9 @@ describe("runTurn", () => {
       let control: TurnControl | undefined;
       const refused: boolean[] = [];
       const { query } = fakeQuery(async function* () {
-        refused.push(control!.inject("early"));
+        refused.push(control!.inject(said("early")));
         yield init({ capabilities: ["interrupt_receipt_v1"] });
-        refused.push(control!.inject("unreported"));
+        refused.push(control!.inject(said("unreported")));
         yield success();
       });
       assert.equal((await runTurn({ ...base, query, onStarted: (c) => (control = c) })).ok, true);
@@ -134,7 +135,7 @@ describe("runTurn", () => {
       const { query, seen } = fakeQuery(async function* () {
         yield reporting();
         const first = await injectInto(seen.prompt, control!, "one");
-        assert.equal(control!.inject("two"), true);
+        assert.equal(control!.inject(said("two")), true);
         const second = (await seen.prompt![Symbol.asyncIterator]().next()).value as SDKUserMessage;
         yield success("");
         yield lifecycle(first.uuid, "started");
@@ -182,7 +183,7 @@ describe("runTurn", () => {
         ok: false,
         sessionId: "sess-1",
         error: "the session ended with error_during_execution.",
-        undelivered: ["more"],
+        undelivered: [said("more")],
       });
     });
 
@@ -192,11 +193,11 @@ describe("runTurn", () => {
         yield reporting();
         const started = await injectInto(seen.prompt, control!, "ran");
         yield lifecycle(started.uuid, "started");
-        assert.equal(control!.inject("waiting"), true);
+        assert.equal(control!.inject(said("waiting")), true);
         throw new Error("aborted by user");
       });
       const result = await runTurn({ ...base, query, onStarted: (c) => (control = c) });
-      assert.deepEqual(!result.ok && result.undelivered, ["waiting"]);
+      assert.deepEqual(!result.ok && result.undelivered, [said("waiting")]);
     });
   });
 
@@ -404,6 +405,72 @@ describe("runTurn", () => {
     assert.equal(aborted, true);
   });
 
+  describe("attached images", () => {
+    const shot: ImageRef = { id: "i1", name: "shot.png", bytes: 12, mediaType: "image/png" };
+    const photo: ImageRef = { id: "i2", name: "photo.jpg", bytes: 9, mediaType: "image/jpeg" };
+    const held: Record<string, string> = { i1: "iVBORw0KGgo=", i2: "/9j/4AAQ" };
+    const imageData = (id: string) => held[id];
+    const contents = async (prompt: AsyncIterable<SDKUserMessage> | undefined) => {
+      const sent: unknown[] = [];
+      for await (const m of prompt!) sent.push(m.message.content);
+      return sent;
+    };
+
+    it("sends the text first, then each image as a base64 block of the type its bytes said", async () => {
+      const { query, seen } = fakeQuery(async function* () {
+        yield init();
+        yield success();
+      });
+      assert.equal((await runTurn({ ...base, prompt: said("/m-skills:debugging-architect see the screenshot", [shot, photo]), imageData, query })).ok, true);
+      assert.deepEqual(await contents(seen.prompt), [
+        [
+          { type: "text", text: "/m-skills:debugging-architect see the screenshot" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "/9j/4AAQ" } },
+        ],
+      ]);
+    });
+
+    it("sends an image with no text as the image alone", async () => {
+      const { query, seen } = fakeQuery(async function* () {
+        yield init();
+        yield success();
+      });
+      await runTurn({ ...base, prompt: said("", [shot]), imageData, query });
+      assert.deepEqual(await contents(seen.prompt), [[{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } }]]);
+    });
+
+    it("fails without starting a session when an image is no longer held, rather than send the message without it", async () => {
+      let called = false;
+      const query: QueryFn = () => {
+        called = true;
+        throw new Error("not reached");
+      };
+      const result = await runTurn({ ...base, prompt: said("look", [shot, { ...photo, id: "gone" }]), imageData, query });
+      assert.deepEqual(result, { ok: false, error: "an attached image is no longer held, so the message was not sent. Attach it again." });
+      assert.deepEqual(await runTurn({ ...base, prompt: said("look", [shot]), query }), result, "no source for the images at all");
+      assert.equal(called, false);
+    });
+
+    it("injects a message with images into the running turn, and gives it back with them when the turn never started it", async () => {
+      let control: TurnControl | undefined;
+      let injected: SDKUserMessage | undefined;
+      const { query, seen } = fakeQuery(async function* () {
+        yield init({ capabilities: ["msg_lifecycle_v1"] });
+        const stream = seen.prompt![Symbol.asyncIterator]();
+        await stream.next();
+        const next = stream.next();
+        assert.equal(control!.inject(said("and this", [photo])), true);
+        assert.equal(control!.inject(said("missing", [{ ...shot, id: "gone" }])), false, "an image not held is not injected");
+        injected = (await next).value as SDKUserMessage;
+        yield msg({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "sess-1" });
+      });
+      const result = await runTurn({ ...base, imageData, query, onStarted: (c) => (control = c) });
+      assert.deepEqual(injected!.message.content, [{ type: "text", text: "and this" }, { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "/9j/4AAQ" } }]);
+      assert.deepEqual(!result.ok && result.undelivered, [said("and this", [photo])]);
+    });
+  });
+
   describe("what the session has spent", () => {
     const used = (input: number, output = 1, cacheRead = 0, cacheWrite = 0) => ({ inputTokens: input, outputTokens: output, cacheReadInputTokens: cacheRead, cacheCreationInputTokens: cacheWrite });
     const paid = (cost: number, modelUsage: object) => ({ total_cost_usd: cost, modelUsage });
@@ -424,7 +491,7 @@ describe("runTurn", () => {
         const stream = seen.prompt![Symbol.asyncIterator]();
         await stream.next();
         const next = stream.next();
-        control!.inject("more");
+        control!.inject(said("more"));
         const injected = (await next).value as SDKUserMessage;
         yield msg({ ...(success("") as object), ...paid(0.1, { "model-a": used(10) }) });
         yield msg({ type: "command_lifecycle", command_uuid: injected.uuid, state: "started" });

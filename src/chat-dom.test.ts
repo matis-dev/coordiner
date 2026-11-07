@@ -29,6 +29,7 @@ async function open(stored?: Record<string, unknown>) {
     window: w,
     document: w.document,
     Node: w.Node,
+    FileReader: w.FileReader,
     requestAnimationFrame: (callback: () => void) => callback(),
     acquireVsCodeApi: () => ({ postMessage: (m: Posted) => posted.push(m), getState: () => saved, setState: (s: unknown) => (saved = s) }),
   });
@@ -58,6 +59,7 @@ async function open(stored?: Record<string, unknown>) {
     reset: (chat: ChatView, entries: Entry[] = []) => post({ type: "chat", chat, entries }),
     update: (chat: ChatView) => post({ type: "chatUpdate", chat }),
     append: (entries: Entry[]) => post({ type: "chatAppend", entries }),
+    message: (data: object) => post(data),
     state: (patch: Partial<EditorState> = {}) => post({ type: "state", templates: TEMPLATES, chains: [], running: true, ...patch }),
   };
 }
@@ -88,10 +90,10 @@ describe("run chat: before and during a run", () => {
     const shown = (selector: string) =>
       [...page.doc.querySelectorAll<HTMLElement>(`#chat .composer .toolbar ${selector}`)].filter((b) => !b.hidden).map((b) => b.textContent);
     page.update(view({ phase: "waiting", card: "Brainstorm", attended: true, nextCard: "Plan", continueReady: true }));
-    assert.deepEqual(shown("button"), ["Pause after this turn", "Stop run", "Continue to Plan", "Send"]);
+    assert.deepEqual(shown("button"), ["Attach images…", "Pause after this turn", "Stop run", "Continue to Plan", "Send"]);
     assert.deepEqual(shown(".primary button"), ["Continue to Plan", "Send"]);
     page.update(view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "stopped" } }));
-    assert.deepEqual(shown("button"), ["Copy resume command", "Start the next chain here", "End chat", "Send"]);
+    assert.deepEqual(shown("button"), ["Attach images…", "Copy resume command", "Start the next chain here", "End chat", "Send"]);
     assert.deepEqual(shown(".primary button"), ["Send"]);
   });
 
@@ -202,11 +204,11 @@ describe("run chat: sending", () => {
     input.focus();
     input.value = "use the helper";
     input.dispatchEvent(new page.w.KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
-    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "use the helper" });
+    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "use the helper", images: [] });
     assert.equal(input.value, "");
     input.value = "and test it";
     page.button("Send").click();
-    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "and test it" });
+    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "and test it", images: [] });
     assert.equal(page.doc.activeElement, input);
   });
 
@@ -225,9 +227,9 @@ describe("run chat: sending", () => {
     const input = page.input();
     input.value = "   ";
     page.button("Send").click();
-    assert.equal(page.doc.getElementById("chat-error")!.textContent, "Write a message first.");
+    assert.equal(page.doc.getElementById("chat-error")!.textContent, "Write a message or attach an image first.");
     assert.equal(input.getAttribute("aria-invalid"), "true");
-    assert.equal(page.status(), "Write a message first.");
+    assert.equal(page.status(), "Write a message or attach an image first.");
     input.value = "x".repeat(MAX_INPUT_CHARS + 1);
     page.button("Send").click();
     assert.match(page.doc.getElementById("chat-error")!.textContent!, /Keep it under/);
@@ -240,7 +242,7 @@ describe("run chat: sending", () => {
 
   it("lists queued messages with where they go, and withdraws one", async () => {
     const page = await open();
-    page.reset(view({ nextSession: "Review", queued: [{ id: "m1", text: "check the docs" }, { id: "m2", text: "and the tests" }] }));
+    page.reset(view({ nextSession: "Review", queued: [{ id: "m1", text: "check the docs", images: [] }, { id: "m2", text: "and the tests", images: [] }] }));
     const items = [...page.doc.querySelectorAll(".queued li")];
     assert.equal(items.length, 2);
     assert.match(items[0]!.textContent!, /Queued for the next turn of Implement, or Review in a fresh context if Implement finishes/);
@@ -252,20 +254,20 @@ describe("run chat: sending", () => {
   it("announces a newly queued message", async () => {
     const page = await open();
     page.reset(view());
-    page.update(view({ queued: [{ id: "m1", text: "x" }] }));
+    page.update(view({ queued: [{ id: "m1", text: "x", images: [] }] }));
     assert.equal(page.status(), "Message queued for the next turn of Implement");
   });
 
   it("puts a message the run did not send back in the box, before what is being typed", async () => {
     const page = await open();
     page.reset(view());
-    page.update(view({ phase: "ended", returned: "check the docs" }));
+    page.update(view({ phase: "ended", returned: { text: "check the docs", images: [] } }));
     assert.equal(page.input().value, "check the docs");
     assert.match(page.status()!, /back in the message box/);
     const again = await open();
     again.reset(view());
     again.input().value = "draft";
-    again.update(view({ phase: "ended", returned: "check the docs" }));
+    again.update(view({ phase: "ended", returned: { text: "check the docs", images: [] } }));
     assert.equal(again.input().value, "check the docs\n\ndraft");
   });
 });
@@ -355,7 +357,7 @@ describe("run chat: after the run", () => {
     page.reset(after());
     page.input().value = "why that tier?";
     page.button("Send").click();
-    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "why that tier?" });
+    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "why that tier?", images: [] });
     page.button("End chat").click();
     assert.deepEqual(page.posted.at(-1), { type: "chatStop" });
   });
@@ -1186,5 +1188,279 @@ describe("run chat: a question with a time limit", () => {
     page.append([{ kind: "decided", card: "Plan", question: "Which store?", answer: "SQLite (Recommended)", after: "after 5 minutes" }]);
     assert.deepEqual([...page.entries()[0]!.children].map((c) => c.textContent), ["Recommended answer taken for Plan, after 5 minutes", "Which store? → SQLite (Recommended)"]);
     assert.equal(page.status(), "Plan took the recommended answer");
+  });
+});
+
+describe("run chat: images", () => {
+  const shot = { id: "i1", name: "shot.png", bytes: 12, mediaType: "image/png" as const };
+  const photo = { id: "i2", name: "photo.jpg", bytes: 2048, mediaType: "image/jpeg" as const };
+  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+  // FileReader answers on a later task; this waits for what it leads to, a bounded number of turns.
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 200 && !done(); i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(done(), "never happened");
+  };
+  const chips = (page: Awaited<ReturnType<typeof open>>) => [...page.doc.querySelectorAll<HTMLElement>("#chat .attachments li")].map((li) => li.textContent);
+
+  it("sends a pasted image to the extension to check and hold, and leaves the pasted text to the box", async () => {
+    const page = await running();
+    const paste = new page.w.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { files: [new page.w.File([new Uint8Array(PNG)], "shot.png", { type: "image/png" })] } });
+    page.input().dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, false);
+    await until(() => page.posted.some((m) => m.type === "attachImage"));
+    assert.deepEqual(page.posted.at(-1), { type: "attachImage", name: "shot.png", data: Buffer.from(PNG).toString("base64") });
+  });
+
+  it("attaches files dropped on the composer, and asks the extension's picker from Attach images", async () => {
+    const page = await running();
+    const drop = new page.w.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["Files"], files: [new page.w.File([new Uint8Array(PNG)], "drop.png")] } });
+    page.doc.querySelector("#chat .composer")!.dispatchEvent(drop);
+    assert.equal(drop.defaultPrevented, true);
+    await until(() => page.posted.some((m) => m.type === "attachImage"));
+    page.button("Attach images…").click();
+    assert.deepEqual(page.posted.at(-1), { type: "pickImages" });
+  });
+
+  it("ignores a paste with no clipboard data and a drop with no files, leaving the drop to VS Code", async () => {
+    const page = await running();
+    page.input().dispatchEvent(new page.w.Event("paste", { bubbles: true }));
+    const drop = new page.w.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["text/plain"], files: [] } });
+    page.doc.querySelector("#chat .composer")!.dispatchEvent(drop);
+    assert.equal(drop.defaultPrevented, false);
+    assert.equal(page.posted.some((m) => m.type === "attachImage"), false);
+    assert.equal(page.doc.getElementById("chat-error")!.textContent, "");
+  });
+
+  it("takes a drag of files over the composer from VS Code, and leaves other drags alone", async () => {
+    const page = await running();
+    const composer = page.doc.querySelector("#chat .composer")!;
+    const over = (types: string[]) => {
+      const event = new page.w.Event("dragover", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: { types, files: [] } });
+      composer.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    assert.equal(over(["Files"]), true);
+    assert.equal(over(["text/plain"]), false);
+  });
+
+  it("holds Send while an image is still being read, then sends once it is in", async () => {
+    const page = await running();
+    page.input().value = "see this";
+    const paste = new page.w.Event("paste", { bubbles: true });
+    Object.defineProperty(paste, "clipboardData", { value: { files: [new page.w.File([new Uint8Array(PNG)], "shot.png")] } });
+    page.input().dispatchEvent(paste);
+    page.button("Send").click();
+    assert.equal(page.doc.getElementById("chat-error")!.textContent, "An image is still being read. Send again in a moment.");
+    assert.equal(page.posted.some((m) => m.type === "chatSend"), false);
+    await until(() => page.posted.some((m) => m.type === "attachImage"));
+    page.button("Send").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "see this", images: [] });
+  });
+
+  it("says when a file cannot be read, and no longer waits for it", async () => {
+    const page = await running();
+    (globalThis as Record<string, unknown>).FileReader = class {
+      onerror = () => undefined;
+      readAsDataURL() {
+        setImmediate(() => this.onerror());
+      }
+    };
+    const paste = new page.w.Event("paste", { bubbles: true });
+    Object.defineProperty(paste, "clipboardData", { value: { files: [new page.w.File([new Uint8Array(PNG)], "locked.png")] } });
+    page.input().dispatchEvent(paste);
+    const error = page.doc.getElementById("chat-error")!;
+    await until(() => error.textContent === "locked.png could not be read.");
+    page.input().value = "text instead";
+    page.button("Send").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "text instead", images: [] });
+  });
+
+  it("shows a queued message of images alone as its chips, without Open", async () => {
+    const page = await open();
+    page.reset(view({ queued: [{ id: "m1", text: "", images: [shot] }] }));
+    const item = page.doc.querySelector(".queued li")!;
+    assert.equal(item.querySelector(".text"), null);
+    assert.equal(item.querySelector(".image-name")!.textContent, "shot.png, 12 B");
+    assert.equal(item.querySelector("button[data-image]"), null);
+  });
+
+  it("refuses a file over the size limit on the page, with the reason tied to the box", async () => {
+    const page = await running();
+    const big = new page.w.File([new Uint8Array(1)], "big.png");
+    Object.defineProperty(big, "size", { value: 4_000_000 });
+    const paste = new page.w.Event("paste", { bubbles: true });
+    Object.defineProperty(paste, "clipboardData", { value: { files: [big] } });
+    page.input().dispatchEvent(paste);
+    assert.equal(page.doc.getElementById("chat-error")!.textContent, "big.png is larger than 3.8 MB.");
+    assert.equal(page.posted.some((m) => m.type === "attachImage"), false);
+  });
+
+  it("shows each held image as a chip with its Remove, says so, and sends their ids with the text", async () => {
+    const page = await running();
+    page.message({ type: "attached", image: shot });
+    assert.equal(page.status(), "Attached shot.png, 12 B");
+    page.message({ type: "attached", image: photo });
+    assert.deepEqual(chips(page), ["shot.png, 12 BRemove", "photo.jpg, 2 KBRemove"]);
+    page.input().value = "see these";
+    page.button("Send").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "see these", images: ["i1", "i2"] });
+    assert.deepEqual(chips(page), []);
+    assert.equal(page.doc.querySelector<HTMLElement>("#chat .attachments")!.hidden, true);
+  });
+
+  it("sends images with no text", async () => {
+    const page = await running();
+    page.message({ type: "attached", image: shot });
+    page.button("Send").click();
+    assert.deepEqual(page.posted.at(-1), { type: "chatSend", text: "", images: ["i1"] });
+  });
+
+  it("removes a chip with its Remove: the extension lets the image go, focus moves on, and it is said", async () => {
+    const page = await running();
+    page.message({ type: "attached", image: shot });
+    page.message({ type: "attached", image: photo });
+    page.button("Remove shot.png").click();
+    assert.deepEqual(page.posted.at(-1), { type: "detachImage", id: "i1" });
+    assert.equal(page.doc.activeElement, page.button("Remove photo.jpg"));
+    assert.equal(page.status(), "Removed shot.png");
+    page.button("Remove photo.jpg").click();
+    assert.equal(page.doc.activeElement, page.input());
+  });
+
+  it("says why an image was refused", async () => {
+    const page = await running();
+    page.message({ type: "imageProblem", reason: "x.svg is not a PNG, JPEG, GIF or WebP image." });
+    assert.equal(page.doc.getElementById("chat-error")!.textContent, "x.svg is not a PNG, JPEG, GIF or WebP image.");
+    assert.equal(page.status(), "x.svg is not a PNG, JPEG, GIF or WebP image.");
+  });
+
+  it("shows a message's images in the transcript, with Open while the chat holds them, and takes Open away once let go", async () => {
+    const page = await running();
+    page.append([{ kind: "you", card: "Implement", text: "", images: [shot] }, { kind: "you", card: "Implement", text: "old", images: [{ name: "old.png", bytes: 5, mediaType: "image/png" }] }]);
+    const [held, reopened] = page.entries();
+    assert.equal(held!.querySelector(".image-name")!.textContent, "shot.png, 12 B");
+    assert.equal(held!.querySelector(".copy"), null, "no text to copy");
+    page.button("Open shot.png").click();
+    assert.deepEqual(page.posted.at(-1), { type: "openImage", id: "i1" });
+    assert.equal(reopened!.querySelector("button[data-image]"), null);
+    page.message({ type: "detached", ids: ["i1"] });
+    assert.equal(held!.querySelector("button[data-image]"), null);
+  });
+
+  it("names the one image the extension let go", async () => {
+    const page = await running();
+    page.message({ type: "attached", image: shot });
+    page.message({ type: "attached", image: photo });
+    page.message({ type: "detached", ids: ["i1"] });
+    assert.deepEqual(chips(page), ["photo.jpg, 2 KBRemove"]);
+    assert.equal(page.status(), "Removed shot.png");
+  });
+
+  it("takes away the chips of images the extension let go, and says so", async () => {
+    const page = await running();
+    page.message({ type: "attached", image: shot });
+    page.message({ type: "attached", image: photo });
+    page.message({ type: "detached", ids: ["i1", "i2"] });
+    assert.deepEqual(chips(page), []);
+    assert.equal(page.status(), "Removed 2 images");
+  });
+
+  it("puts a returned message's images back with its text", async () => {
+    const page = await running();
+    page.update(view({ phase: "ended", returned: { text: "check this", images: [shot] } }));
+    assert.equal(page.input().value, "check this");
+    assert.deepEqual(chips(page), ["shot.png, 12 BRemove"]);
+  });
+});
+
+describe("run chat: Run's input in the composer", () => {
+  const shot = { id: "i1", name: "shot.png", bytes: 12, mediaType: "image/png" as const };
+  const chips = (page: Awaited<ReturnType<typeof open>>) => [...page.doc.querySelectorAll<HTMLElement>("#chat .attachments li")].map((li) => li.textContent);
+
+  it("unfolds the chat before any run, names the box after the input, asks its question, and takes focus", async () => {
+    const page = await open();
+    page.message({ type: "compose", title: "Describe the bug", ask: "What happened, what did you expect, and how do you trigger it?" });
+    assert.equal(page.doc.querySelector<HTMLElement>("#chat .composer")!.hidden, false);
+    assert.equal(page.doc.querySelector("label[for=chat-input]")!.textContent, "Describe the bug");
+    assert.equal(page.input().placeholder, "What happened, what did you expect, and how do you trigger it?");
+    assert.equal(page.doc.activeElement, page.input());
+    const shown = [...page.doc.querySelectorAll<HTMLElement>("#chat .composer .toolbar button")].filter((b) => !b.hidden).map((b) => b.textContent);
+    assert.deepEqual(shown, ["Attach images…", "Cancel", "Start"]);
+  });
+
+  it("shows the chat again when Run asks for its input while it is hidden", async () => {
+    const page = await running();
+    page.button("Hide chat").click();
+    assert.equal(page.doc.getElementById("chat-body")!.hidden, true);
+    page.message({ type: "compose", title: "Describe the bug", ask: "What happened?" });
+    assert.equal(page.doc.getElementById("chat-body")!.hidden, false);
+    assert.equal(page.doc.activeElement, page.input());
+  });
+
+  it("starts with the text and images, keeps them until the extension takes them, then puts the box back", async () => {
+    const page = await open();
+    page.message({ type: "compose", title: "Describe the bug", ask: "What happened?" });
+    page.message({ type: "attached", image: shot });
+    page.input().value = "the login button does nothing";
+    page.button("Start").click();
+    assert.deepEqual(page.posted.at(-1), { type: "composeDone", text: "the login button does nothing", images: ["i1"] });
+    assert.equal(page.input().value, "the login button does nothing");
+    page.message({ type: "composeEnd" });
+    assert.equal(page.input().value, "");
+    assert.deepEqual(chips(page), []);
+    assert.equal(page.input().placeholder, "");
+    assert.equal(page.doc.querySelector<HTMLElement>("#chat .composer")!.hidden, true, "folded again until the run starts");
+  });
+
+  it("starts with an image alone, and refuses neither text nor images", async () => {
+    const page = await open();
+    page.message({ type: "compose", title: "Describe the bug", ask: "What happened?" });
+    page.button("Start").click();
+    assert.equal(page.posted.some((m) => m.type === "composeDone"), false);
+    assert.equal(page.doc.getElementById("chat-error")!.textContent, "Write a message or attach an image first.");
+    page.message({ type: "attached", image: shot });
+    page.button("Start").click();
+    assert.deepEqual(page.posted.at(-1), { type: "composeDone", text: "", images: ["i1"] });
+  });
+
+  it("cancels with Cancel or Escape, letting go of the images attached for it", async () => {
+    const page = await open();
+    page.message({ type: "compose", title: "Describe the idea", ask: "What do you want to build?" });
+    page.message({ type: "attached", image: shot });
+    page.button("Cancel").click();
+    assert.deepEqual(page.posted.slice(-2), [{ type: "detachImage", id: "i1" }, { type: "composeCancel" }]);
+    page.input().dispatchEvent(new page.w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.deepEqual(page.posted.at(-1), { type: "composeCancel" });
+  });
+
+  it("sets aside a message being written to the chat while Run asks for its input, and puts it back when that ends", async () => {
+    const page = await running();
+    const own = { id: "i2", name: "own.png", bytes: 12, mediaType: "image/png" as const };
+    const kept = { id: "i3", name: "kept.png", bytes: 12, mediaType: "image/png" as const };
+    page.message({ type: "attached", image: own });
+    page.message({ type: "attached", image: kept });
+    page.input().value = "a reply to the last card";
+    page.message({ type: "compose", title: "Describe the idea", ask: "What do you want to build?" });
+    assert.equal(page.input().value, "");
+    assert.deepEqual(chips(page), []);
+    page.message({ type: "attached", image: shot });
+    page.message({ type: "detached", ids: ["i2"] });
+    page.message({ type: "compose", title: "Describe the idea", ask: "What do you want to build?" });
+    assert.deepEqual(chips(page), ["shot.png, 12 BRemove"], "asked again while asking: the composer keeps what it has");
+    page.button("Cancel").click();
+    assert.deepEqual(page.posted.slice(-2), [{ type: "detachImage", id: "i1" }, { type: "composeCancel" }], "only the input's own images go");
+    page.message({ type: "composeEnd" });
+    assert.equal(page.input().value, "a reply to the last card");
+    assert.deepEqual(chips(page), ["kept.png, 12 BRemove"], "an image let go meanwhile does not come back");
+  });
+
+  it("does not cancel on Escape when the box is a message box", async () => {
+    const page = await running();
+    page.input().dispatchEvent(new page.w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.equal(page.posted.some((m) => m.type === "composeCancel"), false);
   });
 });

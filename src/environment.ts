@@ -1,6 +1,7 @@
 import { delimiter, join } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { MSKILLS_URL } from "./chains.ts";
+import { said } from "./images.ts";
 import type { TurnRequest, TurnResult } from "./session.ts";
 import { mskillsPresent, type ModelOption } from "./skills.ts";
 
@@ -68,7 +69,7 @@ export async function checkEnvironment(deps: CheckDeps): Promise<CheckResult[]> 
 
 async function sessionChecks(deps: CheckDeps, claudePath: string): Promise<CheckResult[]> {
   const { cwd, env, canUseTool } = deps;
-  const turn = (request: Partial<TurnRequest>) => deps.runTurn({ prompt: PING, cwd, env, claudePath, canUseTool, maxTurns: 1, requiredCommands: [], ...request });
+  const turn = (request: Partial<TurnRequest>) => deps.runTurn({ prompt: said(PING), cwd, env, claudePath, canUseTool, maxTurns: 1, requiredCommands: [], ...request });
 
   // No model asked for: the session runs its own default, as a card left on Default does when the models cannot be listed.
   const first = await turn({});

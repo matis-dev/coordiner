@@ -3,6 +3,7 @@ import type { JournaledEntry, LastTurn } from "./journal.ts";
 import type { Spend } from "./session.ts";
 import type { Suggestion } from "./protocol.ts";
 import { continueAfter, fillInput, pickUpAfter, restateAfter, type At, type Outcome, type StartPoint, type StepStatus } from "./run.ts";
+import { isImageType, MAX_IMAGE_BYTES, MAX_IMAGE_NAME, MAX_IMAGES, type ImageMeta } from "./images.ts";
 import { clip, plain } from "./text.ts";
 import { DEFAULT_MODEL, endEntry, MAX_TOOL_INPUT, Transcript, type Entry, type Worked } from "./transcript.ts";
 import type { Ending } from "./editor-protocol.ts";
@@ -36,6 +37,8 @@ export type PastRun = {
   // The chain as picked and its input; none in a journal from before runs could be continued.
   definition?: Chain;
   input?: string;
+  // How many images came with the input; a continued run does not have them.
+  inputImages?: number;
   // Where Continue picks up: the card a halted or failed run stopped at, else the card the run last started. With the model and
   // effort it last ran on, taken as what the step before it suggested (none when it never started), whether a turn of it reached a
   // session, whether it had given its reply, and the latest session of its chain session.
@@ -59,6 +62,18 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 const str = (v: unknown, max = MAX_TEXT): v is string => typeof v === "string" && v.length <= max;
 const index = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
 const one = <T>(list: readonly T[], v: unknown): v is T => list.includes(v as T);
+
+// What a chip said, rebuilt field by field: an entry that does not fit is dropped, and a list longer than a message holds is dropped
+// whole. Anything else in the record (an id, data) is never read.
+function imagesOf(v: unknown): ImageMeta[] | undefined {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_IMAGES) return undefined;
+  const images = v.flatMap((i): ImageMeta[] =>
+    isRecord(i) && str(i.name, MAX_IMAGE_NAME) && Number.isInteger(i.bytes) && (i.bytes as number) >= 0 && (i.bytes as number) <= MAX_IMAGE_BYTES && isImageType(i.mediaType)
+      ? [{ name: plain(i.name), bytes: i.bytes as number, mediaType: i.mediaType }]
+      : [],
+  );
+  return images.length > 0 ? images : undefined;
+}
 const effortOf = (v: Record<string, unknown>) => (isEffort(v.effort) ? { effort: v.effort } : {});
 const modelOf = (v: Record<string, unknown>) => (str(v.model) && MODEL.test(v.model) ? { model: v.model } : {});
 
@@ -143,7 +158,10 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
         break;
       }
       case "you":
-        if (str(r.card, 1000) && str(r.text)) transcript.add([{ kind: "you", card: plain(r.card), text: plain(r.text) }]);
+        if (str(r.card, 1000) && str(r.text)) {
+          const images = imagesOf(r.images);
+          transcript.add([{ kind: "you", card: plain(r.card), text: plain(r.text), ...(images ? { images } : {}) }]);
+        }
         break;
       case "answer":
         if (str(r.card, 1000) && str(r.question) && str(r.answer)) transcript.add([{ kind: "answer", card: plain(r.card), question: plain(r.question), answer: plain(r.answer) }]);
@@ -196,6 +214,7 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
     finished: isStarted && steps.at(-1)!.status === "done",
     ...(resume ? { resume } : {}),
   };
+  const inputImages = imagesOf(start.inputImages);
   return {
     file,
     chain: plain(chain),
@@ -213,6 +232,7 @@ export function parseJournal(text: string, file: string): PastRun | undefined {
     userOnly,
     ...(chat ? { chat: true as const } : {}),
     ...(definition ? { definition, input } : {}),
+    ...(inputImages ? { inputImages: inputImages.length } : {}),
     ...(lastCard ? { lastCard } : {}),
   };
 }
@@ -234,7 +254,7 @@ export function continuePoint(run: PastRun): Continuation | undefined {
   if (!card) return { chain: filled.chain, from: { at: lastCard.at, prompt: "" }, card: `Session ${lastCard.at.session + 1}`, reason };
   const retry = outcome?.status === "halted" || outcome?.status === "failed" ? continueAfter(reason) : pickUpAfter(reason);
   const prompt = !lastCard.reached ? cardPrompt(card) : lastCard.finished ? restateAfter(reason) : retry;
-  return { chain: filled.chain, from: { at: lastCard.at, ...(lastCard.suggestion ? { suggestion: lastCard.suggestion } : {}), ...(lastCard.resume ? { resume: lastCard.resume } : {}), prompt }, card: card.label, reason };
+  return { chain: filled.chain, from: { at: lastCard.at, ...(lastCard.suggestion ? { suggestion: lastCard.suggestion } : {}), ...(lastCard.resume ? { resume: lastCard.resume } : {}), prompt, ...(!lastCard.reached ? { unreached: true as const } : {}) }, card: card.label, reason };
 }
 
 function entryOf(v: unknown): JournaledEntry | undefined {

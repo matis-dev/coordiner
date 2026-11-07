@@ -14,6 +14,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import type { Effort } from "./chains.ts";
 import { guardHook } from "./guard.ts";
+import type { Said } from "./images.ts";
 
 // The m-skills commands the shipped templates use; all present means m-skills is installed.
 export const REQUIRED_COMMANDS = [
@@ -28,7 +29,7 @@ export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options:
 export type TaskMessage = SDKTaskProgressMessage | SDKBackgroundTasksChangedMessage;
 // `inject` writes a user message into the running turn: false when the turn cannot take one (its session does not report what
 // becomes of a message, or the turn is ending), and the caller keeps the message for the next turn.
-export type TurnControl = { stopTask(taskId: string): Promise<void>; inject(text: string): boolean };
+export type TurnControl = { stopTask(taskId: string): Promise<void>; inject(said: Said): boolean };
 
 // What the session has spent so far, as its latest result reports it: running totals across every model it called, at API prices.
 export type Spend = { costUsd: number; input: number; output: number; cacheRead: number; cacheWrite: number };
@@ -37,10 +38,15 @@ export type Spend = { costUsd: number; input: number; output: number; cacheRead:
 export type TurnResult =
   | { ok: true; sessionId: string; model: string; resultText: string; commands: string[]; usage?: Spend }
   // `undelivered`: messages injected into the turn that it ended before starting, in the order they were sent.
-  | { ok: false; sessionId?: string; error: string; undelivered?: string[]; usage?: Spend };
+  | { ok: false; sessionId?: string; error: string; undelivered?: Said[]; usage?: Spend };
+
+// An attached image's data, by id; none when it is no longer held.
+export type ImageData = (id: string) => string | undefined;
 
 export type TurnRequest = {
-  prompt: string;
+  prompt: Said;
+  // Where the prompt's images come from; a turn whose image is not there fails rather than go without it.
+  imageData?: ImageData;
   cwd: string;
   // Absent: the session's own default model, which is then not checked.
   model?: string;
@@ -84,15 +90,25 @@ export function spendOf(result: Pick<ResultMessage, "total_cost_usd" | "modelUsa
   return Object.values(spend).every(count) ? spend : undefined;
 }
 
-const userMessage = (text: string): SDKUserMessage => ({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null });
+// A message with no images stays plain text; one with images is its text, then each image as a base64 block. Undefined when an
+// image's data is not there.
+function userMessage({ text, images }: Said, imageData: ImageData = () => undefined): SDKUserMessage | undefined {
+  if (images.length === 0) return { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null };
+  const blocks = images.map((image) => {
+    const data = imageData(image.id);
+    return data === undefined ? undefined : ({ type: "image", source: { type: "base64", media_type: image.mediaType, data } } as const);
+  });
+  if (blocks.some((b) => b === undefined)) return undefined;
+  return { type: "user", message: { role: "user", content: [...(text === "" ? [] : [{ type: "text" as const, text }]), ...blocks.map((b) => b!)] }, parent_tool_use_id: null };
+}
 
 // The turn's prompt as a stream: the first message, then whatever is pushed while the turn runs, until it is closed.
-function promptStream(first: string) {
+function promptStream(first: SDKUserMessage) {
   const pending: SDKUserMessage[] = [];
   let closed = false;
   let wake = () => {};
   async function* messages(): AsyncGenerator<SDKUserMessage> {
-    yield userMessage(first);
+    yield first;
     for (;;) {
       while (pending.length > 0) yield pending.shift()!;
       if (closed) return;
@@ -176,16 +192,18 @@ export function pluginProblem(init: InitMessage, required: readonly string[]): s
 // One turn = one SDK query. A later turn continues the same conversation through `resume`, optionally on another model. The prompt
 // stream is closed however the turn ends, so it never waits on a session that is gone.
 export function runTurn(request: TurnRequest): Promise<TurnResult> {
-  const input = promptStream(request.prompt);
+  const first = userMessage(request.prompt, request.imageData);
+  if (!first) return Promise.resolve({ ok: false, error: "an attached image is no longer held, so the message was not sent. Attach it again." });
+  const input = promptStream(first);
   return turnOn(input, request).finally(input.close);
 }
 
-async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effort, requiredCommands, canUseTool, env, claudePath, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, onStarted, onTask, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
+async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effort, requiredCommands, canUseTool, env, claudePath, resume, systemPromptAppend, maxTurns, signal, onGuard = () => undefined, onMessage, onStarted, onTask, imageData, query = sdkQuery }: TurnRequest): Promise<TurnResult> {
   const abortController = new AbortController();
   signal?.addEventListener("abort", () => abortController.abort(), { once: true });
   let sessionId: string | undefined;
   // Messages injected and not yet started by the session, by uuid: while one is left, a result may not be the turn's last.
-  const unstarted = new Map<string, string>();
+  const unstarted = new Map<string, Said>();
   // A result is held back only when something accounts for it: the early end each injected message causes, or another command the
   // CLI reported starting. A CLI that stops sending lifecycle frames then ends the turn after the message's own turn, not never.
   let owed = 0;
@@ -216,12 +234,13 @@ async function turnOn(input: ReturnType<typeof promptStream>, { cwd, model, effo
     });
     onStarted?.({
       stopTask: (taskId) => messages.stopTask(taskId),
-      inject: (text) => {
-        if (!injectable || input.closed()) return false;
+      inject: (said) => {
+        const message = userMessage(said, imageData);
+        if (!injectable || input.closed() || !message) return false;
         const uuid = randomUUID();
-        unstarted.set(uuid, text);
+        unstarted.set(uuid, said);
         owed += 1;
-        input.push({ ...userMessage(text), priority: "now", uuid });
+        input.push({ ...message, priority: "now", uuid });
         return true;
       },
     });

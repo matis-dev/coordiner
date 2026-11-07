@@ -1,6 +1,7 @@
 import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { MAX_ENTRIES } from "./chat-logic.ts";
 import type { Effort } from "./chains.ts";
+import type { ImageChip } from "./images.ts";
 import type { Outcome, StepStatus } from "./run.ts";
 import type { Spend } from "./session.ts";
 import { clip, plain } from "./text.ts";
@@ -15,7 +16,8 @@ export type Worked = { ms: number; turns: number; usage?: Spend; partial?: boole
 export type Entry =
   | { kind: "assistant"; card: string; text: string }
   | { kind: "tool"; card: string; name: string; input: string }
-  | { kind: "you"; card: string; text: string }
+  // `images`: each attached image's chip; `id` only while the chat still holds the image, so Open can show it.
+  | { kind: "you"; card: string; text: string; images?: ImageChip[] }
   | { kind: "answer"; card: string; question: string; answer: string }
   // A question answered with its Recommended option without the user.
   | { kind: "decided"; card: string; question: string; answer: string; after: DecidedAfter }

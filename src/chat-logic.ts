@@ -1,4 +1,5 @@
 import { MAX_INPUT_CHARS } from "./chains.ts";
+import { MAX_IMAGE_BYTES, MAX_IMAGES, sizeLabel, type ImageChip } from "./images.ts";
 import type { ChatView, Ending } from "./editor-protocol.ts";
 import type { Entry, Worked } from "./transcript.ts";
 import type { Question } from "./unattended.ts";
@@ -569,6 +570,27 @@ export const canGoOnAlone = (chat: ChatView): boolean => (chat.question ? chat.q
 export const canMerge = (chat: ChatView): boolean => Boolean(chat.afterRun) && chat.ending?.status === "done";
 
 export const canSend = (chat: ChatView): boolean => chat.phase === "running" || chat.phase === "waiting";
+// Why the composer's text and images cannot be sent as they are; undefined when they can.
+export function sendProblem(text: string, images: number): string | undefined {
+  if (text.trim() === "" && images === 0) return "Write a message or attach an image first.";
+  if (text.length > MAX_INPUT_CHARS) return `Keep it under ${MAX_INPUT_CHARS} characters.`;
+  return undefined;
+}
+
+// Why a file cannot be attached next to the `pending` images already there, checked on the page for a quick answer; the extension
+// checks the image itself again.
+export function attachProblem(name: string, size: number, pending: number): string | undefined {
+  if (pending >= MAX_IMAGES) return `A message takes at most ${MAX_IMAGES} images.`;
+  if (size > MAX_IMAGE_BYTES) return `${name} is larger than ${sizeLabel(MAX_IMAGE_BYTES)}.`;
+  return undefined;
+}
+
+export const imageLabel = (image: ImageChip): string => `${image.name}, ${sizeLabel(image.bytes)}`;
+
+// After the chip at `index` of `count` is removed, focus goes to the chip now in its place, else the one before it, else the
+// message box (-1).
+export const focusAfterRemove = (index: number, count: number): number => (index < count - 1 ? index : index - 1);
+
 export const canPause = (chat: ChatView): boolean => chat.phase === "running" && !chat.attended && !chat.pausePending;
 
 const ENDED: Record<Ending["status"], string> = {

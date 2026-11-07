@@ -1,4 +1,5 @@
 import { MAX_INPUT_CHARS, parseChain, TEMPLATES, type Chain } from "./chains.ts";
+import { CARD_IMAGE_ID, MAX_IMAGE_CHARS, MAX_IMAGE_NAME, MAX_IMAGES, type ImageRef } from "./images.ts";
 import type { CacheClock, Pick, TurnClock } from "./chat-logic.ts";
 import type { Outcome } from "./run.ts";
 import type { ModelOption, PaletteEntry } from "./skills.ts";
@@ -19,7 +20,8 @@ export type EditorMessage =
   | { type: "restoreTemplate"; id: string }
   | { type: "restoreTemplates" }
   // The run's chat
-  | { type: "chatSend"; text: string }
+  // `images`: the ids of images the chat holds (attachImage, pickImages), sent with the text.
+  | { type: "chatSend"; text: string; images: string[] }
   | { type: "chatWithdraw"; id: string }
   | { type: "chatPause" }
   | { type: "chatContinue" }
@@ -30,7 +32,20 @@ export type EditorMessage =
   // After the run: the clipboard text and the worktree are the extension's own, never taken from the page.
   | { type: "chatCopyResume" }
   | { type: "chatNextChain" }
-  | { type: "chatMergeSteps" };
+  | { type: "chatMergeSteps" }
+  // Images, before and during a run: checked and held by the extension, which answers with attached / imageProblem.
+  | { type: "attachImage"; name: string; data: string }
+  | { type: "pickImages" }
+  | { type: "detachImage"; id: string }
+  | { type: "openImage"; id: string }
+  // The input Run asked for in the chat's composer (compose), or its cancelling.
+  | { type: "composeDone"; text: string; images: string[] }
+  | { type: "composeCancel" }
+  // Images that are part of a card's instructions, saved to disk by the extension, which answers with cardImageSaved / cardImageProblem.
+  // `target`: the card, as `<chain id>:<session>:<index>`, said back with the answer.
+  | { type: "cardAttachImage"; target: string; name: string; data: string }
+  | { type: "cardPickImages"; target: string }
+  | { type: "cardOpenImage"; id: string };
 
 export type EditorState = {
   type: "state";
@@ -70,9 +85,22 @@ export type ChatMessage =
   // Everything: on "ready", and when a run starts.
   | { type: "chat"; chat: ChatView; entries: Entry[] }
   | { type: "chatAppend"; entries: Entry[] }
-  | { type: "chatUpdate"; chat: ChatView };
+  | { type: "chatUpdate"; chat: ChatView }
+  // Run asks for its input in the composer: its title, and the question as the box's placeholder. composeEnd puts the box back.
+  | { type: "compose"; title: string; ask: string }
+  | { type: "composeEnd" }
+  | { type: "attached"; image: ImageRef }
+  // An image refused (its check, the chat already full) or no longer held when Open was asked; said aloud.
+  | { type: "imageProblem"; reason: string }
+  // Images the extension let go: their chips go.
+  | { type: "detached"; ids: string[] };
 
 const ID = /^[a-z0-9-]{1,64}$/;
+const CARD_TARGET = /^[a-z0-9-]{1,64}:\d{1,2}:\d{1,2}$/;
+const isTarget = (v: unknown): v is string => typeof v === "string" && CARD_TARGET.test(v);
+
+// The answers to the card image messages, to the chains editor.
+export type CardImageMessage = { type: "cardImageSaved"; target: string; image: ImageRef } | { type: "cardImageProblem"; target: string; reason: string };
 const KEYS: Record<EditorMessage["type"], readonly string[]> = {
   ready: [],
   save: ["chain"],
@@ -84,7 +112,7 @@ const KEYS: Record<EditorMessage["type"], readonly string[]> = {
   removeTemplate: ["id"],
   restoreTemplate: ["id"],
   restoreTemplates: [],
-  chatSend: ["text"],
+  chatSend: ["text", "images"],
   chatWithdraw: ["id"],
   chatPause: [],
   chatContinue: [],
@@ -94,6 +122,15 @@ const KEYS: Record<EditorMessage["type"], readonly string[]> = {
   chatCopyResume: [],
   chatNextChain: [],
   chatMergeSteps: [],
+  attachImage: ["name", "data"],
+  pickImages: [],
+  detachImage: ["id"],
+  openImage: ["id"],
+  composeDone: ["text", "images"],
+  composeCancel: [],
+  cardAttachImage: ["target", "name", "data"],
+  cardPickImages: ["target"],
+  cardOpenImage: ["id"],
 };
 
 const MAX_QUESTIONS = 4;
@@ -112,6 +149,12 @@ function parsePicks(v: unknown): Pick[] | undefined {
     picks.push({ picked: [...picked], ...(other !== undefined ? { other } : {}) });
   }
   return picks;
+}
+
+// At most MAX_IMAGES distinct ids.
+function parseImageIds(v: unknown): string[] | undefined {
+  if (!Array.isArray(v) || v.length > MAX_IMAGES || new Set(v).size !== v.length) return undefined;
+  return v.every((id) => typeof id === "string" && ID.test(id)) ? [...v] : undefined;
 }
 
 export function parseEditorMessage(v: unknown): EditorMessage | undefined {
@@ -133,9 +176,26 @@ export function parseEditorMessage(v: unknown): EditorMessage | undefined {
     case "removeTemplate":
     case "restoreTemplate":
       return typeof m.id === "string" && TEMPLATES.some((t) => t.id === m.id) ? { type, id: m.id } : undefined;
-    case "chatSend":
     case "chatCopyText":
       return isText(m.text, MAX_INPUT_CHARS) && m.text.trim() !== "" ? { type, text: m.text } : undefined;
+    // Text, images, or both; never neither.
+    case "chatSend":
+    case "composeDone": {
+      const images = parseImageIds(m.images);
+      return isText(m.text, MAX_INPUT_CHARS) && images && (m.text.trim() !== "" || images.length > 0) ? { type, text: m.text, images } : undefined;
+    }
+    // The data is only bounded here; decodeImage checks it before anything holds it.
+    case "attachImage":
+      return isText(m.name, MAX_IMAGE_NAME) && isText(m.data, MAX_IMAGE_CHARS) ? { type, name: m.name, data: m.data } : undefined;
+    case "cardAttachImage":
+      return isTarget(m.target) && isText(m.name, MAX_IMAGE_NAME) && isText(m.data, MAX_IMAGE_CHARS) ? { type, target: m.target, name: m.name, data: m.data } : undefined;
+    case "cardPickImages":
+      return isTarget(m.target) ? { type, target: m.target } : undefined;
+    case "cardOpenImage":
+      return typeof m.id === "string" && CARD_IMAGE_ID.test(m.id) ? { type, id: m.id } : undefined;
+    case "detachImage":
+    case "openImage":
+      return typeof m.id === "string" && ID.test(m.id) ? { type, id: m.id } : undefined;
     case "chatAnswer": {
       const picks = parsePicks(m.picks);
       return typeof m.id === "string" && ID.test(m.id) && picks ? { type, id: m.id, picks } : undefined;

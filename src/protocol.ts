@@ -34,6 +34,11 @@ export const withoutStatus = (text: string): string => text.trimEnd().split("\n"
 // A reply as the user reads it: without its status line, when it ends with one.
 export const replyOf = (text: string): string => (parseStatus(text).kind === "none" ? text.trim() : withoutStatus(text));
 
+// Added to a message that carries images when a later session of the chain follows: that session starts in a fresh context and
+// never sees them.
+export const IMAGES_NOTE =
+  "(From coordiner: the images attached here do not reach the later sessions of this chain, which start with a fresh context. Write down in your reply or plan anything you need from them: the text they show, the UI, the error.)";
+
 export const UNATTENDED_NOTE = [
   "This session is driven by coordiner, an unattended pipeline running a chain of skills. Nobody is at the keyboard.",
   "Finish the skill's work, then end your turn. Do not offer a next-step picker or start another skill.",

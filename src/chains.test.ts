@@ -321,3 +321,34 @@ describe("a chain while it runs", () => {
     assert.equal(pickUpFrom(before, [asking], 1, "story"), "{{bug}} has nothing to fill it: this run started from the story you choose at Run.");
   });
 });
+
+describe("parseChain: images on a card", () => {
+  const image = { id: "a".repeat(64), name: "ticket.png", bytes: 2048, mediaType: "image/png" };
+  const chainWith = (images: unknown) => ({ id: "mine", name: "Mine", sessions: [{ cards: [{ ...defaultCard("acme:lint"), images }] }] });
+
+  it("keeps a card's image refs, rebuilt without any other field", () => {
+    const parsed = parseChain(chainWith([{ ...image, data: "iVBORw0KGgo=" }])) as Chain;
+    assert.deepEqual(parsed.sessions[0]!.cards[0]!.images, [image]);
+  });
+
+  it("refuses images that are not named by a hash, are not a type Claude takes, repeat, are too large, or are too many", () => {
+    for (const images of [
+      [{ ...image, id: "../../etc/hostname" }],
+      [{ ...image, id: "A".repeat(64) }],
+      [{ ...image, mediaType: "image/svg+xml" }],
+      [image, image],
+      [{ ...image, bytes: 3_750_001 }],
+      [{ ...image, bytes: 1.5 }],
+      [{ ...image, name: "" }],
+      Array.from({ length: 6 }, (_, n) => ({ ...image, id: String(n).repeat(64) })),
+      [],
+      "ticket.png",
+    ]) {
+      assert.equal(typeof parseChain(chainWith(images)), "string", JSON.stringify(images).slice(0, 60));
+    }
+  });
+
+  it("reads a card without images as before", () => {
+    assert.equal((parseChain({ id: "mine", name: "Mine", sessions: [{ cards: [defaultCard("acme:lint")] }] }) as Chain).sessions[0]!.cards[0]!.images, undefined);
+  });
+});

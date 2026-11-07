@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
+import { said, type ImageRef } from "./images.ts";
 import { Talk, type TalkSnapshot } from "./talk.ts";
 
 const question = { question: "Which store?", options: [{ label: "SQLite" }, { label: "Files" }] };
@@ -11,7 +12,7 @@ function setup() {
   const answered: Array<[string, string, string]> = [];
   const talk = new Talk({
     changed: (s) => void snapshots.push(s),
-    delivered: (card, text) => void delivered.push([card, text]),
+    delivered: (card, s) => void delivered.push([card, s.text]),
     answered: (card, q, a) => void answered.push([card, q, a]),
   });
   return { talk, snapshots, delivered, answered, last: () => snapshots.at(-1)! };
@@ -27,15 +28,15 @@ describe("Talk: queueing for the next turn", () => {
   it("starts idle and refuses messages before the run starts", () => {
     const { talk } = setup();
     assert.deepEqual(talk.snapshot(), { phase: "idle", attended: false, queued: [], continueReady: false, pausePending: false });
-    assert.equal(talk.send("hello"), false);
+    assert.equal(talk.send(said("hello")), false);
   });
 
   it("queues messages during a turn and hands them, joined in order, to the next turn", () => {
     const { talk, last, delivered } = running();
-    assert.equal(talk.send("use the existing helper"), true);
-    assert.equal(talk.send("and keep it small"), true);
+    assert.equal(talk.send(said("use the existing helper")), true);
+    assert.equal(talk.send(said("and keep it small")), true);
     assert.deepEqual(last().queued.map((q) => q.text), ["use the existing helper", "and keep it small"]);
-    assert.equal(talk.takeQueued("Implement"), "use the existing helper\n\nand keep it small");
+    assert.deepEqual(talk.takeQueued("Implement"), said("use the existing helper\n\nand keep it small"));
     assert.deepEqual(last().queued, []);
     assert.deepEqual(delivered, [["Implement", "use the existing helper\n\nand keep it small"]]);
     assert.equal(talk.takeQueued("Implement"), undefined);
@@ -45,64 +46,64 @@ describe("Talk: queueing for the next turn", () => {
     const { talk, last, delivered, snapshots } = running();
     const taken: string[] = [];
     let open = true;
-    talk.injectInto((text) => open && taken.push(text) > 0);
+    talk.injectInto((s) => open && taken.push(s.text) > 0);
     const before = snapshots.length;
-    assert.equal(talk.send("use the helper"), true);
+    assert.equal(talk.send(said("use the helper")), true);
     assert.deepEqual(taken, ["use the helper"]);
     assert.deepEqual(delivered, [["Implement", "use the helper"]]);
     assert.equal(snapshots.length, before, "nothing queued, so nothing changed");
     open = false;
-    assert.equal(talk.send("and keep it small"), true);
+    assert.equal(talk.send(said("and keep it small")), true);
     assert.deepEqual(last().queued.map((q) => q.text), ["and keep it small"]);
   });
 
   it("queues behind messages already queued, so they reach the card in order, and after the turn has no way in", () => {
     const { talk, last } = running();
-    talk.send("first");
+    talk.send(said("first"));
     const taken: string[] = [];
-    talk.injectInto((text) => taken.push(text) > 0);
-    talk.send("second");
+    talk.injectInto((s) => taken.push(s.text) > 0);
+    talk.send(said("second"));
     assert.deepEqual(taken, []);
     assert.deepEqual(last().queued.map((q) => q.text), ["first", "second"]);
     talk.takeQueued("Implement");
     talk.injectInto(undefined);
-    talk.send("third");
+    talk.send(said("third"));
     assert.deepEqual(last().queued.map((q) => q.text), ["third"]);
   });
 
   it("takes back what a turn ended before starting: in front of the queue, and to the user once the run has ended", () => {
     const { talk, last } = running();
-    talk.send("queued after");
-    talk.giveBack(["never started", "nor this"]);
+    talk.send(said("queued after"));
+    talk.giveBack([said("never started"), said("nor this")]);
     assert.deepEqual(last().queued.map((q) => q.text), ["never started", "nor this", "queued after"]);
     talk.end();
-    assert.equal(last().returned, "never started\n\nnor this\n\nqueued after");
+    assert.deepEqual(last().returned, said("never started\n\nnor this\n\nqueued after"));
 
     const ended = running();
     ended.talk.end();
-    ended.talk.giveBack(["sent as the chat ended"]);
-    assert.equal(ended.last().returned, "sent as the chat ended");
+    ended.talk.giveBack([said("sent as the chat ended")]);
+    assert.deepEqual(ended.last().returned, said("sent as the chat ended"));
     assert.deepEqual(ended.last().queued, []);
   });
 
   it("refuses an empty message and one over the length limit, and takes one at the limit", () => {
     const { talk } = running();
-    assert.equal(talk.send("  \n"), false);
-    assert.equal(talk.send("x".repeat(MAX_INPUT_CHARS + 1)), false);
-    assert.equal(talk.send("x".repeat(MAX_INPUT_CHARS)), true);
+    assert.equal(talk.send(said("  \n")), false);
+    assert.equal(talk.send(said("x".repeat(MAX_INPUT_CHARS + 1))), false);
+    assert.equal(talk.send(said("x".repeat(MAX_INPUT_CHARS))), true);
   });
 
   it("withdraws a queued message by id, and ignores an id that is not queued", () => {
     const { talk, last, snapshots } = running();
-    talk.send("one");
-    talk.send("two");
+    talk.send(said("one"));
+    talk.send(said("two"));
     const [first] = last().queued;
-    talk.withdraw(first!.id);
+    assert.deepEqual(talk.withdraw(first!.id), first);
     assert.deepEqual(last().queued.map((q) => q.text), ["two"]);
     const count = snapshots.length;
-    talk.withdraw("m99");
+    assert.equal(talk.withdraw("m99"), undefined);
     assert.equal(snapshots.length, count);
-    assert.equal(talk.takeQueued("Implement"), "two");
+    assert.deepEqual(talk.takeQueued("Implement"), said("two"));
   });
 
   it("says where a queued message goes if the card ends its session, and forgets it at the next card", () => {
@@ -120,8 +121,8 @@ describe("Talk: waiting for the user", () => {
     const { talk, last, delivered } = running("Brainstorm", true);
     const move = talk.waitForYou({ card: "Brainstorm", nextCard: "Plan", ready: false, signal: new AbortController().signal });
     assert.deepEqual({ phase: last().phase, nextCard: last().nextCard, continueReady: last().continueReady }, { phase: "waiting", nextCard: "Plan", continueReady: false });
-    assert.equal(talk.send("offline first"), true);
-    assert.deepEqual(await move, { kind: "message", text: "offline first" });
+    assert.equal(talk.send(said("offline first")), true);
+    assert.deepEqual(await move, { kind: "message", said: said("offline first") });
     assert.deepEqual(delivered, [["Brainstorm", "offline first"]]);
     assert.equal(last().phase, "running");
     assert.deepEqual(last().queued, []);
@@ -139,8 +140,8 @@ describe("Talk: waiting for the user", () => {
 
   it("sends what was queued during the turn at once, as the first message of the pause", async () => {
     const { talk, delivered } = running();
-    talk.send("why this helper?");
-    assert.deepEqual(await talk.waitForYou({ card: "Implement", ready: false, signal: new AbortController().signal }), { kind: "message", text: "why this helper?" });
+    talk.send(said("why this helper?"));
+    assert.deepEqual(await talk.waitForYou({ card: "Implement", ready: false, signal: new AbortController().signal }), { kind: "message", said: said("why this helper?") });
     assert.deepEqual(delivered, [["Implement", "why this helper?"]]);
   });
 
@@ -250,11 +251,11 @@ describe("Talk: questions", () => {
 describe("Talk: the end of the run", () => {
   it("hands queued messages back, refuses new ones, and stops a waiting card and an open question", async () => {
     const { talk, last } = running("Implement");
-    talk.send("one");
-    talk.send("two");
+    talk.send(said("one"));
+    talk.send(said("two"));
     talk.end();
-    assert.deepEqual({ phase: last().phase, queued: last().queued, returned: last().returned }, { phase: "ended", queued: [], returned: "one\n\ntwo" });
-    assert.equal(talk.send("three"), false);
+    assert.deepEqual({ phase: last().phase, queued: last().queued, returned: last().returned }, { phase: "ended", queued: [], returned: said("one\n\ntwo") });
+    assert.equal(talk.send(said("three")), false);
     await assert.rejects(talk.ask([question], new AbortController().signal), /stopped/);
 
     const waiting = running("Brainstorm", true);
@@ -269,19 +270,19 @@ describe("Talk: the end of the run", () => {
 
   it("hands out copies, so the chat cannot change what it holds", () => {
     const { talk } = running();
-    talk.send("one");
+    talk.send(said("one"));
     const shown = talk.snapshot();
     shown.queued[0]!.text = "changed";
-    assert.equal(talk.takeQueued("Implement"), "one");
+    assert.deepEqual(talk.takeQueued("Implement"), said("one"));
   });
 });
 
 describe("Talk: the chat after the run", () => {
   it("stays waiting on the last card, attended, and hands queued messages back as a plain end does", () => {
     const { talk, last } = running("Kickoff");
-    talk.send("one");
+    talk.send(said("one"));
     talk.end({ after: { card: "Kickoff" } });
-    assert.deepEqual(last(), { phase: "waiting", card: "Kickoff", index: 0, session: 0, attended: true, afterRun: true, queued: [], continueReady: false, pausePending: false, returned: "one" });
+    assert.deepEqual(last(), { phase: "waiting", card: "Kickoff", index: 0, session: 0, attended: true, afterRun: true, queued: [], continueReady: false, pausePending: false, returned: said("one") });
   });
 
   it("sends each message as the next turn, and queues one sent while that turn runs", async () => {
@@ -289,11 +290,11 @@ describe("Talk: the chat after the run", () => {
     talk.end({ after: { card: "Kickoff" } });
     const signal = new AbortController().signal;
     const move = talk.waitForYou({ card: "Kickoff", ready: false, signal });
-    assert.equal(talk.send("why that tier?"), true);
-    assert.deepEqual(await move, { kind: "message", text: "why that tier?" });
+    assert.equal(talk.send(said("why that tier?")), true);
+    assert.deepEqual(await move, { kind: "message", said: said("why that tier?") });
     assert.equal(last().phase, "running");
-    talk.send("and the risks?");
-    assert.deepEqual(await talk.waitForYou({ card: "Kickoff", ready: false, signal }), { kind: "message", text: "and the risks?" });
+    talk.send(said("and the risks?"));
+    assert.deepEqual(await talk.waitForYou({ card: "Kickoff", ready: false, signal }), { kind: "message", said: said("and the risks?") });
     assert.deepEqual(delivered, [["Kickoff", "why that tier?"], ["Kickoff", "and the risks?"]]);
   });
 
@@ -318,7 +319,7 @@ describe("Talk: the chat after the run", () => {
     talk.end();
     assert.equal(last().phase, "ended");
     assert.equal(last().afterRun, undefined);
-    assert.equal(talk.send("hello"), false);
+    assert.equal(talk.send(said("hello")), false);
   });
 });
 
@@ -339,8 +340,8 @@ describe("Talk: a parked card", () => {
   it("takes a message as the parked card's next turn, and drops the reason when the run ends", async () => {
     const { talk, last } = running();
     const move = talk.waitForYou({ card: "Implement", ready: false, signal: new AbortController().signal, parked: "docker is missing" });
-    assert.equal(talk.send("installed it"), true);
-    assert.deepEqual(await move, { kind: "message", text: "installed it" });
+    assert.equal(talk.send(said("installed it")), true);
+    assert.deepEqual(await move, { kind: "message", said: said("installed it") });
     talk.waitForYou({ card: "Implement", ready: false, signal: new AbortController().signal, parked: "again" });
     talk.end();
     assert.equal(last().parked, undefined);
@@ -364,5 +365,59 @@ describe("Talk: a question that waits for a while", () => {
     const { talk, last } = running();
     void talk.ask([question], new AbortController().signal).catch(() => undefined);
     assert.equal("expiresAt" in last().question!, false);
+  });
+});
+
+describe("Talk: images", () => {
+  const image = (id: string): ImageRef => ({ id, name: `${id}.png`, bytes: 10, mediaType: "image/png" });
+
+  it("takes an image with no text, and refuses neither text nor images and more images than one message holds", () => {
+    const { talk, last } = running();
+    assert.equal(talk.send(said("", [image("i1")])), true);
+    assert.equal(talk.send(said(" ", [])), false);
+    assert.equal(talk.send(said("x", ["i1", "i2", "i3", "i4", "i5", "i6"].map(image))), false);
+    assert.equal(talk.send(said("x", ["i1", "i2", "i3", "i4", "i5"].map(image))), true);
+    assert.deepEqual(last().queued.map((q) => q.images.length), [1, 5]);
+  });
+
+  it("hands queued images to the next turn with the texts, in the order they were sent", () => {
+    const { talk, delivered } = running();
+    talk.send(said("", [image("i1")]));
+    talk.send(said("and this one", [image("i2"), image("i3")]));
+    assert.deepEqual(talk.takeQueued("Implement"), said("and this one", [image("i1"), image("i2"), image("i3")]));
+    assert.deepEqual(delivered, [["Implement", "and this one"]]);
+  });
+
+  it("puts a message with images into the running turn whole", () => {
+    const { talk } = running();
+    const taken: unknown[] = [];
+    talk.injectInto((s) => taken.push(s) > 0);
+    talk.send(said("look", [image("i1")]));
+    assert.deepEqual(taken, [said("look", [image("i1")])]);
+  });
+
+  it("gives back a message the turn never started with its images, in front of the queue", () => {
+    const { talk, last } = running();
+    talk.send(said("later"));
+    talk.giveBack([said("never started", [image("i1")])]);
+    assert.deepEqual(last().queued.map((q) => [q.text, q.images]), [["never started", [image("i1")]], ["later", []]]);
+  });
+
+  it("returns queued images to the user when the run ends, and drops a withdrawn message's", () => {
+    const { talk, last } = running();
+    talk.send(said("keep", [image("i1")]));
+    talk.send(said("drop", [image("i2")]));
+    assert.deepEqual(talk.withdraw(last().queued[1]!.id)?.images, [image("i2")]);
+    talk.end();
+    assert.deepEqual(last().returned, said("keep", [image("i1")]));
+    talk.giveBack([said("", [image("i3")])]);
+    assert.deepEqual(last().returned, said("keep", [image("i1"), image("i3")]));
+  });
+
+  it("hands out copies of the images it holds", () => {
+    const { talk } = running();
+    talk.send(said("one", [image("i1")]));
+    (talk.snapshot().queued[0]!.images as ImageRef[]).push(image("i9"));
+    assert.deepEqual(talk.takeQueued("Implement"), said("one", [image("i1")]));
   });
 });

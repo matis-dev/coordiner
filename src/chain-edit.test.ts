@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { addCard, addSession, duplicate, moveTo, removeCard, removeSession, rename, setArgs, setEffort, setFollow, setModel, setPause } from "./chain-edit.ts";
+import { addCard, addCardImage, addSession, duplicate, moveTo, removeCard, removeCardImage, removeSession, rename, setArgs, setEffort, setFollow, setModel, setPause } from "./chain-edit.ts";
 import { defaultCard, TEMPLATES, type Chain } from "./chains.ts";
 
 const chain: Chain = { id: "c", name: "C", sessions: [{ cards: [defaultCard("a"), defaultCard("b"), defaultCard("c")] }, { cards: [defaultCard("d")] }] };
@@ -116,5 +116,32 @@ describe("duplicate", () => {
     const copy = duplicate(TEMPLATES[0]!, "x", "X");
     copy.sessions[0]!.cards[0]!.args = "changed";
     assert.equal(TEMPLATES[0]!.sessions[0]!.cards[0]!.args, "{{story}}");
+  });
+});
+
+describe("images on a card", () => {
+  const image = (n: number) => ({ id: String(n).repeat(64), name: `${n}.png`, bytes: 1, mediaType: "image/png" as const });
+  const one: Chain = { id: "c", name: "C", sessions: [{ cards: [defaultCard("a"), defaultCard("b")] }] };
+
+  it("adds images to one card in order, not one it already has, and no more than a card takes", () => {
+    let chain = addCardImage(one, 0, 1, image(1));
+    chain = addCardImage(chain, 0, 1, image(2));
+    chain = addCardImage(chain, 0, 1, image(1));
+    assert.deepEqual(chain.sessions[0]!.cards[1]!.images, [image(1), image(2)]);
+    assert.equal(chain.sessions[0]!.cards[0]!.images, undefined);
+    for (let n = 3; n <= 6; n++) chain = addCardImage(chain, 0, 1, image(n));
+    assert.equal(chain.sessions[0]!.cards[1]!.images!.length, 5);
+  });
+
+  it("removes an image by id, dropping the field with the last one, and leaves a card without it alone", () => {
+    const two = addCardImage(addCardImage(one, 0, 0, image(1)), 0, 0, image(2));
+    assert.deepEqual(removeCardImage(two, 0, 0, image(1).id).sessions[0]!.cards[0]!.images, [image(2)]);
+    assert.equal("images" in removeCardImage(removeCardImage(two, 0, 0, image(1).id), 0, 0, image(2).id).sessions[0]!.cards[0]!, false);
+    assert.equal("images" in removeCardImage(chain, 0, 0, image(1).id).sessions[0]!.cards[0]!, false, "a card with no images stays without");
+    assert.deepEqual(removeCardImage(two, 0, 0, "x".repeat(64)), two);
+  });
+
+  it("copies a card's images with the chain, sharing the saved files", () => {
+    assert.deepEqual(duplicate(addCardImage(one, 0, 0, image(1)), "copy", "Copy").sessions[0]!.cards[0]!.images, [image(1)]);
   });
 });

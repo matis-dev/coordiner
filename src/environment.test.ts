@@ -135,7 +135,7 @@ describe("checkEnvironment", () => {
       assert.deepEqual(request.env, { PATH: "/bin" });
       assert.equal(request.claudePath, "/h/.local/bin/claude");
       assert.equal(request.canUseTool, canUseTool);
-      assert.match(request.prompt, /Do not use any tools/);
+      assert.match(request.prompt.text, /Do not use any tools/);
     }
   });
 

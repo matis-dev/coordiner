@@ -8,17 +8,20 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { lastFirst, parseStories, slugify, storyText, wholeFileStory, type Story } from "./backlog.ts";
 import { ChainStore, type StoreFs } from "./chain-store.ts";
-import { briefHeading, inputOf, INPUTS, keepsStarted, MAX_INPUT_CHARS, MSKILLS_URL, pickUpFrom, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
+import { briefHeading, inputOf, INPUTS, keepsStarted, MSKILLS_URL, pickUpFrom, requiredSkills, runnable, TEMPLATES, type Chain, type InputKind } from "./chains.ts";
 import { editorHtml } from "./editor-html.ts";
 import { awakeHelper, keepAwake, type Helper, type Spawned } from "./awake.ts";
 import { canGoOnAlone, needsYou } from "./chat-logic.ts";
 import { runReason } from "./editor-logic.ts";
-import { parseEditorMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
+import { parseEditorMessage, type CardImageMessage, type ChatMessage, type EditorState } from "./editor-protocol.ts";
 import { bundledClaudePath, checkEnvironment, findClaude, sessionEnv } from "./environment.ts";
 import { byWorktree, continuePoint, journalsOf, MAX_JOURNAL_BYTES, parseJournal, readNewest, type Continuation, type Line, type PastRun } from "./history.ts";
 import { createJournal, journalFileName, type JournalRecord, type LastTurn } from "./journal.ts";
+import { CardImages } from "./card-images.ts";
+import { ImageStore } from "./image-store.ts";
+import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, said, sizeLabel, type ImageRef, type Said } from "./images.ts";
 import { replyOf } from "./protocol.ts";
-import { fillInput, remainingCommands, runChain, talkOn, type AfterAsk, type Outcome, type RunEvent, type StartPoint } from "./run.ts";
+import { fillInput, inputCard, remainingCommands, runChain, talkOn, type AfterAsk, type Outcome, type RunEvent, type StartPoint } from "./run.ts";
 import { oneRun, type OneRun } from "./one-run.ts";
 import { actOnChat, createRunChat, IDLE_CHAT, stations, type ChatAction, type Decision, type RunChat, type TurnMode } from "./run-chat.ts";
 import { listCommands, runTurn, type TurnControl, type TurnResult } from "./session.ts";
@@ -306,33 +309,28 @@ async function nameRun(value = ""): Promise<string | undefined> {
   return name?.trim();
 }
 
-type RunInput = { name: string; text: string };
+type RunInput = { name: string; text: string; images: readonly ImageRef[] };
 
 // Run asks for what the chain starts from; a typed input also suggests the run's name. A run in an existing worktree has its
-// name already (`named`), since it makes no folder or branch: only a picked story names it after its heading.
-async function askInput(memory: vscode.Memento, kind: InputKind | undefined, named?: string): Promise<RunInput | undefined> {
+// name already (`named`), since it makes no folder or branch: only a picked story names it after its heading. A typed input is
+// written in the chat's composer, where it can be several lines and carry images, or be images alone.
+async function askInput(ctx: RunContext, kind: InputKind | undefined, named?: string): Promise<RunInput | undefined> {
   if (kind === undefined) {
     const name = named ?? (await nameRun());
-    return name === undefined ? undefined : { name, text: "" };
+    return name === undefined ? undefined : { name, text: "", images: [] };
   }
   if (kind === "story") {
-    const story = await pickStory(memory);
-    if (story !== "type") return story && { name: story.heading, text: storyText(story) };
+    const story = await pickStory(ctx.memory);
+    if (story !== "type") return story && { name: story.heading, text: storyText(story), images: [] };
   }
   const { title, ask } = INPUTS[kind];
-  const text = (
-    await vscode.window.showInputBox({
-      title,
-      prompt: ask,
-      validateInput: (value) =>
-        value.length > MAX_INPUT_CHARS ? `Keep it under ${MAX_INPUT_CHARS} characters.` : value.trim() === "" ? "Write at least a few words." : undefined,
-    })
-  )?.trim();
-  if (!text) return undefined;
-  if (named !== undefined) return { name: named, text };
+  const given = await ctx.compose(title, ask);
+  if (!given) return undefined;
+  const text = given.text.trim();
+  if (named !== undefined) return { name: named, text, images: given.images };
   // Text in any script is fine; only the suggested name needs a letter or digit from [a-z0-9].
-  const name = await nameRun(nameProblem(text) ? "" : slugify(text));
-  return name === undefined ? undefined : { name, text };
+  const name = await nameRun(text === "" || nameProblem(text) ? "" : slugify(text));
+  return name === undefined ? undefined : { name, text, images: given.images };
 }
 
 // A run that changed nothing leaves its worktree and branch behind; the output says how to remove them, and Coordiner removes nothing.
@@ -415,6 +413,8 @@ type Place = {
   chain: Chain;
   definition: Chain;
   input: string;
+  // The images given with the input; they go with the first turn of the card the input fills.
+  inputImages: readonly ImageRef[];
   name: string;
   slug: string;
   worktree: Worktree;
@@ -437,6 +437,11 @@ type RunContext = {
   // This workspace's memory: the wait choice and the backlog file used last, each put first next time.
   memory: vscode.Memento;
   onRunChange: () => void;
+  // The images the open chat holds, and Run's input being written in the chat's composer.
+  images: ImageStore;
+  // The images saved on cards, on disk.
+  cardImages: CardImages;
+  compose: (title: string, ask: string) => Promise<Said | undefined>;
   // Sends the run's chat to the chains editor, if it is open.
   postChat: (message: ChatMessage) => void;
   // A card waits for the user, or asked them something: bring the editor up without taking focus.
@@ -595,7 +600,10 @@ async function startRun(chain: Chain, ctx: RunContext, where?: Where): Promise<(
     void vscode.window.showErrorMessage(`Coordiner: ${plain(chain.name)} cannot run. ${check.reason}`);
     return undefined;
   }
+  // Images attached while Run asked for its input, if the run did not start after all, are let go.
+  const before = new Set(ctx.images.ids());
   const place = !where ? await prepareWorktree(chain, ctx) : where.kind === "continue" ? await confirmContinue(where, ctx) : await confirmHere(chain, where, ctx);
+  if (!place) ctx.images.release(ctx.images.ids().filter((id) => !before.has(id)));
   return place && runIn(place, ctx);
 }
 
@@ -626,7 +634,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext, chat = false): Pro
   if (!repo) return undefined;
   const tools = await sessionTools();
   if (!tools) return undefined;
-  const input = await askInput(ctx.memory, inputOf(chain));
+  const input = await askInput(ctx, inputOf(chain));
   if (!input) return undefined;
   const filled = fillInput(chain, input.text);
   if (!filled.ok) {
@@ -660,7 +668,7 @@ async function prepareWorktree(chain: Chain, ctx: RunContext, chat = false): Pro
   }
   output.appendLine(`Worktree ${added.path} on branch ${added.branch}`);
   const worktree = { root: repo.root, path: added.path, branch: added.branch };
-  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", ...(chat ? { kind: "chat" as const } : {}), chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, questions, definition: chain, input: input.text });
+  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", ...(chat ? { kind: "chat" as const } : {}), chain: chain.name, story: input.name, repo: repo.root, worktree: added.path, branch: added.branch, questions, definition: chain, input: input.text, ...metaOf(input.images) });
   if (setup) {
     const result = await runSetup(setup, added.path, tools.env, exec);
     if (!result.ok) {
@@ -670,8 +678,12 @@ async function prepareWorktree(chain: Chain, ctx: RunContext, chat = false): Pro
       return undefined;
     }
   }
-  return { chain: filled.chain, definition: chain, input: input.text, name: input.name, slug, worktree, journal, journalFile, questions };
+  return { chain: filled.chain, definition: chain, input: input.text, inputImages: input.images, name: input.name, slug, worktree, journal, journalFile, questions };
 }
+
+// What the journal keeps of the images given with the input: their chips, never their data.
+const metaOf = (images: readonly ImageRef[]) => (images.length > 0 ? { inputImages: images.map(({ id: _held, ...shown }) => shown) } : {});
+const withImages = (images: readonly ImageRef[]) => (images.length > 0 ? `, with ${plural(images.length, "image", "images")}` : "");
 
 // A chain in a worktree that is already there: no new worktree and no setup. After a run, its input is that run's last reply; in a
 // worktree picked from the Sessions list, it is asked for as usual, and the run is named after the worktree.
@@ -694,13 +706,13 @@ async function confirmHere(chain: Chain, where: Extract<Where, { kind: "after" |
       void vscode.window.showErrorMessage(`Coordiner: ${plain(here.card)} gave no reply to start ${plain(chain.name)} from.`);
       return undefined;
     }
-    input = { name: here.name, text: here.input };
+    input = { name: here.name, text: here.input, images: [] };
     source = takesInput ? `Input: ${plain(here.card)}'s last reply, ${here.input.length} characters.` : "This chain takes no input.";
   } else {
-    const asked = await askInput(ctx.memory, inputOf(chain), slug);
+    const asked = await askInput(ctx, inputOf(chain), slug);
     if (!asked) return undefined;
     input = asked;
-    source = takesInput ? `Input: ${input.text.length} characters.` : "This chain takes no input.";
+    source = takesInput ? `Input: ${input.text.length} characters${withImages(input.images)}.` : "This chain takes no input.";
   }
   const filled = fillInput(chain, input.text);
   if (!filled.ok) {
@@ -717,8 +729,8 @@ async function confirmHere(chain: Chain, where: Extract<Where, { kind: "after" |
   const questions = await confirmRun(where.kind === "after" ? `Run ${plain(chain.name)} in the same worktree?` : `Run ${plain(chain.name)} in ${plain(slug)}?`, detail, ctx.memory);
   if (!questions) return undefined;
   endAfter(ctx.state);
-  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, questions, definition: chain, input: input.text });
-  return { chain: filled.chain, definition: chain, input: input.text, name: input.name, slug, worktree, journal, journalFile, questions };
+  const { journal, file: journalFile } = startJournal(ctx, slug, { type: "run-started", chain: chain.name, story: input.name, repo: worktree.root, worktree: worktree.path, branch: worktree.branch, questions, definition: chain, input: input.text, ...metaOf(input.images) });
+  return { chain: filled.chain, definition: chain, input: input.text, inputImages: input.images, name: input.name, slug, worktree, journal, journalFile, questions };
 }
 
 // A stopped run, continued at its card in its own worktree. It goes on in the same journal, so reopening it later shows all of it.
@@ -731,6 +743,7 @@ async function confirmContinue({ run, continuation }: Extract<Where, { kind: "co
   const detail = [
     `In its worktree, ${worktree.path}, which keeps what the run did. It picks up at ${plain(card)}, which stopped: ${plain(reason)}.`,
     from.resume ? `${plain(card)} goes on in the session it ran in.` : `${plain(card)} starts in a new session.`,
+    ...(run.inputImages ? [`The ${plural(run.inputImages, "image", "images")} given with the run's input are not sent again: Coordiner kept them only while the run's chat was open.`] : []),
     ...runNotes(chain),
   ].join("\n\n");
   const questions = await confirmRun(`Continue ${plain(run.chain)} · ${plain(run.story)} at ${plain(card)}?`, detail, ctx.memory);
@@ -740,7 +753,7 @@ async function confirmContinue({ run, continuation }: Extract<Where, { kind: "co
   void journal({ type: "continued", position: from.at, questions });
   ctx.output.appendLine(`Journal: ${join(journalDir(ctx), run.file)}`);
   // continuePoint gives a continuation only for a run whose definition and input it read.
-  return { chain, definition: run.definition!, input: run.input!, name: run.story, slug: slugOf(run.worktree), worktree, journal, journalFile: run.file, questions, from, past: { steps: run.steps, entries: run.entries } };
+  return { chain, definition: run.definition!, input: run.input!, inputImages: [], name: run.story, slug: slugOf(run.worktree), worktree, journal, journalFile: run.file, questions, from, past: { steps: run.steps, entries: run.entries } };
 }
 
 type Turn = (request: AfterAsk & { mode: TurnMode }, signal: AbortSignal) => Promise<TurnResult>;
@@ -767,22 +780,28 @@ function sessionTurns(chat: RunChat, worktree: Worktree, required: () => readonl
     const card = chat.talk.snapshot().card ?? "";
     let result: TurnResult;
     const tools = await turnTools();
+    // A card's own images are read from disk for its turn; the chat's are in memory.
+    const fromCards = await ctx.cardImages.readAll(request.prompt.images);
     try {
-      result = !tools.ok ? { ok: false, error: tools.error } : await runTurn({
-        ...request,
-        ...chat.forTurn(mode),
-        cwd: worktree.path,
-        env: tools.env,
-        claudePath: tools.claudePath,
-        requiredCommands: required(),
-        signal,
-        onGuard: log,
-        onStarted: (c) => {
-          control = c;
-          chat.talk.injectInto(c.inject);
-        },
-        onTask: (message) => provider.setProcesses(applyTask(provider.processes, message)),
-      });
+      if (!tools.ok) result = { ok: false, error: tools.error };
+      else if (!fromCards.ok) result = { ok: false, error: fromCards.reason };
+      else
+        result = await runTurn({
+          ...request,
+          ...chat.forTurn(mode),
+          imageData: (id) => ctx.images.data(id) ?? fromCards.data.get(id),
+          cwd: worktree.path,
+          env: tools.env,
+          claudePath: tools.claudePath,
+          requiredCommands: required(),
+          signal,
+          onGuard: log,
+          onStarted: (c) => {
+            control = c;
+            chat.talk.injectInto(c.inject);
+          },
+          onTask: (message) => provider.setProcesses(applyTask(provider.processes, message)),
+        });
     } finally {
       control = undefined;
       chat.talk.injectInto(undefined);
@@ -811,6 +830,8 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     void journal({ type: "log", line });
   };
   const title = `${plain(chain.name)} · ${plain(name)}`;
+  // A new chat holds only the images given with the run's input.
+  ctx.images.retain(place.inputImages.map((i) => i.id));
   const chat = createRunChat({
     title,
     post: ctx.postChat,
@@ -825,6 +846,9 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
     ...(place.from?.resume ? { resumes: true } : {}),
   });
   Object.assign(state, { abort, chainId: chain.id, chat, open: { title, file: place.journalFile } });
+  // What the user gave the run is their first message, to the card it fills; a continued run shows it already.
+  const given = place.from ? undefined : inputCard(place.definition);
+  if (given && (place.input !== "" || place.inputImages.length > 0)) chat.gave(chain.sessions[given.session]!.cards[given.card]!.label, said(place.input, place.inputImages));
   provider.update(place.past?.steps ?? []);
   ctx.onRunChange();
   ctx.sessionsChanged();
@@ -877,6 +901,7 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
       talk: chat.talk,
       prepareReview: () => prepareReview(worktree.path, exec),
       pickUp,
+      ...(given && place.inputImages.length > 0 ? { input: { at: given, images: place.inputImages } } : {}),
     }, place.from);
   } finally {
     if (!outcome) chat.talk.end();
@@ -890,6 +915,8 @@ async function runIn(place: Place, ctx: RunContext): Promise<() => Promise<void>
   const lastTurn = last();
   chat.ended(outcome, lastTurn && { card: lastTurn.card });
   if (lastTurn) talkAfter(lastTurn, { chat, place, ctx, stopProcess, turn });
+  // With no chat after the run, nothing can be sent or opened any more.
+  else ctx.images.clear();
   const ended = outcome;
   return () => announce(ended, name, worktree, current, output, chat.decided());
 }
@@ -1000,6 +1027,7 @@ function openChatOn(place: Pick<Place, "worktree" | "name" | "slug" | "journal" 
     void journal({ type: "log", line });
   };
   const title = `${CHAT_CHAIN.name} · ${plain(name)}`;
+  ctx.images.clear();
   const chat = createRunChat({ title, post: ctx.postChat, record: (r) => void journal(r), moved: ctx.onRunChange, needsYou: ctx.needsYou, log, questions: "always", freeChat: true });
   Object.assign(ctx.state, { chat, chainId: undefined, open: { title, file: journalFile } });
   ctx.provider.update([]);
@@ -1053,6 +1081,7 @@ async function reopen(file: string, ctx: RunContext): Promise<boolean> {
     void journal({ type: "log", line });
   };
   const title = `${run.chain} · ${run.story}`;
+  ctx.images.clear();
   const chat = createRunChat({
     title,
     post: ctx.postChat,
@@ -1177,6 +1206,61 @@ function runningAt({ abort, chainId, chat }: RunState): Pick<EditorState, "runni
     : {};
 }
 
+// Open shows a held image in VS Code's own image preview, read from memory through this read-only scheme: nothing is written to
+// disk. The URI names the image by id and the extension of its checked type, never by the name the user gave it.
+const IMAGE_SCHEME = "coordiner-image";
+const imageUri = (ref: ImageRef): vscode.Uri => vscode.Uri.from({ scheme: IMAGE_SCHEME, path: `/${ref.id}.${IMAGE_EXTENSIONS[ref.mediaType]}` });
+
+class HeldImages implements vscode.FileSystemProvider {
+  private readonly changed = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
+  readonly onDidChangeFile = this.changed.event;
+  private readonly images: ImageStore;
+
+  constructor(images: ImageStore) {
+    this.images = images;
+  }
+
+  private held(uri: vscode.Uri): { ref: ImageRef; data: string } {
+    const id = /^\/([a-z0-9-]{1,64})\.[a-z]+$/.exec(uri.path)?.[1];
+    const ref = id === undefined ? undefined : this.images.ref(id);
+    const data = id === undefined ? undefined : this.images.data(id);
+    if (!ref || data === undefined || uri.path !== imageUri(ref).path) throw vscode.FileSystemError.FileNotFound(uri);
+    return { ref, data };
+  }
+
+  stat(uri: vscode.Uri): vscode.FileStat {
+    return { type: vscode.FileType.File, ctime: 0, mtime: 0, size: this.held(uri).ref.bytes, permissions: vscode.FilePermission.Readonly };
+  }
+
+  readFile(uri: vscode.Uri): Uint8Array {
+    return Buffer.from(this.held(uri).data, "base64");
+  }
+
+  watch(): vscode.Disposable {
+    return new vscode.Disposable(() => undefined);
+  }
+
+  readDirectory(uri: vscode.Uri): never {
+    throw vscode.FileSystemError.NoPermissions(uri);
+  }
+
+  createDirectory(uri: vscode.Uri): never {
+    throw vscode.FileSystemError.NoPermissions(uri);
+  }
+
+  writeFile(uri: vscode.Uri): never {
+    throw vscode.FileSystemError.NoPermissions(uri);
+  }
+
+  delete(uri: vscode.Uri): never {
+    throw vscode.FileSystemError.NoPermissions(uri);
+  }
+
+  rename(uri: vscode.Uri): never {
+    throw vscode.FileSystemError.NoPermissions(uri);
+  }
+}
+
 class ChainsEditor {
   private panel?: vscode.WebviewPanel;
   private palette?: PaletteEntry[];
@@ -1190,6 +1274,8 @@ class ChainsEditor {
   private readonly ctx: RunContext;
   // The user's memory across workspaces: the templates they removed.
   private readonly global: vscode.Memento;
+  // Run's input, being written in the chat's composer: settled once, with the input or with nothing (cancelled, editor closed).
+  private composing?: { title: string; ask: string; settle(given: Said | undefined): void };
 
   constructor(extension: vscode.Uri, file: string, ctx: RunContext, global: vscode.Memento) {
     this.extension = extension;
@@ -1229,8 +1315,59 @@ class ChainsEditor {
       styleUri: uri(media, "editor.css"),
       chainEditUri: uri(dist, "chain-edit.js"),
     });
-    panel.onDidDispose(() => (this.panel = undefined));
+    panel.onDidDispose(() => {
+      this.panel = undefined;
+      this.composing?.settle(undefined);
+    });
     panel.webview.onDidReceiveMessage((raw: unknown) => void this.receive(raw));
+  }
+
+  // Run asks for its input in the chat's composer, in the editor brought up for it.
+  async compose(title: string, ask: string): Promise<Said | undefined> {
+    this.composing?.settle(undefined);
+    await this.open();
+    return new Promise((resolve) => {
+      const composing = {
+        title,
+        ask,
+        settle: (given: Said | undefined) => {
+          if (this.composing !== composing) return;
+          this.composing = undefined;
+          this.postChat({ type: "composeEnd" });
+          resolve(given);
+        },
+      };
+      this.composing = composing;
+      this.postChat({ type: "compose", title, ask });
+    });
+  }
+
+  // The images a message names, as the chat holds them; undefined when one is not held.
+  private held(ids: readonly string[]): ImageRef[] | undefined {
+    const refs = ids.map((id) => this.ctx.images.ref(id));
+    return refs.every((r) => r !== undefined) ? refs : undefined;
+  }
+
+  private attached(result: ReturnType<ImageStore["add"]>): void {
+    this.postChat(result.ok ? { type: "attached", image: result.ref } : { type: "imageProblem", reason: result.reason });
+  }
+
+  // VS Code's own file picker; the extension reads each file itself, under the same checks as a pasted image, and hands each one's
+  // name and data to `take`, or the reason it could not to `refuse`.
+  private async pickImages(take: (name: string, data: string) => Promise<void> | void, refuse: (reason: string) => void): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({ canSelectMany: true, title: "Attach images", openLabel: "Attach", filters: { Images: ["png", "jpg", "jpeg", "gif", "webp"] } });
+    for (const uri of picked ?? []) {
+      const name = basename(uri.path);
+      try {
+        if ((await vscode.workspace.fs.stat(uri)).size > MAX_IMAGE_BYTES) {
+          refuse(`${plain(name)} is larger than ${sizeLabel(MAX_IMAGE_BYTES)}.`);
+          continue;
+        }
+        await take(name, Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("base64"));
+      } catch {
+        refuse(`${plain(name)} could not be read.`);
+      }
+    }
   }
 
   // A waiting card brings the editor up; a notification says so only when the editor was not already in view.
@@ -1296,6 +1433,23 @@ class ChainsEditor {
     void this.panel?.webview.postMessage(message);
   }
 
+  private postCard(message: CardImageMessage): void {
+    void this.panel?.webview.postMessage(message);
+  }
+
+  private async saveCardImage(target: string, name: string, data: string): Promise<void> {
+    const saved = await this.ctx.cardImages.save(name, data);
+    this.postCard(saved.ok ? { type: "cardImageSaved", target, image: saved.ref } : { type: "cardImageProblem", target, reason: saved.reason });
+  }
+
+  // Deletes the card images no saved chain names any more; run once the chains are loaded, when the window starts.
+  async sweepCardImages(): Promise<void> {
+    await this.store.load();
+    const keep = new Set(this.store.chains.flatMap((c) => c.sessions.flatMap((s) => s.cards.flatMap((card) => (card.images ?? []).map((i) => i.id)))));
+    const removed = await this.ctx.cardImages.sweep(keep);
+    if (removed.length > 0) this.ctx.output.appendLine(`Coordiner: removed ${plural(removed.length, "card image", "card images")} no chain uses any more.`);
+  }
+
   post(): void {
     // A state sent while saves are queued would roll the editor back past them; the last save posts instead.
     if (this.store.saving) return;
@@ -1331,6 +1485,7 @@ class ChainsEditor {
         await this.store.load();
         this.post();
         this.postChat({ type: "chat", chat: this.ctx.state.chat?.view() ?? IDLE_CHAT, entries: this.ctx.state.chat?.entries() ?? [] });
+        if (this.composing) this.postChat({ type: "compose", title: this.composing.title, ask: this.composing.ask });
         if (!this.palette) await this.discover();
         return;
       case "save": {
@@ -1375,6 +1530,56 @@ class ChainsEditor {
       case "restoreTemplates":
         await this.setRemovedTemplates([]);
         return;
+      case "attachImage":
+        this.attached(this.ctx.images.add(message.name, message.data));
+        return;
+      case "pickImages":
+        await this.pickImages(
+          (name, data) => this.attached(this.ctx.images.add(name, data)),
+          (reason) => this.postChat({ type: "imageProblem", reason }),
+        );
+        return;
+      case "cardAttachImage":
+        await this.saveCardImage(message.target, message.name, message.data);
+        return;
+      case "cardPickImages": {
+        const { target } = message;
+        await this.pickImages(
+          (name, data) => this.saveCardImage(target, name, data),
+          (reason) => this.postCard({ type: "cardImageProblem", target, reason }),
+        );
+        return;
+      }
+      // Only an image a saved chain names opens, from the file the extension saved; the page names it by hash only.
+      case "cardOpenImage": {
+        const ref = this.store.chains.flatMap((c) => c.sessions.flatMap((s) => s.cards.flatMap((card) => card.images ?? []))).find((i) => i.id === message.id);
+        const file = ref && this.ctx.cardImages.fileOf(ref);
+        if (file && (await exists(file))) await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file));
+        else this.postCard({ type: "cardImageProblem", target: "", reason: "That image's file is gone. Remove it from the card and attach it again." });
+        return;
+      }
+      case "detachImage":
+        this.ctx.images.release([message.id]);
+        return;
+      case "openImage": {
+        const ref = this.ctx.images.ref(message.id);
+        if (ref) await vscode.commands.executeCommand("vscode.open", imageUri(ref));
+        else this.postChat({ type: "imageProblem", reason: "That image is no longer held: Coordiner keeps images only while their chat is open." });
+        return;
+      }
+      case "composeDone": {
+        const images = this.held(message.images);
+        if (!images) this.postChat({ type: "imageProblem", reason: "An image is no longer held. Attach it again." });
+        else this.composing?.settle(said(message.text, images));
+        return;
+      }
+      case "composeCancel": {
+        this.composing?.settle(undefined);
+        // With no chat open, nothing else holds images.
+        const { chat, abort, after } = this.ctx.state;
+        if (!chat || (!abort && !after)) this.ctx.images.clear();
+        return;
+      }
       default:
         this.chat(message);
     }
@@ -1393,6 +1598,7 @@ class ChainsEditor {
       stop: () => {
         if (abort) return abort.abort();
         endAfter(state);
+        this.ctx.images.clear();
         this.ctx.onRunChange();
       },
       copyResume: () => void (after && this.copyResume(after)),
@@ -1403,6 +1609,8 @@ class ChainsEditor {
         else if (after) void startCommand(this, { kind: "after", here: after.here });
       },
       mergeSteps: () => void (after && this.mergeSteps(after)),
+      images: (ids: readonly string[]) => this.held(ids),
+      release: (ids: readonly string[]) => this.ctx.images.release(ids),
     };
     if (!actOnChat(chat.talk, actions, message)) this.ctx.output.appendLine(`Coordiner: the run's chat did not accept a ${message.type} message.`);
   }
@@ -1657,6 +1865,8 @@ export function activate(context: vscode.ExtensionContext): void {
     const mine = ++listing;
     void loadLines(ctx, skipped).then((lines) => mine === listing && provider.setLines(lines, state.open?.file));
   };
+  // The page takes away the chip of each image let go.
+  const images = new ImageStore((ids) => editor?.postChat({ type: "detached", ids }));
   const ctx: RunContext = {
     state,
     slot: oneRun(changed),
@@ -1666,6 +1876,16 @@ export function activate(context: vscode.ExtensionContext): void {
     storage: context.globalStorageUri,
     memory: context.workspaceState,
     onRunChange: changed,
+    images,
+    cardImages: new CardImages(join(context.globalStorageUri.fsPath, "card-images"), {
+      readFile,
+      writeFile,
+      rename,
+      mkdir: async (path) => void (await mkdir(path, { recursive: true })),
+      readdir,
+      unlink,
+    }),
+    compose: (title, ask) => editor!.compose(title, ask),
     postChat: (message) => editor?.postChat(message),
     needsYou: (card) => editor?.needsYou(card),
     sessionsChanged,
@@ -1675,12 +1895,14 @@ export function activate(context: vscode.ExtensionContext): void {
   editor = new ChainsEditor(context.extensionUri, join(context.globalStorageUri.fsPath, "chains.json"), ctx, context.globalState);
   const story = TEMPLATES.find((t) => t.id === "story")!;
   sessionsChanged();
+  void editor.sweepCardImages();
 
   context.subscriptions.push(
     output,
     view,
     start,
     awake,
+    vscode.workspace.registerFileSystemProvider(IMAGE_SCHEME, new HeldImages(images), { isReadonly: true, isCaseSensitive: true }),
     vscode.workspace.onDidChangeConfiguration((event) => event.affectsConfiguration("coordiner.keepAwake") && syncAwake()),
     // Another window may have run something meanwhile.
     view.onDidChangeVisibility(({ visible }) => visible && sessionsChanged()),

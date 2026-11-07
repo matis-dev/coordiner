@@ -81,6 +81,64 @@ export async function start() {
     if (message) announce(message);
   }
 
+  // ── Images on cards ─────────────────────────────────────────────────────────
+
+  // The card's images, each with Open, and Remove when the card can be edited.
+  function cardImages(chain, s, i, c, editable) {
+    const images = c.images ?? [];
+    return el(
+      "ul",
+      { class: "images", "aria-label": `Images for ${c.label}`, hidden: images.length === 0 },
+      images.map((image, n) =>
+        el(
+          "li",
+          { class: "image-chip" },
+          el("span", { class: "image-name" }, chatLogic.imageLabel(image)),
+          el("button", { type: "button", "aria-label": `Open ${image.name}`, onclick: () => vscode.postMessage({ type: "cardOpenImage", id: image.id }) }, "Open"),
+          editable
+            ? el("button", { type: "button", "data-focus": `image-${s}-${i}-${n}`, "aria-label": `Remove ${image.name} from ${c.label}`, onclick: () => {
+                const at = chatLogic.focusAfterRemove(n, images.length);
+                save(edit.removeCardImage(chain, s, i, image.id), `Removed ${image.name} from ${c.label}`, at === -1 ? `args-${s}-${i}` : `image-${s}-${i}-${at}`);
+              } }, "Remove")
+            : undefined,
+        ),
+      ),
+    );
+  }
+
+  // Each file is checked here for a quick answer, then sent to the extension, which checks it again and saves it.
+  function attachToCard(target, c, files) {
+    let pending = c.images?.length ?? 0;
+    for (const file of files) {
+      const problem = chatLogic.attachProblem(file.name, file.size, pending);
+      if (problem) {
+        announce(problem);
+        continue;
+      }
+      pending += 1;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = String(reader.result);
+        vscode.postMessage({ type: "cardAttachImage", target, name: file.name, data: url.slice(url.indexOf(",") + 1) });
+      };
+      reader.onerror = () => announce(`${file.name} could not be read.`);
+      reader.readAsDataURL(file);
+    }
+  }
+
+  // A saved image goes on the card it was attached to, with what is typed in the card's box and not saved yet.
+  function cardImageSaved(target, image) {
+    const [chainId, s, i] = target.split(":");
+    const chain = state.chains.find((c) => c.id === chainId);
+    const c = chain?.sessions[Number(s)]?.cards[Number(i)];
+    if (!c) return;
+    // The boxes on screen belong to the chain shown; another chain's card has nothing typed here.
+    const box = selectedId === chainId ? document.getElementById(`args-${s}-${i}`) : null;
+    const typed = box && box.value !== c.args ? edit.setArgs(chain, Number(s), Number(i), box.value) : chain;
+    const focus = document.activeElement?.dataset?.focus ?? `args-${s}-${i}`;
+    save(edit.addCardImage(typed, Number(s), Number(i), image), `Attached ${chatLogic.imageLabel(image)} to ${c.label}`, focus);
+  }
+
   // A setting changed on a template goes to a copy of it, which takes the template's place on screen. The copy's cards have the
   // same focus keys, so focus stays on the control that was changed.
   function saveSetting(chain, change, label, focus) {
@@ -215,14 +273,36 @@ export async function start() {
     if (running) children.push(el("span", { class: "flag running" }, state.runningAt.waiting ? "Waiting for you" : "Running"));
     if (editable) {
       const id = `args-${s}-${i}`;
+      const target = `${chain.id}:${s}:${i}`;
       children.push(
         el("label", { for: id, class: "visually-hidden" }, `Arguments for ${label}`),
-        el("textarea", { id, rows: 2, maxlength: chainsModule.MAX_ARGS, "data-focus": id, onchange: (e) => save(edit.setArgs(chain, s, i, e.target.value), `Saved ${label}`, id) }, c.args),
+        el(
+          "textarea",
+          {
+            id,
+            rows: 2,
+            maxlength: chainsModule.MAX_ARGS,
+            "data-focus": id,
+            onchange: (e) => save(edit.setArgs(chain, s, i, e.target.value), `Saved ${label}`, id),
+            onpaste: (e) => attachToCard(target, c, [...(e.clipboardData?.files ?? [])]),
+            ondragover: (e) => e.dataTransfer?.types.includes("Files") && (e.preventDefault(), e.stopPropagation()),
+            ondrop: (e) => {
+              if (!e.dataTransfer?.files.length) return;
+              e.preventDefault();
+              e.stopPropagation();
+              attachToCard(target, c, [...e.dataTransfer.files]);
+            },
+          },
+          c.args,
+        ),
+        cardImages(chain, s, i, c, true),
+        el("button", { type: "button", class: "attach", "data-focus": `attach-${s}-${i}`, "aria-label": `Attach images to ${label}`, onclick: () => vscode.postMessage({ type: "cardPickImages", target }) }, "Attach images…"),
       );
       const stray = logic.strayNote(c.args);
       if (stray) children.push(el("p", { class: "note" }, stray));
-    } else if (c.args) {
-      children.push(el("p", { class: "args" }, logic.argParts(c.args).map((part) => ("chip" in part ? el("span", { class: "chip" }, part.chip) : part.text))));
+    } else {
+      if (c.args) children.push(el("p", { class: "args" }, logic.argParts(c.args).map((part) => ("chip" in part ? el("span", { class: "chip" }, part.chip) : part.text))));
+      if (c.images?.length) children.push(cardImages(chain, s, i, c, false));
     }
     children.push(settings(chain, s, i, c));
     if (missing) children.push(el("span", { class: "flag" }, "Not available in this workspace"));
@@ -590,6 +670,8 @@ export async function start() {
   };
 
   window.addEventListener("message", (event) => {
+    if (event.data?.type === "cardImageSaved") return cardImageSaved(event.data.target, event.data.image);
+    if (event.data?.type === "cardImageProblem") return announce(event.data.reason);
     if (event.data?.type !== "state") return;
     // A save the extension could not make arrives as a storage problem; the banner shows it, and it is said aloud. A problem that
     // reads the same as the last is said again when the count of unsaved changes rose, since the editor went back once more.

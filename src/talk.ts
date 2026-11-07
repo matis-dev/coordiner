@@ -1,12 +1,16 @@
 import { MAX_INPUT_CHARS } from "./chains.ts";
 import { checkAnswers, type Pick } from "./chat-logic.ts";
+import { isEmpty, joinSaid, MAX_IMAGES, said, type ImageRef, type Said } from "./images.ts";
 import type { Question } from "./unattended.ts";
 
 // The run's chat for one run: what the user has queued, whether they asked to pause, the card waiting for them, and the question
 // it asked. The run engine and the chat webview both talk to it; it never talks to the model itself.
 
-export type Move = { kind: "message"; text: string } | { kind: "continue" } | { kind: "stopped" };
-export type Queued = { id: string; text: string };
+// Messages as one, in order.
+const joinedOf = (messages: readonly Said[]): Said => messages.reduce<Said>((all, m) => joinSaid(all, said(m.text, m.images)), said(""));
+
+export type Move = { kind: "message"; said: Said } | { kind: "continue" } | { kind: "stopped" };
+export type Queued = { id: string; text: string; images: readonly ImageRef[] };
 
 export type TalkSnapshot = {
   phase: "idle" | "running" | "waiting" | "ended";
@@ -26,8 +30,8 @@ export type TalkSnapshot = {
   // The latest reply carried a status line, so the card says where the chain goes next.
   continueReady: boolean;
   pausePending: boolean;
-  // Messages still queued when the run ended, joined; they go back to the user.
-  returned?: string;
+  // Messages still queued when the run ended, joined; they go back to the user, images and all.
+  returned?: Said;
   // The run has ended and the chat stays on its last session: each message is a turn of it (talkOn).
   afterRun?: boolean;
   // Why the waiting card stopped (a halt, a failed turn, the turn cap): Continue retries it, a message is a turn of it.
@@ -36,7 +40,7 @@ export type TalkSnapshot = {
 
 export type TalkHooks = {
   changed(snapshot: TalkSnapshot): void;
-  delivered(card: string, text: string): void;
+  delivered(card: string, said: Said): void;
   answered(card: string, question: string, answer: string): void;
 };
 
@@ -51,7 +55,7 @@ export class Talk {
   private state: TalkSnapshot = { phase: "idle", attended: false, queued: [], continueReady: false, pausePending: false };
   private waiter?: Waiter;
   private asking?: Asking;
-  private inject?: (text: string) => boolean;
+  private inject?: (said: Said) => boolean;
   private ids = 0;
 
   constructor(hooks: TalkHooks) {
@@ -59,8 +63,8 @@ export class Talk {
   }
 
   snapshot(): TalkSnapshot {
-    const { question, queued, ...rest } = this.state;
-    return { ...rest, queued: queued.map((q) => ({ ...q })), ...(question ? { question: { ...question, questions: [...question.questions] } } : {}) };
+    const { question, queued, returned, ...rest } = this.state;
+    return { ...rest, queued: queued.map((q) => ({ ...q, images: [...q.images] })), ...(returned ? { returned: { ...returned, images: [...returned.images] } } : {}), ...(question ? { question: { ...question, questions: [...question.questions] } } : {}) };
   }
 
   // ── The run engine ──────────────────────────────────────────────────────────
@@ -72,28 +76,28 @@ export class Talk {
   }
 
   // What the user queued, for the turn of `card` about to run; the queue is empty afterwards.
-  takeQueued(card: string): string | undefined {
+  takeQueued(card: string): Said | undefined {
     const { queued } = this.state;
     if (queued.length === 0) return undefined;
-    const text = queued.map((q) => q.text).join("\n\n");
+    const taken = joinedOf(queued);
     this.update({ ...this.state, queued: [] });
-    this.hooks.delivered(card, text);
-    return text;
+    this.hooks.delivered(card, taken);
+    return taken;
   }
 
   // The running turn's way in for a message (TurnControl.inject), while a turn runs; undefined between turns.
-  injectInto(inject?: (text: string) => boolean): void {
+  injectInto(inject?: (said: Said) => boolean): void {
     this.inject = inject;
   }
 
   // Messages a turn took but ended before starting (it failed or was stopped) go back in front of the queue: the next turn gets
   // them, or the user does when the run ends. Once the chat has ended, they go straight back to the user.
-  giveBack(texts: readonly string[]): void {
+  giveBack(messages: readonly Said[]): void {
     if (this.state.phase === "ended") {
-      this.update({ ...this.state, returned: [this.state.returned, ...texts].filter(Boolean).join("\n\n") });
+      this.update({ ...this.state, returned: joinedOf([...(this.state.returned ? [this.state.returned] : []), ...messages]) });
       return;
     }
-    this.update({ ...this.state, queued: [...texts.map((text) => ({ id: this.nextId("m"), text })), ...this.state.queued] });
+    this.update({ ...this.state, queued: [...messages.map((m) => ({ id: this.nextId("m"), text: m.text, images: m.images })), ...this.state.queued] });
   }
 
   pausePending(): boolean {
@@ -106,7 +110,7 @@ export class Talk {
     this.update({ ...rest, phase: "waiting", card, attended: true, continueReady: ready, pausePending: false, ...(nextCard ? { nextCard } : {}), ...(parked ? { parked } : {}) });
     if (signal.aborted) return Promise.resolve(this.resume({ kind: "stopped" }));
     const queued = this.takeQueued(card);
-    if (queued !== undefined) return Promise.resolve(this.resume({ kind: "message", text: queued }));
+    if (queued !== undefined) return Promise.resolve(this.resume({ kind: "message", said: queued }));
     return new Promise<Move>((resolve) => {
       const onAbort = () => this.waiter?.settle({ kind: "stopped" });
       this.waiter = {
@@ -150,7 +154,7 @@ export class Talk {
   // The run is over, and what was still queued goes back to the user. With `after`, the chat stays open on the run's last session,
   // waiting for the user as `after.card`; otherwise nothing more is sent.
   end({ after }: { after?: { card: string } } = {}): void {
-    const returned = this.state.queued.map((q) => q.text).join("\n\n");
+    const returned = this.state.queued.length > 0 ? joinedOf(this.state.queued) : undefined;
     this.closeQuestion()?.reject(new Error("the run has stopped"));
     this.waiter?.settle({ kind: "stopped" });
     const { nextCard: _gone, nextSession: _old, afterRun: _was, parked: _left, ...rest } = this.state;
@@ -162,25 +166,28 @@ export class Talk {
 
   // While a card waits, the message is its next turn. While one runs, the turn takes it at once when it can; otherwise, or behind
   // messages already queued, it is queued for the next turn. False when it was refused.
-  send(text: string): boolean {
+  send(message: Said): boolean {
     const { phase } = this.state;
-    if (text.trim() === "" || text.length > MAX_INPUT_CHARS || phase === "idle" || phase === "ended") return false;
+    if (isEmpty(message) || message.text.length > MAX_INPUT_CHARS || message.images.length > MAX_IMAGES || phase === "idle" || phase === "ended") return false;
     if (this.waiter) {
-      this.hooks.delivered(this.waiter.card, text);
-      this.waiter.settle({ kind: "message", text });
+      this.hooks.delivered(this.waiter.card, message);
+      this.waiter.settle({ kind: "message", said: message });
       return true;
     }
-    if (phase === "running" && this.state.queued.length === 0 && this.inject?.(text)) {
-      this.hooks.delivered(this.state.card!, text);
+    if (phase === "running" && this.state.queued.length === 0 && this.inject?.(message)) {
+      this.hooks.delivered(this.state.card!, message);
       return true;
     }
-    this.update({ ...this.state, queued: [...this.state.queued, { id: this.nextId("m"), text }] });
+    this.update({ ...this.state, queued: [...this.state.queued, { id: this.nextId("m"), text: message.text, images: message.images }] });
     return true;
   }
 
-  withdraw(id: string): void {
-    if (!this.state.queued.some((q) => q.id === id)) return;
-    this.update({ ...this.state, queued: this.state.queued.filter((q) => q.id !== id) });
+  // The message withdrawn, so its images can be let go; undefined when it is not queued.
+  withdraw(id: string): Queued | undefined {
+    const gone = this.state.queued.find((q) => q.id === id);
+    if (!gone) return undefined;
+    this.update({ ...this.state, queued: this.state.queued.filter((q) => q !== gone) });
+    return { ...gone, images: [...gone.images] };
   }
 
   // Takes effect when the running turn ends; a card already talking with the user has nothing to pause.
@@ -208,9 +215,10 @@ export class Talk {
 
   // ── Internals ───────────────────────────────────────────────────────────────
 
+  // Only ever while a card waits: end() settles the waiter before it marks the chat ended.
   private resume(move: Move): Move {
     const { parked: _was, ...rest } = this.state;
-    this.update({ ...rest, phase: this.state.phase === "ended" ? "ended" : "running", continueReady: false });
+    this.update({ ...rest, phase: "running", continueReady: false });
     return move;
   }
 

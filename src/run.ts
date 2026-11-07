@@ -1,5 +1,6 @@
 import { afterMskills, cardPrompt, inputOf, INPUTS, isEffort, MAX_INPUT_CHARS, REVIEW, skillDefault, type Card, type Chain, type ChainSession, type Effort } from "./chains.ts";
-import { parseStatus, suggested, withoutStatus, type Status, type Suggestion } from "./protocol.ts";
+import { joinSaid, said, type ImageRef, type Said } from "./images.ts";
+import { IMAGES_NOTE, parseStatus, suggested, withoutStatus, type Status, type Suggestion } from "./protocol.ts";
 import type { Spend, TurnRequest, TurnResult } from "./session.ts";
 import type { ModelOption } from "./skills.ts";
 import type { Talk } from "./talk.ts";
@@ -23,8 +24,9 @@ export type RunEvent =
   | { type: "step-finished"; index: number; status: StepStatus; detail: string; sessionId?: string; stats: TurnStats };
 
 // Where a continued run picks up: the card, what the step before it suggested (the model and effort it last ran on), the session
-// to resume (none starts it fresh), and the prompt its first turn sends.
-export type StartPoint = { at: At; suggestion?: Suggestion; resume?: string; prompt: string };
+// to resume (none starts it fresh), and the prompt its first turn sends. `unreached`: that prompt is the card's own, which never
+// reached a session, so the card's images go with it again.
+export type StartPoint = { at: At; suggestion?: Suggestion; resume?: string; prompt: string; unreached?: true };
 
 export type Outcome =
   | { status: "done"; text: string }
@@ -47,6 +49,8 @@ export type RunDeps = {
   talk: Pick<Talk, "at" | "takeQueued" | "pausePending" | "waitForYou" | "giveBack">;
   // Times each turn; Date.now when absent.
   now?: () => number;
+  // The images given with the run's input, and the card they go to: the first turn of that card carries them.
+  input?: { at: At; images: readonly ImageRef[] };
 };
 
 // Where a session sits in its chain: its number, and the first card of the session after it (a queued message may cross over).
@@ -123,7 +127,11 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
   let card = start?.card ?? 0;
   if (!cards[card]) return { outcome: { status: "refused", reason: "This session has no such card to continue at." }, card: 0 };
   let { label } = cards[card]!;
-  let prompt = start?.prompt ?? cardPrompt(cards[card]!);
+  // A card's own prompt, with the images that are part of its instructions; the card the run's input fills also carries the images
+  // given with it.
+  const own = (i: number): Said => said(cardPrompt(cards[i]!), [...(cards[i]!.images ?? []), ...(deps.input?.at.session === place.session && deps.input.at.card === i ? deps.input.images : [])]);
+  // A continued card's input images are gone (the chat that held them closed); its own images are on disk.
+  let prompt: Said = !start ? own(card) : said(start.prompt, start.unreached ? (cards[card]!.images ?? []) : []);
   let suggestion = start?.suggestion;
   let attended = cards[card]!.pause;
   let chat = false;
@@ -136,7 +144,7 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
   const enter = (next: number, nextSuggestion: Suggestion | undefined) => {
     card = next;
     ({ label } = cards[card]!);
-    prompt = cardPrompt(cards[card]!);
+    prompt = own(card);
     suggestion = nextSuggestion;
     attended = cards[card]!.pause;
     latest = undefined;
@@ -154,7 +162,7 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
         return { park: { outcome: { status: "halted", reason, sessionId }, reason }, step: ["halted", "no COORDINER status line after a reminder"] };
       }
       nudged = true;
-      prompt = NUDGE;
+      prompt = said(NUDGE);
       label = "Reminder";
       attended = false;
       return { step: ["done", "no status line; reminding"] };
@@ -169,7 +177,7 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     }
     if (kind === "loop") {
       ({ label } = cards[card]!);
-      prompt = cards[card]!.next ?? "Continue.";
+      prompt = said(cards[card]!.next ?? "Continue.");
       suggestion = status.suggestion;
       attended = false;
     } else {
@@ -182,16 +190,16 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
   // The card waits for the user. Returns the outcome to end the run with when they stop it; otherwise the next turn is set, with a
   // fresh turn allowance: their message, or the retry on Continue. A prompt that never reached the session (`unsent`) is the retry,
   // and a message goes in front of it, as a queued one does, so the card's own prompt is never lost.
-  const park = async ({ outcome, reason }: Parking, next: { retry: string } | { unsent: string }): Promise<Outcome | undefined> => {
+  const park = async ({ outcome, reason }: Parking, next: { retry: string } | { unsent: Said }): Promise<Outcome | undefined> => {
     const move = await deps.talk.waitForYou({ card: cards[card]!.label, ready: false, signal: deps.signal, parked: reason });
     if (move.kind === "stopped") return outcome;
     latest = undefined;
     nudged = false;
     unattendedTurns = 0;
     ({ label } = cards[card]!);
-    const retry = "unsent" in next ? next.unsent : next.retry;
+    const retry = "unsent" in next ? next.unsent : said(next.retry);
     if (move.kind === "message") {
-      prompt = "unsent" in next ? `${move.text}\n\n${retry}` : move.text;
+      prompt = "unsent" in next ? joinSaid(move.said, retry) : move.said;
       attended = true;
       chat = true;
       return undefined;
@@ -221,7 +229,10 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
     deps.emit({ type: "step-started", index, label: shown, ...modelSet, ...effortSet, ...(notes.length > 0 ? { note: notes.join("; ") } : {}), position: { session: place.session, card } });
     const now = deps.now ?? Date.now;
     const began = now();
-    const result = await deps.runTurn({ prompt: queued ? `${queued}\n\n${prompt}` : prompt, ...modelSet, ...effortSet, interactive: attended, ...(resume ? { resume } : {}) });
+    const sent = queued ? joinSaid(queued, prompt) : prompt;
+    // Images reach only the session they are sent in; a session after this one starts without them.
+    const noted = sent.images.length > 0 && place.nextSession !== undefined ? { ...sent, text: [sent.text, IMAGES_NOTE].filter((t) => t !== "").join("\n\n") } : sent;
+    const result = await deps.runTurn({ prompt: noted, ...modelSet, ...effortSet, interactive: attended, ...(resume ? { resume } : {}) });
     const stats: TurnStats = { ms: Math.max(0, now() - began), ...(result.usage ? { usage: result.usage } : {}) };
     const sessionId = result.sessionId;
     const finish = ([status, detail]: [StepStatus, string]) => deps.emit({ type: "step-finished", index, status, detail, ...(sessionId ? { sessionId } : {}), stats });
@@ -250,7 +261,7 @@ async function runSessionAt(session: ChainSession, deps: RunDeps, place: Session
       const move = await deps.talk.waitForYou({ card: cards[card]!.label, ready: latest !== undefined, signal: deps.signal, ...(next ? { nextCard: next } : {}) });
       if (move.kind === "stopped") return stop({ status: "stopped" });
       if (move.kind === "message") {
-        prompt = move.text;
+        prompt = move.said;
         attended = true;
         chat = true;
         continue;
@@ -300,7 +311,7 @@ export async function talkOn({ runTurn, talk, signal, card, sessionId, model, ef
     const move = await talk.waitForYou({ card, ready: false, signal });
     if (move.kind === "stopped") return;
     if (move.kind !== "message") continue;
-    const result = await runTurn({ prompt: move.text, ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(resume ? { resume } : {}) });
+    const result = await runTurn({ prompt: move.said, ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(resume ? { resume } : {}) });
     if (result.ok) resume = result.sessionId;
   }
 }
@@ -308,6 +319,14 @@ export async function talkOn({ runTurn, talk, signal, card, sessionId, model, ef
 export const runSession = async (session: ChainSession, deps: RunDeps): Promise<Outcome> => (await runSessionAt(session, deps)).outcome;
 
 export type FilledChain = { ok: true; chain: Chain } | { ok: false; reason: string };
+
+// The card the run's input goes to: the first whose arguments hold the chain's placeholder.
+export function inputCard(chain: Chain): At | undefined {
+  const kind = inputOf(chain);
+  if (kind === undefined) return undefined;
+  const { placeholder } = INPUTS[kind];
+  return chain.sessions.flatMap((s, session) => s.cards.flatMap((c, card) => (c.args.includes(placeholder) ? [{ session, card }] : [])))[0];
+}
 
 // The input (a story, an idea or a bug) fills the chain's placeholder; a chain without one runs as it is.
 export function fillInput(chain: Chain, text: string): FilledChain {
@@ -330,7 +349,7 @@ export type ChainDeps = RunDeps & {
 // While session `s` cannot start, the run waits for the user with the reason. Continue looks again; a message does too, and goes in
 // front of the session's first prompt once it starts; Stop ends the run halted there, so it can be continued at that session.
 async function pickUpAt(s: number, chain: Chain, deps: ChainDeps, pickUp: NonNullable<ChainDeps["pickUp"]>): Promise<Chain | Outcome> {
-  const held: string[] = [];
+  const held: Said[] = [];
   for (;;) {
     const picked = await pickUp(s, chain);
     if (typeof picked !== "string") {
@@ -339,7 +358,7 @@ async function pickUpAt(s: number, chain: Chain, deps: ChainDeps, pickUp: NonNul
     }
     const move = await deps.talk.waitForYou({ card: `Session ${s + 1}`, ready: false, signal: deps.signal, parked: picked });
     if (move.kind === "stopped") return { status: "halted", reason: picked, at: { session: s, card: 0 } };
-    if (move.kind === "message") held.push(move.text);
+    if (move.kind === "message") held.push(move.said);
   }
 }
 

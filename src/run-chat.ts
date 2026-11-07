@@ -4,6 +4,7 @@ import type { ChatMessage, ChatView, EditorMessage, Ending } from "./editor-prot
 import type { JournaledEntry, JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, CHAT_NOTE, INTERACTIVE_NOTE, suggestionNote, UNATTENDED_NOTE } from "./protocol.ts";
 import type { Chain, Effort } from "./chains.ts";
+import { said, type ImageRef, type Said } from "./images.ts";
 import type { Outcome, RunEvent, StepStatus } from "./run.ts";
 import type { Spend } from "./session.ts";
 import type { ModelOption } from "./skills.ts";
@@ -84,6 +85,8 @@ export type RunChat = {
   stepped(event: RunEvent): void;
   // The run picked up a changed chain: the line of stations draws it.
   relined(line: string[][]): void;
+  // What the user gave the run to start from, shown and journaled as their message to the card it goes to.
+  gave(card: string, given: Said): void;
 };
 
 const JOURNALED = new Set<Entry["kind"]>(["assistant", "tool", "divider", "card-end", "session-end", "failed"]);
@@ -158,6 +161,11 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
     ...(ending ? { ending } : {}),
     ...(freeChat ? { freeChat: true as const } : {}),
   });
+  // The transcript shows each image's chip, with its id while the chat holds it; the journal keeps only what the chip says.
+  const youSaid = (card: string, { text, images }: Said) => {
+    add([{ kind: "you", card, text, ...(images.length > 0 ? { images: images.map((i) => ({ ...i })) } : {}) }]);
+    record({ type: "you", card, text, ...(images.length > 0 ? { images: images.map(({ id: _held, ...shown }) => shown) } : {}) });
+  };
   const talk = new Talk({
     changed: (snapshot) => {
       const before = shown;
@@ -187,10 +195,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
       const waits = snapshot.phase === "waiting" && before?.phase !== "waiting" && !snapshot.afterRun;
       if (snapshot.card && (asked || waits)) needsYou(snapshot.card);
     },
-    delivered: (card, text) => {
-      add([{ kind: "you", card, text }]);
-      record({ type: "you", card, text });
-    },
+    delivered: (card, given) => youSaid(card, given),
     answered: (card, question, answer) => {
       add([{ kind: "answer", card, question: plain(question), answer: plain(answer) }]);
       record({ type: "answer", card, question, answer });
@@ -261,6 +266,7 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
       stationsLine = next;
       post({ type: "chatUpdate", chat: view() });
     },
+    gave: youSaid,
   };
 }
 
@@ -269,16 +275,30 @@ const NOTES: Record<Exclude<TurnMode, "after">, string> = { unattended: UNATTEND
 export type ChatAction = Extract<EditorMessage, { type: `chat${string}` }>;
 
 // What the extension does for the chat: stop the run (or end the chat after it), and the actions once the run has ended.
-export type ChatActions = { stop(): void; copyResume(): void; nextChain(): void; copyText(text: string): void; mergeSteps(): void };
+// `images` turns the ids a message names into the images the chat holds; undefined when one is not held. `release` lets go of
+// images no message will send.
+export type ChatActions = {
+  stop(): void;
+  copyResume(): void;
+  nextChain(): void;
+  copyText(text: string): void;
+  mergeSteps(): void;
+  images(ids: readonly string[]): ImageRef[] | undefined;
+  release(ids: readonly string[]): void;
+};
 
 // Acts on a message from the chat. False when the run's chat refused it (a stale question, an empty message); Talk decides.
-export function actOnChat(talk: Talk, { stop, copyResume, nextChain, copyText, mergeSteps }: ChatActions, message: ChatAction): boolean {
+export function actOnChat(talk: Talk, { stop, copyResume, nextChain, copyText, mergeSteps, images, release }: ChatActions, message: ChatAction): boolean {
   switch (message.type) {
-    case "chatSend":
-      return talk.send(message.text);
-    case "chatWithdraw":
-      talk.withdraw(message.id);
+    case "chatSend": {
+      const held = images(message.images);
+      return held !== undefined && talk.send(said(message.text, held));
+    }
+    case "chatWithdraw": {
+      const gone = talk.withdraw(message.id);
+      if (gone && gone.images.length > 0) release(gone.images.map((i) => i.id));
       return true;
+    }
     case "chatPause":
       talk.requestPause();
       return true;

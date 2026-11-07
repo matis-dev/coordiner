@@ -296,7 +296,7 @@ describe("continuePoint", () => {
   it("carries no suggestion over from a step that ran on the default model at its default effort", () => {
     const onDefault = started(1, "Implement", { model: undefined, position: { session: 0, card: 1 } });
     const point = continuePoint(defined(plan, planned, onDefault, { type: "outcome", outcome: { status: "stopped" } }))!;
-    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, resume: "s-1", prompt: cardPrompt(filledStory.sessions[0]!.cards[1]!) });
+    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, resume: "s-1", prompt: cardPrompt(filledStory.sessions[0]!.cards[1]!), unreached: true });
   });
 
   it("retries a stopped card in its session, with the model it ran on as the suggestion", () => {
@@ -316,7 +316,7 @@ describe("continuePoint", () => {
   it("picks up a run cut off by VS Code closing at the card that was running, in the session before it", () => {
     const point = continuePoint(defined(plan, planned, implement))!;
     // The cut turn left no session id, and none of its turns reached a session, so the card is sent its own prompt again.
-    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, suggestion: { model: "claude-haiku-5-5" }, resume: "s-1", prompt: cardPrompt(filledStory.sessions[0]!.cards[1]!) });
+    assert.deepEqual(point.from, { at: { session: 0, card: 1 }, suggestion: { model: "claude-haiku-5-5" }, resume: "s-1", prompt: cardPrompt(filledStory.sessions[0]!.cards[1]!), unreached: true });
     assert.equal(point.reason, CLOSED_MID_RUN);
   });
 
@@ -328,7 +328,7 @@ describe("continuePoint", () => {
   it("starts a later session fresh rather than resuming the session before it", () => {
     const review = started(2, "Review", { position: { session: 1, card: 0 } });
     const point = continuePoint(defined(plan, planned, implement, { type: "step-finished", index: 1, status: "done", detail: "done", sessionId: "s-2" }, review))!;
-    assert.deepEqual(point.from, { at: { session: 1, card: 0 }, suggestion: { model: "claude-opus-5-5" }, prompt: "/m-skills:code-review-architect-uncommitted" });
+    assert.deepEqual(point.from, { at: { session: 1, card: 0 }, suggestion: { model: "claude-opus-5-5" }, prompt: "/m-skills:code-review-architect-uncommitted", unreached: true });
   });
 
   // Preparing the review can halt or fail before the review card starts: the author's finished card is not the place to go back to.
@@ -337,7 +337,7 @@ describe("continuePoint", () => {
     const halted = defined(plan, planned, implement, implemented, { type: "outcome", outcome: { status: "halted", reason: "too many new files", at: { session: 1, card: 0 } } });
     assert.deepEqual(halted.lastCard, { at: { session: 1, card: 0 }, reached: false, finished: false });
     const point = continuePoint(halted)!;
-    assert.deepEqual(point.from, { at: { session: 1, card: 0 }, prompt: "/m-skills:code-review-architect-uncommitted" });
+    assert.deepEqual(point.from, { at: { session: 1, card: 0 }, prompt: "/m-skills:code-review-architect-uncommitted", unreached: true });
     assert.deepEqual([point.card, point.reason], ["Review", "too many new files"]);
     const failed = continuePoint(defined({ type: "outcome", outcome: { status: "failed", error: "git failed", at: { session: 1, card: 0 } } }))!;
     assert.deepEqual(failed.from.at, { session: 1, card: 0 });
@@ -553,5 +553,37 @@ describe("journalsOf", () => {
       { name: "prefix.jsonl", text: start("/r.coordiner/x-other") },
     ];
     assert.deepEqual(journalsOf(journals, "/r.coordiner/x"), []);
+  });
+});
+
+describe("parseJournal: images", () => {
+  const chip = { name: "ticket.png", bytes: 2048, mediaType: "image/png" };
+
+  it("rebuilds a message's image chips, without an id, so a reopened chat shows them and cannot open them", () => {
+    const run = parse({ type: "you", card: "Plan", text: "see this", images: [{ ...chip, id: "i1", data: "iVBORw0KGgo=" }] });
+    assert.deepEqual(run.entries.filter((e) => e.kind === "you"), [{ kind: "you", card: "Plan", text: "see this", images: [chip] }]);
+  });
+
+  it("drops a chip that does not fit and keeps the rest, and drops a list longer than a message holds", () => {
+    const bad = [
+      { ...chip, mediaType: "image/svg+xml" },
+      { ...chip, bytes: Number.NaN },
+      { ...chip, bytes: -1 },
+      { ...chip, bytes: 4_000_000 },
+      { ...chip, name: "x".repeat(256) },
+      "ticket.png",
+    ];
+    const run = parse({ type: "you", card: "Plan", text: "a", images: [...bad.slice(0, 4), { ...chip, name: "ok.png\u001b" }] }, { type: "you", card: "Plan", text: "b", images: Array(6).fill(chip) }, { type: "you", card: "Plan", text: "c", images: bad.slice(4) });
+    assert.deepEqual(run.entries.filter((e) => e.kind === "you"), [
+      { kind: "you", card: "Plan", text: "a", images: [{ ...chip, name: "ok.png" }] },
+      { kind: "you", card: "Plan", text: "b" },
+      { kind: "you", card: "Plan", text: "c" },
+    ]);
+  });
+
+  it("counts the images given with the run's input, and reads an older journal without them as before", () => {
+    const withImages = parseJournal([{ ...START, inputImages: [chip, chip] }].map((r) => JSON.stringify(r)).join("\n"), "f")!;
+    assert.equal(withImages.inputImages, 2);
+    assert.equal(parse().inputImages, undefined);
   });
 });

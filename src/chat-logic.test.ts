@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
-import { announcement, busyMeta, canGoOnAlone, canMerge, cardEndLine, chipLabel, lineOf, sessionEndLine, tokens, workedLine, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
+import { MAX_IMAGE_BYTES, MAX_IMAGES } from "./images.ts";
+import { attachProblem, focusAfterRemove, imageLabel, sendProblem, announcement, busyMeta, canGoOnAlone, canMerge, cardEndLine, chipLabel, lineOf, sessionEndLine, tokens, workedLine, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -98,7 +99,7 @@ describe("the end of the run", () => {
   it("announces the chat after the run once, then each wait as a pausing card does, and says when a queued message came back", () => {
     const after = view({ phase: "waiting", card: "Kickoff", attended: true, afterRun: true, ending: { status: "done" } });
     assert.equal(announcement(view(), after), "The run is done. You can keep talking to Kickoff.");
-    assert.equal(announcement(view(), { ...after, returned: "x" }), "The run is done. You can keep talking to Kickoff. Your queued message is back in the message box.");
+    assert.equal(announcement(view(), { ...after, returned: { text: "x", images: [] } }), "The run is done. You can keep talking to Kickoff. Your queued message is back in the message box.");
     assert.equal(announcement(after, after), undefined);
     assert.equal(announcement({ ...after, phase: "running" }, after), "Kickoff is waiting for you");
   });
@@ -140,7 +141,7 @@ describe("announcement", () => {
   });
 
   it("announces the end of the run, and a message handed back", () => {
-    assert.equal(announcement(view(), view({ phase: "ended", returned: "x" })), "The run ended before your message was sent; it is back in the message box.");
+    assert.equal(announcement(view(), view({ phase: "ended", returned: { text: "x", images: [] } })), "The run ended before your message was sent; it is back in the message box.");
     assert.equal(announcement(view(), view({ phase: "ended" })), "The run has ended.");
     assert.equal(announcement(view({ phase: "ended" }), view({ phase: "ended" })), undefined);
   });
@@ -153,9 +154,9 @@ describe("announcement", () => {
   });
 
   it("announces a queued message with where it goes, and a pause asked for", () => {
-    assert.equal(announcement(view(), view({ queued: [{ id: "m1", text: "x" }] })), "Message queued for the next turn of Implement");
-    assert.equal(announcement(undefined, view({ queued: [{ id: "m1", text: "x" }] })), "Message queued for the next turn of Implement");
-    assert.equal(announcement(view({ queued: [{ id: "m1", text: "x" }] }), view()), undefined);
+    assert.equal(announcement(view(), view({ queued: [{ id: "m1", text: "x", images: [] }] })), "Message queued for the next turn of Implement");
+    assert.equal(announcement(undefined, view({ queued: [{ id: "m1", text: "x", images: [] }] })), "Message queued for the next turn of Implement");
+    assert.equal(announcement(view({ queued: [{ id: "m1", text: "x", images: [] }] }), view()), undefined);
     assert.equal(announcement(view(), view({ pausePending: true })), "Implement will wait for you after this turn");
     assert.equal(announcement(view({ pausePending: true }), view({ pausePending: true })), undefined);
   });
@@ -557,5 +558,32 @@ describe("copyable", () => {
       assert.equal(copyable(text), false, code.toString(16));
     }
     assert.equal(hasHidden("sudo apt install docker.io — ok"), false);
+  });
+});
+
+describe("the composer's images", () => {
+  it("sends text, images, or both, and never neither or over-long text", () => {
+    assert.equal(sendProblem("  ", 0), "Write a message or attach an image first.");
+    assert.equal(sendProblem("", 1), undefined);
+    assert.equal(sendProblem("hi", 0), undefined);
+    assert.equal(sendProblem("x".repeat(MAX_INPUT_CHARS), 0), undefined);
+    assert.equal(sendProblem("x".repeat(MAX_INPUT_CHARS + 1), 2), `Keep it under ${MAX_INPUT_CHARS} characters.`);
+  });
+
+  it("attaches up to the most a message takes, and nothing over the size limit", () => {
+    assert.equal(attachProblem("a.png", MAX_IMAGE_BYTES, MAX_IMAGES - 1), undefined);
+    assert.equal(attachProblem("a.png", 10, MAX_IMAGES), `A message takes at most ${MAX_IMAGES} images.`);
+    assert.equal(attachProblem("big.png", MAX_IMAGE_BYTES + 1, 0), "big.png is larger than 3.8 MB.");
+  });
+
+  it("labels a chip with its name and size", () => {
+    assert.equal(imageLabel({ name: "ticket.png", bytes: 240_400, mediaType: "image/png" }), "ticket.png, 240 KB");
+  });
+
+  it("moves focus after a removal to the chip in its place, else the one before, else the message box", () => {
+    assert.equal(focusAfterRemove(0, 3), 0);
+    assert.equal(focusAfterRemove(1, 3), 1);
+    assert.equal(focusAfterRemove(2, 3), 1);
+    assert.equal(focusAfterRemove(0, 1), -1);
   });
 });

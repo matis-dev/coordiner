@@ -1,4 +1,5 @@
 import { defaultCard, type Card, type Chain, type ChainSession, type Effort } from "./chains.ts";
+import { MAX_IMAGES, type ImageRef } from "./images.ts";
 
 // Pure edits for the chains editor; the webview loads this module from dist/. Every function returns a new chain, and an index
 // out of range leaves the chain as it was.
@@ -29,6 +30,14 @@ export const setModel = (chain: Chain, s: number, i: number, model?: string, eff
   withCard(chain, s, i, ({ model: _model, effort: _effort, ...c }) => ({ ...c, ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}) }));
 export const setEffort = (chain: Chain, s: number, i: number, effort?: Effort): Chain =>
   withCard(chain, s, i, ({ effort: _effort, ...c }) => ({ ...c, ...(effort !== undefined ? { effort } : {}) }));
+// An image becomes part of the card's instructions; one it already has, or one past the most a card takes, is not added.
+export const addCardImage = (chain: Chain, s: number, i: number, image: ImageRef): Chain =>
+  withCard(chain, s, i, (c) => (c.images?.some((x) => x.id === image.id) || (c.images?.length ?? 0) >= MAX_IMAGES ? c : { ...c, images: [...(c.images ?? []), image] }));
+export const removeCardImage = (chain: Chain, s: number, i: number, id: string): Chain =>
+  withCard(chain, s, i, ({ images, ...c }) => {
+    const left = (images ?? []).filter((x) => x.id !== id);
+    return left.length > 0 ? { ...c, images: left } : c;
+  });
 export const setPause = (chain: Chain, s: number, i: number, pause: boolean): Chain => withCard(chain, s, i, (c) => ({ ...c, pause }));
 export const setFollow = (chain: Chain, s: number, i: number, follow: boolean): Chain =>
   withCard(chain, s, i, ({ follow: _follow, ...c }) => ({ ...c, ...(follow ? { follow: true as const } : {}) }));

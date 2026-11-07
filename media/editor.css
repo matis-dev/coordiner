@@ -804,6 +804,27 @@ section.drop-end { outline: 2px dashed var(--anchor); outline-offset: 4px; borde
 .question .option .note { margin: 0 0 0 1.6em; }
 .question input[type="text"] { margin-left: 1.6em; width: calc(100% - 2em); box-sizing: border-box; }
 
+/* Image chips: flat, one row that wraps; the name in the host font, the size in tabular figures. Not boxed cards (the brief). */
+.attachments, .images {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px var(--gap);
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.image-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: var(--gap);
+  border-left: 2px solid var(--anchor);
+}
+
+.image-chip .image-name { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.image-chip button { min-height: 24px; min-width: 24px; }
+
 .composer .toolbar { margin: var(--gap) 0 0; }
 /* Send stays at the right end, so Continue appearing never moves it. */
 .composer .toolbar .primary { display: flex; gap: var(--gap); margin-left: auto; }

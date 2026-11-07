@@ -1,3 +1,4 @@
+import type { ImageRef } from "./images.ts";
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
@@ -31,6 +32,7 @@ async function open(stored?: { selectedId: string }) {
     window: w,
     document: w.document,
     Node: w.Node,
+    FileReader: w.FileReader,
     requestAnimationFrame: (callback: () => void) => callback(),
     acquireVsCodeApi: () => ({ postMessage: (m: Posted) => posted.push(m), getState: () => state, setState: (s: unknown) => (state = s) }),
   });
@@ -57,6 +59,7 @@ async function open(stored?: { selectedId: string }) {
     stored: () => state,
     all,
     named,
+    message: (data: object) => w.dispatchEvent(new w.MessageEvent("message", { data })),
     send: (patch: Partial<Omit<EditorState, "type">> = {}) => w.dispatchEvent(new w.MessageEvent("message", { data: { type: "state", ...base(), ...patch } })),
     select: (name: string) => named(name).click(),
     focused: () => doc.activeElement as HTMLElement | null,
@@ -1139,5 +1142,155 @@ describe("chains webview: m-skills and skill listing", () => {
     page.w.dispatchEvent(new page.w.MessageEvent("message", { data: { type: "other" } }));
     page.w.dispatchEvent(new page.w.MessageEvent("message", { data: null }));
     assert.equal(page.doc.getElementById("detail")!.children.length, 0);
+  });
+});
+
+describe("chains webview: images on a card", () => {
+  const shot = { id: "a".repeat(64), name: "ticket.png", bytes: 2048, mediaType: "image/png" as const };
+  const mock = { id: "b".repeat(64), name: "mockup.jpg", bytes: 12, mediaType: "image/jpeg" as const };
+  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 200 && !done(); i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(done(), "never happened");
+  };
+  const withImages = (...images: ImageRef[]): Chain => ({ ...own, sessions: [{ cards: [{ ...own.sessions[0]!.cards[0]!, images }, ...own.sessions[0]!.cards.slice(1)] }] });
+  const ready = async (chain: Chain = own) => {
+    const page = await open({ selectedId: "own" });
+    page.send({ chains: [chain, other] });
+    return page;
+  };
+
+  it("sends an image pasted into a card's box to the extension to save, naming the card, and leaves the text paste alone", async () => {
+    const page = await ready();
+    const paste = new page.w.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { files: [new page.w.File([new Uint8Array(PNG)], "ticket.png")] } });
+    page.doc.getElementById("args-0-0")!.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, false);
+    await until(() => page.posted.some((m) => m.type === "cardAttachImage"));
+    assert.deepEqual(page.posted.at(-1), { type: "cardAttachImage", target: "own:0:0", name: "ticket.png", data: Buffer.from(PNG).toString("base64") });
+  });
+
+  it("takes files dropped on a card's box without moving cards, and asks the picker from the card's Attach images", async () => {
+    const page = await ready();
+    const drop = new page.w.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["Files"], files: [new page.w.File([new Uint8Array(PNG)], "drop.png")] } });
+    page.doc.getElementById("args-0-1")!.dispatchEvent(drop);
+    assert.equal(drop.defaultPrevented, true);
+    await until(() => page.posted.some((m) => m.type === "cardAttachImage"));
+    assert.equal((page.posted.at(-1) as unknown as { target: string }).target, "own:0:1");
+    page.named("Attach images to a").click();
+    assert.deepEqual(page.posted.at(-1), { type: "cardPickImages", target: "own:0:0" });
+  });
+
+  it("puts a saved image on its card with the text typed there, saves the chain, and says so", async () => {
+    const page = await ready();
+    const box = page.doc.getElementById("args-0-0") as HTMLTextAreaElement;
+    box.focus();
+    box.value = "see the ticket";
+    page.message({ type: "cardImageSaved", target: "own:0:0", image: shot });
+    const saved = page.saves().at(-1)!.sessions[0]!.cards[0]!;
+    assert.deepEqual([saved.args, saved.images], ["see the ticket", [shot]]);
+    assert.equal(page.status(), "Attached ticket.png, 2 KB to a");
+    assert.equal(page.focused()?.id, "args-0-0");
+  });
+
+  it("puts a saved image on a chain that is not shown without the text typed in the shown chain, and on a card with nothing typed", async () => {
+    const page = await ready();
+    (page.doc.getElementById("args-0-0") as HTMLTextAreaElement).value = "a draft for Own";
+    (page.doc.activeElement as HTMLElement).blur();
+    page.message({ type: "cardImageSaved", target: "other:0:0", image: shot });
+    const onOther = page.saves().at(-1)!;
+    assert.equal(onOther.id, "other");
+    assert.deepEqual([onOther.sessions[0]!.cards[0]!.args, onOther.sessions[0]!.cards[0]!.images], [other.sessions[0]!.cards[0]!.args, [shot]]);
+    assert.equal(page.focused()?.id, "args-0-0", "nothing focused had a focus key: focus goes to the card's box");
+    page.message({ type: "cardImageSaved", target: "own:0:1", image: mock });
+    const onOwn = page.saves().at(-1)!.sessions[0]!.cards[1]!;
+    assert.deepEqual([onOwn.args, onOwn.images], [own.sessions[0]!.cards[1]!.args, [mock]]);
+  });
+
+  it("takes a drag of files over a card's box for itself, so the card list does not see it, and leaves other drags alone", async () => {
+    const page = await ready();
+    const box = page.doc.getElementById("args-0-0")!;
+    let reachedList = 0;
+    box.parentElement!.addEventListener("dragover", () => void reachedList++);
+    const over = (types: string[]) => {
+      const event = new page.w.Event("dragover", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", { value: { types, files: [] } });
+      box.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    assert.equal(over(["Files"]), true);
+    assert.equal(reachedList, 0);
+    assert.equal(over(["text/plain"]), false);
+    assert.equal(reachedList, 1);
+  });
+
+  it("ignores a paste with no clipboard data and a drop with no files on a card's box", async () => {
+    const page = await ready();
+    const box = page.doc.getElementById("args-0-0")!;
+    box.dispatchEvent(new page.w.Event("paste", { bubbles: true }));
+    const drop = new page.w.Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["text/plain"], files: [] } });
+    box.dispatchEvent(drop);
+    assert.equal(drop.defaultPrevented, false);
+    assert.equal(page.posted.some((m) => m.type === "cardAttachImage"), false);
+  });
+
+  it("says when a file for a card cannot be read", async () => {
+    const page = await ready();
+    (globalThis as Record<string, unknown>).FileReader = class {
+      onerror = () => undefined;
+      readAsDataURL() {
+        setImmediate(() => this.onerror());
+      }
+    };
+    const paste = new page.w.Event("paste", { bubbles: true });
+    Object.defineProperty(paste, "clipboardData", { value: { files: [new page.w.File([new Uint8Array(PNG)], "locked.png")] } });
+    page.doc.getElementById("args-0-0")!.dispatchEvent(paste);
+    await until(() => page.status() === "locked.png could not be read.");
+    assert.equal(page.posted.some((m) => m.type === "cardAttachImage"), false);
+  });
+
+  it("shows a template card's images with Open only", async () => {
+    const story = TEMPLATES.find((t) => t.id === "story")!;
+    const [first, ...rest] = story.sessions;
+    const withShot: Chain = { ...story, sessions: [{ cards: [{ ...first!.cards[0]!, images: [shot] }, ...first!.cards.slice(1)] }, ...rest] };
+    const page = await open({ selectedId: "story" });
+    page.send({ templates: [withShot, ...TEMPLATES.filter((t) => t.id !== "story")] });
+    assert.deepEqual(page.all(".card .images .image-name").map((n) => n.textContent), ["ticket.png, 2 KB"]);
+    page.named("Open ticket.png").click();
+    assert.deepEqual(page.posted.at(-1), { type: "cardOpenImage", id: shot.id });
+    assert.equal(page.all(".card .images button").length, 1, "no Remove on a template");
+  });
+
+  it("ignores a saved image for a card that is gone", async () => {
+    const page = await ready();
+    page.message({ type: "cardImageSaved", target: "gone:0:0", image: shot });
+    assert.equal(page.saves().length, 0);
+  });
+
+  it("shows a card's images with Open and Remove; Remove saves the card without it and moves focus on", async () => {
+    const page = await ready(withImages(shot, mock));
+    assert.deepEqual(page.all(".card .images .image-name").map((n) => n.textContent), ["ticket.png, 2 KB", "mockup.jpg, 12 B"]);
+    page.named("Open ticket.png").click();
+    assert.deepEqual(page.posted.at(-1), { type: "cardOpenImage", id: shot.id });
+    page.named("Remove ticket.png from a").click();
+    assert.deepEqual(page.saves().at(-1)!.sessions[0]!.cards[0]!.images, [mock]);
+    assert.equal(page.status(), "Removed ticket.png from a");
+    assert.equal(page.focused()?.getAttribute("aria-label"), "Remove mockup.jpg from a");
+    page.named("Remove mockup.jpg from a").click();
+    assert.equal(page.saves().at(-1)!.sessions[0]!.cards[0]!.images, undefined);
+    assert.equal(page.focused()?.id, "args-0-0");
+  });
+
+  it("refuses a sixth image on a card on the page, and says why an image was refused", async () => {
+    const full = withImages(...Array.from({ length: 5 }, (_, n) => ({ ...shot, id: String(n).repeat(64) })));
+    const page = await ready(full);
+    const paste = new page.w.Event("paste", { bubbles: true });
+    Object.defineProperty(paste, "clipboardData", { value: { files: [new page.w.File([new Uint8Array(PNG)], "one-more.png")] } });
+    page.doc.getElementById("args-0-0")!.dispatchEvent(paste);
+    assert.equal(page.status(), "A message takes at most 5 images.");
+    page.message({ type: "cardImageProblem", target: "own:0:0", reason: "x.svg is not a PNG, JPEG, GIF or WebP image." });
+    assert.equal(page.status(), "x.svg is not a PNG, JPEG, GIF or WebP image.");
   });
 });

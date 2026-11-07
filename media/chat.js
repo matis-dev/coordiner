@@ -14,6 +14,13 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
 
   const idle = { phase: "idle", attended: false, queued: [], continueReady: false, pausePending: false };
   let chat = idle;
+  // Images attached and not sent yet, as the extension holds them (their refs; the data stays there), and how many are on their way.
+  let pending = [];
+  let reading = 0;
+  // Run's input, asked for in this composer: its title and question, until the extension ends it. `draft`: what the box held when
+  // it was asked for (a message to the chat after a run), put back when it ends.
+  let composing;
+  let draft;
 
   const title = el("h2", { id: "chat-h" }, "Run");
   // Next to the title, so it shows while the chat is hidden: a card working, or waiting for the user. Not a live region; the
@@ -42,10 +49,18 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   const form = el("form", { class: "question", "aria-labelledby": "question-h", hidden: true, onsubmit: (e) => (e.preventDefault(), submitAnswers()) });
   const inputLabel = el("label", { for: "chat-input" }, "Message");
   const input = el("textarea", { id: "chat-input", rows: 3, "aria-describedby": "chat-error", onkeydown: (e) => {
+    if (e.key === "Escape" && composing) {
+      e.preventDefault();
+      return cancelCompose();
+    }
     if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey)) return;
     e.preventDefault();
     send();
-  } });
+  }, onpaste: (e) => attach([...(e.clipboardData?.files ?? [])]) });
+  // The images to send, each with its Remove; shown only while there are some.
+  const attachments = el("ul", { class: "attachments", "aria-label": "Images to send", hidden: true });
+  const attachButton = el("button", { type: "button", onclick: () => vscode.postMessage({ type: "pickImages" }) }, "Attach images…");
+  const cancelButton = el("button", { type: "button", hidden: true, onclick: () => cancelCompose() }, "Cancel");
   const error = el("p", { id: "chat-error", class: "reason" });
   const sendButton = el("button", { type: "button", class: "run", onclick: () => send() }, "Send");
   const pauseButton = el("button", { type: "button", onclick: () => {
@@ -73,7 +88,24 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     focusMerge = true;
     vscode.postMessage({ type: "chatMergeSteps" });
   } }, "Merge steps");
-  const composer = el("div", { class: "composer" }, inputLabel, input, error, el("div", { class: "toolbar" }, pauseButton, copyButton, mergeButton, nextButton, stopButton, el("div", { class: "primary" }, continueButton, sendButton)));
+  const composer = el(
+    "div",
+    {
+      class: "composer",
+      // Files dropped on the composer are attached as pasted ones are; VS Code may keep a drop for itself unless Shift is held.
+      ondragover: (e) => e.dataTransfer?.types.includes("Files") && e.preventDefault(),
+      ondrop: (e) => {
+        if (!e.dataTransfer?.files.length) return;
+        e.preventDefault();
+        attach([...e.dataTransfer.files]);
+      },
+    },
+    inputLabel,
+    input,
+    error,
+    attachments,
+    el("div", { class: "toolbar" }, attachButton, pauseButton, copyButton, mergeButton, nextButton, stopButton, el("div", { class: "primary" }, cancelButton, continueButton, sendButton)),
+  );
   const headActions = el("div", { class: "chat-head-actions" }, maxButton, toggle);
   const body = el("div", { id: "chat-body" }, line, cacheLine, transcript, queuedList, form, composer);
   root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip, busyLine), headActions), lineNav, body);
@@ -161,14 +193,102 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   }
 
   function send() {
-    if (!logic.canSend(chat)) return announce("No run is going, so there is nobody to send this to.");
+    if (!composing && !logic.canSend(chat)) return announce("No run is going, so there is nobody to send this to.");
     const text = input.value;
-    if (text.trim() === "") return showError("Write a message first.");
-    if (text.length > maxChars) return showError(`Keep it under ${maxChars} characters.`);
+    const problem = logic.sendProblem(text, pending.length);
+    if (problem) return showError(problem);
+    if (reading > 0) return showError("An image is still being read. Send again in a moment.");
     showError("");
-    vscode.postMessage({ type: "chatSend", text });
+    const images = pending.map((i) => i.id);
+    // Run's input stays in the box until the extension takes it (composeEnd), so a refusal loses nothing.
+    if (composing) return vscode.postMessage({ type: "composeDone", text, images });
+    vscode.postMessage({ type: "chatSend", text, images });
     input.value = "";
+    setPending([]);
     input.focus();
+  }
+
+  // ── Images ──────────────────────────────────────────────────────────────────
+
+  // Each file is checked here for a quick answer, then sent to the extension, which checks the image itself and holds it.
+  function attach(files) {
+    for (const file of files) {
+      const problem = logic.attachProblem(file.name, file.size, pending.length + reading);
+      if (problem) {
+        showError(problem);
+        continue;
+      }
+      reading += 1;
+      const reader = new FileReader();
+      reader.onload = () => {
+        reading -= 1;
+        const url = String(reader.result);
+        vscode.postMessage({ type: "attachImage", name: file.name, data: url.slice(url.indexOf(",") + 1) });
+      };
+      reader.onerror = () => {
+        reading -= 1;
+        showError(`${file.name} could not be read.`);
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+
+  function setPending(next) {
+    pending = next;
+    attachments.hidden = pending.length === 0;
+    attachments.replaceChildren(
+      ...pending.map((image, i) =>
+        el(
+          "li",
+          { class: "image-chip" },
+          el("span", { class: "image-name" }, logic.imageLabel(image)),
+          el("button", { type: "button", "aria-label": `Remove ${image.name}`, onclick: () => remove(i) }, "Remove"),
+        ),
+      ),
+    );
+  }
+
+  function remove(i) {
+    const image = pending[i];
+    vscode.postMessage({ type: "detachImage", id: image.id });
+    const at = logic.focusAfterRemove(i, pending.length);
+    setPending(pending.filter((_, j) => j !== i));
+    (at === -1 ? input : attachments.querySelectorAll("button")[at]).focus();
+    announce(`Removed ${image.name}`);
+  }
+
+  // The images go with the cancelled input; the extension lets them go.
+  function cancelCompose() {
+    for (const image of pending) vscode.postMessage({ type: "detachImage", id: image.id });
+    vscode.postMessage({ type: "composeCancel" });
+  }
+
+  function compose(next) {
+    if (!composing) {
+      draft = { text: input.value, images: pending };
+      input.value = "";
+      setPending([]);
+    }
+    composing = next;
+    render(chat, chat);
+    if (body.hidden) setOpen(true);
+    input.focus();
+  }
+
+  // A chip in the transcript: Open shows the image while the chat holds it.
+  function imageChips(images) {
+    return el(
+      "ul",
+      { class: "images" },
+      images.map((image) =>
+        el(
+          "li",
+          { class: "image-chip" },
+          el("span", { class: "image-name" }, logic.imageLabel(image)),
+          image.id ? el("button", { type: "button", "data-image": image.id, "aria-label": `Open ${image.name}`, onclick: () => vscode.postMessage({ type: "openImage", id: image.id }) }, "Open") : undefined,
+        ),
+      ),
+    );
   }
 
   // ── Transcript ──────────────────────────────────────────────────────────────
@@ -187,7 +307,14 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
           e.input ? el("pre", { class: "tool-input", "data-tool": e.name }, e.input) : undefined,
         );
       case "you":
-        return el("li", { class: "entry you has-copy" }, el("span", { class: "who" }, `You to ${e.card}`), messageCopy(e.text, `your message to ${e.card}`), el("p", { class: "text" }, e.text));
+        return el(
+          "li",
+          { class: `entry you${e.text ? " has-copy" : ""}` },
+          el("span", { class: "who" }, `You to ${e.card}`),
+          e.text ? messageCopy(e.text, `your message to ${e.card}`) : undefined,
+          e.text ? el("p", { class: "text" }, e.text) : undefined,
+          e.images?.length ? imageChips(e.images) : undefined,
+        );
       case "answer":
         return el("li", { class: "entry you" }, el("span", { class: "who" }, `You answered ${e.card}`), el("p", { class: "text" }, `${e.question} → ${e.answer}`));
       case "decided":
@@ -525,7 +652,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   function render(next, prev) {
     chat = next;
     // Nothing to send, stop, resize or read before the first run: only the heading and the status line show.
-    const folded = next.phase === "idle";
+    const folded = next.phase === "idle" && !composing;
     headActions.hidden = folded;
     composer.hidden = folded;
     transcript.hidden = folded;
@@ -540,17 +667,21 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     // A working card is in the chip; the line says only what the chip cannot.
     line.hidden = line.textContent === "";
     renderLine(next);
-    inputLabel.textContent = next.card ? `Message to ${next.card}` : "Message";
-    sendButton.setAttribute("aria-disabled", String(!logic.canSend(next)));
+    inputLabel.textContent = composing ? composing.title : next.card ? `Message to ${next.card}` : "Message";
+    input.placeholder = composing ? composing.ask : "";
+    sendButton.textContent = composing ? "Start" : "Send";
+    sendButton.setAttribute("aria-disabled", String(!composing && !logic.canSend(next)));
+    cancelButton.hidden = !composing;
     stopButton.setAttribute("aria-disabled", String(!logic.canSend(next)));
     stopButton.textContent = next.afterRun ? "End chat" : "Stop run";
-    pauseButton.hidden = Boolean(next.afterRun);
+    pauseButton.hidden = Boolean(next.afterRun || composing);
+    stopButton.hidden = Boolean(composing);
     pauseButton.setAttribute("aria-disabled", String(!logic.canPause(next)));
     pauseButton.textContent = next.pausePending ? "Pausing after this turn" : "Pause after this turn";
-    continueButton.hidden = next.phase !== "waiting" || Boolean(next.afterRun);
-    copyButton.hidden = !next.afterRun;
-    mergeButton.hidden = !logic.canMerge(next);
-    nextButton.hidden = !next.afterRun;
+    continueButton.hidden = Boolean(composing) || next.phase !== "waiting" || Boolean(next.afterRun);
+    copyButton.hidden = Boolean(composing) || !next.afterRun;
+    mergeButton.hidden = Boolean(composing) || !logic.canMerge(next);
+    nextButton.hidden = Boolean(composing) || !next.afterRun;
     continueButton.textContent = logic.continueLabel(next);
     continueButton.classList.toggle("run", next.continueReady || Boolean(next.parked));
 
@@ -560,7 +691,8 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
           "li",
           {},
           el("span", { class: "who" }, `Queued for ${logic.destination(next)}`),
-          el("p", { class: "text" }, q.text),
+          q.text ? el("p", { class: "text" }, q.text) : undefined,
+          q.images.length ? imageChips(q.images.map(({ id: _held, ...shown }) => shown)) : undefined,
           el("button", { type: "button", "aria-label": `Withdraw queued message ${i + 1}`, onclick: () => {
             vscode.postMessage({ type: "chatWithdraw", id: q.id });
             input.focus();
@@ -585,7 +717,9 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     const runEnded = (next.afterRun && !prev?.afterRun) || (next.phase === "ended" && prev?.phase !== "ended");
     if (prev && runEnded && root.contains(document.activeElement)) input.focus();
     if (next.returned && !prev?.returned) {
-      input.value = input.value ? `${next.returned}\n\n${input.value}` : next.returned;
+      const { text, images } = next.returned;
+      if (text) input.value = input.value ? `${text}\n\n${input.value}` : text;
+      setPending([...images, ...pending]);
     }
     const said = prev && !readByFocus ? logic.announcement(prev, next) : undefined;
     if (said) announce(said);
@@ -652,6 +786,30 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
       append(m.entries);
       const said = logic.entriesAnnouncement(m.entries);
       if (said) announce(said);
+    } else if (m?.type === "compose") {
+      compose({ title: m.title, ask: m.ask });
+    } else if (m?.type === "composeEnd") {
+      composing = undefined;
+      input.value = draft?.text ?? "";
+      setPending(draft?.images ?? []);
+      draft = undefined;
+      showError("");
+      render(chat, chat);
+    } else if (m?.type === "attached") {
+      setPending([...pending, m.image]);
+      announce(`Attached ${logic.imageLabel(m.image)}`);
+    } else if (m?.type === "imageProblem") {
+      showError(m.reason);
+    } else if (m?.type === "detached") {
+      const gone = new Set(m.ids);
+      // An image let go can no longer be opened; a chip still waiting to be sent goes.
+      for (const button of transcript.querySelectorAll("button[data-image]")) if (gone.has(button.dataset.image)) button.remove();
+      if (draft) draft = { ...draft, images: draft.images.filter((i) => !gone.has(i.id)) };
+      const left = pending.filter((i) => !gone.has(i.id));
+      if (left.length < pending.length) {
+        announce(left.length === pending.length - 1 ? `Removed ${pending.find((i) => gone.has(i.id)).name}` : `Removed ${pending.length - left.length} images`);
+        setPending(left);
+      }
     }
   });
 

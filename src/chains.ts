@@ -1,8 +1,11 @@
-// No runtime imports: the editor webview loads this module from dist/ as well.
+// Runtime imports only from modules that load in the webview too (images.ts, text.ts): the editor loads this module from dist/.
+import { CARD_IMAGE_ID, isImageType, MAX_IMAGE_BYTES, MAX_IMAGE_NAME, MAX_IMAGES, type ImageRef } from "./images.ts";
 
 // `model` and `effort` set how the card's turns run; absent, the step before it may suggest them (src/run.ts `turnSettings`), else the
 // session's default model at the model's default effort. `follow` makes the previous step's suggestion win over the card's own values.
-export type Card = { skill: string; args: string; label: string; pause: boolean; next?: string; model?: string; effort?: Effort; follow?: true };
+// `images`: pictures that are part of the card's instructions, sent with its first turn on every run; the card keeps only their refs,
+// and the extension keeps the files (src/card-images.ts).
+export type Card = { skill: string; args: string; label: string; pause: boolean; next?: string; model?: string; effort?: Effort; follow?: true; images?: ImageRef[] };
 export type ChainSession = { cards: Card[] };
 export type Chain = { id: string; name: string; sessions: ChainSession[]; builtIn?: true };
 
@@ -192,6 +195,18 @@ const TEMPLATE_IDS = new Set(TEMPLATES.map((t) => t.id));
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const text = (v: unknown, max: number, min = 0): v is string => typeof v === "string" && v.length >= min && v.length <= max;
 
+// A card's image refs, rebuilt field by field: at most MAX_IMAGES, each named by its hash.
+function parseImages(v: unknown): ImageRef[] | undefined {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_IMAGES) return undefined;
+  const images: ImageRef[] = [];
+  for (const i of v) {
+    if (!isRecord(i) || !text(i.id, 64) || !CARD_IMAGE_ID.test(i.id) || !text(i.name, MAX_IMAGE_NAME, 1) || !isImageType(i.mediaType)) return undefined;
+    if (!Number.isInteger(i.bytes) || (i.bytes as number) < 0 || (i.bytes as number) > MAX_IMAGE_BYTES || images.some((x) => x.id === i.id)) return undefined;
+    images.push({ id: i.id, name: i.name, bytes: i.bytes as number, mediaType: i.mediaType });
+  }
+  return images;
+}
+
 function parseCard(v: unknown): Card | string {
   if (!isRecord(v)) return "a card is not an object";
   if (!text(v.skill, 100) || !SKILL.test(v.skill)) return "a card has an invalid skill name";
@@ -200,6 +215,8 @@ function parseCard(v: unknown): Card | string {
   if (v.model !== undefined && !(typeof v.model === "string" && MODEL.test(v.model))) return `card ${v.skill} has an invalid model`;
   if (v.effort !== undefined && !isEffort(v.effort)) return `card ${v.skill} has an invalid effort`;
   if (v.follow !== undefined && v.follow !== true) return `card ${v.skill} has an invalid follow setting`;
+  const images = v.images === undefined ? undefined : parseImages(v.images);
+  if (v.images !== undefined && !images) return `card ${v.skill} has invalid images`;
   return {
     skill: v.skill,
     args: v.args,
@@ -209,6 +226,7 @@ function parseCard(v: unknown): Card | string {
     ...(v.model !== undefined ? { model: v.model } : {}),
     ...(v.effort !== undefined ? { effort: v.effort } : {}),
     ...(v.follow ? { follow: true as const } : {}),
+    ...(images ? { images } : {}),
   };
 }
 
