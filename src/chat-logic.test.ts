@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_INPUT_CHARS } from "./chains.ts";
 import { MAX_IMAGE_BYTES, MAX_IMAGES } from "./images.ts";
-import { attachProblem, focusAfterRemove, imageLabel, sendProblem, announcement, busyMeta, canGoOnAlone, canMerge, cardEndLine, chipLabel, lineOf, sessionEndLine, tokens, workedLine, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
+import { activityLine, attachProblem, focusAfterRemove, imageLabel, sendProblem, announcement, canGoOnAlone, canMerge, cardEndLine, chipLabel, lineOf, sessionEndLine, tokens, workedLine, canPause, canSend, CHAT_HEIGHT, checkAnswers, continueLabel, copyable, destination, hasHidden, endedLine, entriesAnnouncement, expiryLabel, firstUnanswered, heightForKey, heightFromPointer, savedHeight, savedMax, statusLine, cacheLabel, markdown, inline, attention, MAX_DEPTH, MAX_MARKDOWN, type Block, type Inline } from "./chat-logic.ts";
 import type { ChatView } from "./editor-protocol.ts";
 
 const opts = (...labels: string[]) => labels.map((label) => ({ label }));
@@ -170,22 +170,43 @@ describe("entriesAnnouncement", () => {
   });
 });
 
-describe("busyMeta and chipLabel", () => {
-  it("counts whole seconds since the last activity, with the last tool", () => {
-    assert.equal(busyMeta({ since: 1000, lastAt: 150_000, last: "Bash" }, 192_900), "last activity 0:42 ago · Bash");
-  });
-
-  it("names no tool before one was called, shows hours from one hour on, and reads a clock that moved back as no time", () => {
-    assert.equal(busyMeta({ since: 0, lastAt: 0 }, 3_600_000), "last activity 1:00:00 ago");
-    assert.equal(busyMeta({ since: 5000, lastAt: 5000 }, 1000), "last activity 0:00 ago");
-  });
-
+describe("chipLabel", () => {
   it("puts the working card and its turn's clock in the chip, and what the run waits for otherwise", () => {
     assert.equal(chipLabel(view({ turn: { since: 1000, lastAt: 1000 } }), 192_900), "Implement · 3:11");
     assert.equal(chipLabel(view(), 0), "Implement", "no clock before the turn's first tick");
     assert.equal(chipLabel(view({ card: undefined }), 0), "Working");
     assert.equal(chipLabel(view({ phase: "waiting" }), 0), "Waiting for you");
     assert.equal(chipLabel(view({ phase: "ended" }), 0), undefined);
+  });
+});
+
+describe("activityLine", () => {
+  const whole = (line: ReturnType<typeof activityLine>) => line && `${line.lead}${line.target ?? ""}${line.tail}`;
+
+  it("names the card, the last tool and what it acted on, the turn's clock and the time since its last activity", () => {
+    const line = activityLine(view({ turn: { since: 1000, lastAt: 150_000, last: "Bash", target: "pnpm test" } }), 192_900);
+    assert.deepEqual(line, { lead: "Implement · Bash: ", target: "pnpm test", tail: " · 3:11 · last activity 0:42 ago" });
+    assert.equal(whole(line), "Implement · Bash: pnpm test · 3:11 · last activity 0:42 ago");
+  });
+
+  it("leaves out the tool before one was called, and the target of a call that had none", () => {
+    assert.equal(whole(activityLine(view({ turn: { since: 0, lastAt: 0 } }), 5000)), "Implement · 0:05 · last activity 0:05 ago");
+    assert.deepEqual(activityLine(view({ turn: { since: 0, lastAt: 0, last: "TodoWrite" } }), 0), { lead: "Implement · TodoWrite", tail: " · 0:00 · last activity 0:00 ago" });
+    assert.deepEqual(activityLine(view({ turn: { since: 0, lastAt: 0, target: "stray" } }), 0), { lead: "Implement", tail: " · 0:00 · last activity 0:00 ago" }, "no target without its tool");
+  });
+
+  it("reads Working for a turn with no card, shows hours from one hour on, and reads a clock that moved back as no time", () => {
+    assert.equal(whole(activityLine(view({ card: undefined, turn: { since: 0, lastAt: 5000 } }), 3_600_000)), "Working · 1:00:00 · last activity 59:55 ago");
+    assert.equal(whole(activityLine(view({ turn: { since: 5000, lastAt: 5000 } }), 1000)), "Implement · 0:00 · last activity 0:00 ago");
+  });
+
+  it("shows nothing outside a running turn, without a clock, or while a question is open", () => {
+    const turn = { since: 0, lastAt: 0, last: "Bash", target: "ls" };
+    assert.equal(activityLine(view(), 0), undefined);
+    assert.equal(activityLine(view({ phase: "waiting", turn }), 0), undefined);
+    assert.equal(activityLine(view({ phase: "ended", turn }), 0), undefined);
+    assert.equal(activityLine(view({ phase: "idle", turn }), 0), undefined);
+    assert.equal(activityLine(view({ turn, question: { id: "q1", card: "Implement", questions: [single] } }), 0), undefined);
   });
 });
 
@@ -464,6 +485,41 @@ describe("markdown", () => {
       t(" "),
       { type: "link", href: "https://d.example/i.png", target: "https://d.example/i.png", children: [t("see <https://c.example>")] },
     ]);
+  });
+
+  it("reads the corners of the block syntax: an empty heading or item, all four column alignments, an item's lazy line", () => {
+    assert.deepEqual(markdown("#"), [{ type: "h", level: 1, inline: [] }]);
+    const [table] = markdown("|a|b|c|d|\n|:-|-:|:-:|-|");
+    assert.deepEqual(table?.type === "table" && table.align, ["left", "right", "center", undefined]);
+    assert.deepEqual(markdown("-\n  foo"), [{ type: "list", ordered: false, start: 1, items: [{ blocks: [p(t("foo"))] }] }]);
+    assert.deepEqual(markdown("-\nfoo"), [{ type: "list", ordered: false, start: 1, items: [{ blocks: [] }] }, p(t("foo"))], "a line after an empty item is not part of it");
+    assert.deepEqual(markdown("- a\nb"), [{ type: "list", ordered: false, start: 1, items: [{ blocks: [p(t("a"), { type: "br" }, t("b"))] }] }], "a lazy line joins the item");
+    assert.deepEqual(markdown("- a\n# h"), [{ type: "list", ordered: false, start: 1, items: [{ blocks: [p(t("a"))] }] }, { type: "h", level: 1, inline: [t("h")] }], "a heading ends the item");
+    assert.deepEqual(markdown("3. a\n4. b").map((b) => b.type === "list" && b.start), [3]);
+  });
+
+  it("reads the corners of the inline syntax: escaped and doubled delimiters, words, padded code, and links that are not", () => {
+    assert.deepEqual(inline("****x"), [t("****x")], "a pair with nothing between stays as written");
+    assert.deepEqual(inline("_a_b c"), [t("_a_b c")], "an underscore inside a word does not close");
+    assert.deepEqual(inline("*a \\* b*"), [{ type: "em", children: [t("a * b")] }], "an escaped delimiter does not close");
+    assert.deepEqual(inline("~~a ~~b"), [t("~~a ~~b")]);
+    assert.deepEqual(inline("__a__ _b_"), [{ type: "strong", children: [t("a")] }, t(" "), { type: "em", children: [t("b")] }], "underscores read as strong and em");
+    assert.deepEqual(inline("[a\\]b](u)"), [{ type: "link", target: "u", children: [t("a]b")] }], "an escaped bracket does not close the link's words");
+    assert.deepEqual(inline("`` a ``"), [{ type: "code", text: "a" }], "one padding space on each side is dropped");
+    assert.deepEqual(inline("`  `"), [{ type: "code", text: "  " }], "code of only spaces keeps them");
+    assert.deepEqual(inline("[a](b c)"), [t("[a](b c)")], "a target with a space and no title is not a link");
+    assert.deepEqual(inline("[a](<b c>)"), [{ type: "link", target: "b c", children: [t("a")] }], "angle brackets allow the space");
+    assert.deepEqual(inline("xhttps://a.io and https://b.io"), [t("xhttps://a.io and "), { type: "link", href: "https://b.io/", target: "https://b.io", children: [t("https://b.io")] }], "a web address inside a word is not a link");
+  });
+
+  it("writes emphasis nested past MAX_DEPTH as written, so the markers inside it do not nest further", () => {
+    const leaf = (text: string, quotes: number) => {
+      let [block] = markdown(`${">".repeat(quotes)} ${text}`);
+      for (let level = 0; level < quotes; level++) [block] = (block as Extract<Block, { type: "quote" }>).blocks;
+      return block;
+    };
+    assert.deepEqual(leaf("*a `b` c*", 0), p({ type: "em", children: [t("a "), { type: "code", text: "b" }, t(" c")] }));
+    assert.deepEqual(leaf("*a `b` c*", MAX_DEPTH - 1), p({ type: "em", children: [t("a `b` c")] }), "one level from the cap, the emphasis is read but not what is inside it");
   });
 
   it("shows a reply longer than MAX_MARKDOWN as written, its line breaks kept, without reading its markup", () => {

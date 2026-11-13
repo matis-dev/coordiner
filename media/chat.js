@@ -34,8 +34,13 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
   // Plain text, not a live region: it changes every second. Only the expiry is announced, once.
   const cacheLine = el("p", { class: "chat-cache", hidden: true });
   let cacheTimer;
-  // The same for a running turn: its last sign of life, beside the chip that says how long it has run. Never announced.
-  const busyLine = el("span", { class: "chat-busy", hidden: true });
+  // A running turn's activity, just above the composer where the user's eyes are: the card, the tool it last called and on what, how
+  // long the turn has run and its last sign of life. Plain text, never announced: it changes every second.
+  const activityDot = el("span", { class: "dot", "aria-hidden": "true" });
+  const activityLead = el("span");
+  const activityTarget = el("code", { hidden: true });
+  const activityTail = el("span");
+  const activity = el("p", { class: "chat-activity", hidden: true }, activityDot, activityLead, activityTarget, activityTail);
   let busyTimer;
   // A question the run answers itself when its time runs out shows the time left. Plain text: it changes every second.
   const expiryLine = el("p", { class: "note expiry" });
@@ -107,8 +112,8 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     el("div", { class: "toolbar" }, attachButton, pauseButton, copyButton, mergeButton, nextButton, stopButton, el("div", { class: "primary" }, cancelButton, continueButton, sendButton)),
   );
   const headActions = el("div", { class: "chat-head-actions" }, maxButton, toggle);
-  const body = el("div", { id: "chat-body" }, line, cacheLine, transcript, queuedList, form, composer);
-  root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip, busyLine), headActions), lineNav, body);
+  const body = el("div", { id: "chat-body" }, line, cacheLine, transcript, queuedList, form, activity, composer);
+  root.replaceChildren(el("div", { class: "chat-head" }, el("div", { class: "chat-title" }, title, chip), headActions), lineNav, body);
 
   // The divider between the chains and the chat: the window-splitter pattern, its value the chat's share of the window.
   const { min, max } = logic.CHAT_HEIGHT;
@@ -724,7 +729,7 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     const said = prev && !readByFocus ? logic.announcement(prev, next) : undefined;
     if (said) announce(said);
     showCache(next);
-    showBusy(next);
+    showActivity(next);
     showExpiry(next);
   }
 
@@ -739,15 +744,24 @@ export function startChat({ vscode, root, logic, maxChars, announce, remember })
     expiryTimer = setInterval(tick, 1000);
   }
 
-  // One timer at most, running only while a turn runs; it reads the turn's clock, so a computer that slept shows the right time.
-  function showBusy(next) {
+  // One timer at most, running only while a turn runs; it reads the turn's clock, so a computer that slept shows the right time. It
+  // also ticks the chip, which stays in view when the chat is hidden. The line itself is hidden while a question is open.
+  function showActivity(next) {
     clearInterval(busyTimer);
     busyTimer = undefined;
-    busyLine.hidden = !(next.phase === "running" && next.turn);
-    if (busyLine.hidden) return;
+    activity.hidden = true;
+    if (!(next.phase === "running" && next.turn)) return;
     const tick = () => {
-      busyLine.textContent = logic.busyMeta(next.turn, Date.now());
-      chipText.textContent = logic.chipLabel(next, Date.now());
+      const now = Date.now();
+      const shown = logic.activityLine(next, now);
+      activity.hidden = !shown;
+      if (shown) {
+        activityLead.textContent = shown.lead;
+        activityTarget.textContent = shown.target ?? "";
+        activityTarget.hidden = !shown.target;
+        activityTail.textContent = shown.tail;
+      }
+      chipText.textContent = logic.chipLabel(next, now);
     };
     tick();
     busyTimer = setInterval(tick, 1000);

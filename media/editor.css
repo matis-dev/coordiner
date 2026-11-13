@@ -1,5 +1,5 @@
 /* structure: master-detail, full-height rail, the run's chat docked under the detail column · palette: VS Code theme, anchor textLink (focusBorder is near-invisible in some themes), accent owns Run · type: host UI font, sidebar-style section labels, host editor font for skill names · signature: the fresh-context divider between sessions · critique P4 H4 E4 S5 R4 V4 */
-/* run chat (2026-10-30): head = one status row (title, chip with the card and its clock, last activity) + the line of sessions as stations · transcript grouped by session under folding headings · signature: each session's figures written on the dashed rule it hands over on · critique P4 H4 E4 S4 R4 V4 */
+/* run chat (2026-10-30): head = one status row (title, chip with the card and its clock) + the line of sessions as stations · the running turn's activity line sits above the composer · transcript grouped by session under folding headings · signature: each session's figures written on the dashed rule it hands over on · critique P4 H4 E4 S4 R4 V4 */
 
 :root {
   --gap: 8px;
@@ -537,7 +537,18 @@ section.drop-end { outline: 2px dashed var(--anchor); outline-offset: 4px; borde
 
 .chat-status { margin: 4px 0; color: var(--vscode-descriptionForeground); }
 .chat-cache { margin: 0 0 4px; font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
-.chat-busy { font-size: 0.9em; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+.chat-activity {
+  display: flex;
+  align-items: baseline;
+  margin: 4px 0 0;
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.chat-activity .dot { flex: none; align-self: center; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--anchor); animation: pulse 1.4s ease-in-out infinite; }
+.chat-activity code { font-family: var(--vscode-editor-font-family); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .run-chip { font-variant-numeric: tabular-nums; }
 
 /* The line: the chain's sessions as stations, one row that scrolls sideways rather than wrap. Between two sessions, the fresh-context

@@ -15,8 +15,11 @@ export const MAX_ENTRIES = 1000;
 export type CacheClock = { since: number; ttlMs: number; assumed: boolean };
 
 // The turn running: since when, and the latest sign of life from it (a message, a tool call, the user's answers), with the last
-// tool it called.
-export type TurnClock = { since: number; lastAt: number; last?: string };
+// tool it called and what that call acted on (`target`: the first line of its input, at most MAX_ACTIVITY_TARGET characters).
+export type TurnClock = { since: number; lastAt: number; last?: string; target?: string };
+
+// The longest target the activity line carries; the line itself is cut to its width on the page.
+export const MAX_ACTIVITY_TARGET = 120;
 
 const pad = (n: number): string => String(n).padStart(2, "0");
 function clock(ms: number): string {
@@ -37,10 +40,18 @@ export function cacheLabel(cache: CacheClock, now: number): { text: string; expi
 // Elapsed time counts whole seconds up from the clock, and a clock that moved back reads as no time at all.
 const elapsed = (ms: number): string => clock(Math.max(0, Math.floor(ms / 1000) * 1000));
 
-// Worked out from the clock, as cacheLabel is: a turn that streams nothing for minutes still shows it is alive. How long it has run
-// is in the chip (chipLabel); this is the rest, beside it.
-export function busyMeta(turn: TurnClock, now: number): string {
-  return `last activity ${elapsed(now - turn.lastAt)} ago${turn.last ? ` · ${turn.last}` : ""}`;
+// The line above the composer while a turn runs: the card, the tool it last called and on what, how long the turn has run, and how
+// long since its last sign of life. In parts, so the page can set the target as code; `lead + target + tail` is the whole line.
+// None while a question is open (the question and the chip say what the run waits for), and none outside a running turn.
+export type ActivityLine = { lead: string; target?: string; tail: string };
+
+export function activityLine(chat: ChatView, now: number): ActivityLine | undefined {
+  const { turn } = chat;
+  if (chat.phase !== "running" || !turn || chat.question) return undefined;
+  const card = chat.card ?? "Working";
+  const lead = turn.last ? `${card} · ${turn.last}${turn.target ? ": " : ""}` : card;
+  const tail = ` · ${elapsed(now - turn.since)} · last activity ${elapsed(now - turn.lastAt)} ago`;
+  return { lead, ...(turn.last && turn.target ? { target: turn.target } : {}), tail };
 }
 
 // The chip by the chat's title: the working card and how long its turn has run, or what the run waits for.
@@ -363,7 +374,8 @@ function closeOf(text: string, from: number, delim: string): number {
       j = close === -1 ? j + run - 1 : close + run - 1;
       continue;
     }
-    if (!text.startsWith(delim, j) || /\s/.test(text[j - 1] ?? " ") || j === from) continue;
+    // `from` is past the opening delimiter, so j is at least 1 and has a character before it.
+    if (!text.startsWith(delim, j) || /\s/.test(text[j - 1]!) || j === from) continue;
     // In a run of three, the pair closes at its end, so ***both*** is strong around em.
     let at = j;
     if (delim.length === 2 && text[j + 2] === delim[0]) at = j + 1;

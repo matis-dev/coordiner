@@ -691,33 +691,66 @@ describe("run chat: maximized", () => {
 });
 
 describe("run chat: a running turn", () => {
-  const busyLine = (page: Awaited<ReturnType<typeof open>>) => page.doc.querySelector<HTMLElement>(".chat-busy")!;
+  const activity = (page: Awaited<ReturnType<typeof open>>) => page.doc.querySelector<HTMLElement>(".chat-activity")!;
   afterEach(() => mock.timers.reset());
 
-  it("counts up each second from the turn's clock, with the last activity and tool, as plain text", async () => {
+  it("counts up each second from the turn's clock, with the tool and its target, above the composer, as plain text", async () => {
     const page = await open();
     mock.timers.enable({ apis: ["setInterval", "Date"], now: 75_000 });
-    page.update(view({ turn: { since: 0, lastAt: 60_000, last: "Bash" } }));
-    assert.equal(busyLine(page).hidden, false);
+    page.update(view({ turn: { since: 0, lastAt: 60_000, last: "Bash", target: "pnpm test" } }));
     const chip = page.doc.querySelector(".chat-title .run-chip")!;
-    assert.equal(busyLine(page).parentElement, page.doc.querySelector(".chat-title"), "on the title's row");
-    assert.deepEqual([chip.textContent, busyLine(page).textContent], ["Implement · 1:15", "last activity 0:15 ago · Bash"]);
-    assert.equal(busyLine(page).getAttribute("role"), null);
+    assert.equal(activity(page).hidden, false);
+    assert.equal(activity(page).nextElementSibling, page.doc.querySelector(".composer"), "right above the composer");
+    assert.equal(activity(page).parentElement, page.doc.getElementById("chat-body"));
+    assert.deepEqual([chip.textContent, activity(page).textContent], ["Implement · 1:15", "Implement · Bash: pnpm test · 1:15 · last activity 0:15 ago"]);
+    assert.equal(activity(page).querySelector("code")!.textContent, "pnpm test", "the target is set as code");
+    assert.equal(activity(page).querySelector(".dot")!.getAttribute("aria-hidden"), "true");
+    assert.equal(activity(page).getAttribute("role"), null);
+    assert.equal(activity(page).getAttribute("aria-live"), null);
     mock.timers.tick(1000);
-    assert.deepEqual([chip.textContent, busyLine(page).textContent], ["Implement · 1:16", "last activity 0:16 ago · Bash"]);
+    assert.deepEqual([chip.textContent, activity(page).textContent], ["Implement · 1:16", "Implement · Bash: pnpm test · 1:16 · last activity 0:16 ago"]);
   });
 
-  it("shows nothing while a card waits, and its timer stops with the turn", async () => {
+  it("leaves out the target when the call had none, and the tool before one was called", async () => {
     const page = await open();
     mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.update(view({ turn: { since: 0, lastAt: 0, last: "ExitPlanMode" } }));
+    assert.equal(activity(page).textContent, "Implement · ExitPlanMode · 0:00 · last activity 0:00 ago");
+    assert.equal(activity(page).querySelector<HTMLElement>("code")!.hidden, true);
     page.update(view({ turn: { since: 0, lastAt: 0 } }));
+    assert.equal(activity(page).textContent, "Implement · 0:00 · last activity 0:00 ago");
+  });
+
+  it("shows nothing while a card waits or a question is open, and its timer stops with the turn", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+    page.update(view({ turn: { since: 0, lastAt: 0, last: "Bash", target: "ls" } }));
+    page.update(view({ turn: { since: 0, lastAt: 0 }, question }));
+    assert.equal(activity(page).hidden, true, "a question is open");
+    page.update(view({ turn: { since: 0, lastAt: 0, last: "Bash", target: "ls" } }));
+    assert.equal(activity(page).hidden, false);
     page.update(view({ phase: "waiting", attended: true }));
-    assert.equal(busyLine(page).hidden, true);
-    const shown = busyLine(page).textContent;
+    assert.equal(activity(page).hidden, true);
+    const shown = activity(page).textContent;
     mock.timers.tick(5000);
-    assert.equal(busyLine(page).textContent, shown);
+    assert.equal(activity(page).textContent, shown);
+    assert.equal(activity(page).hidden, true, "no timer brings it back");
     page.update(view());
-    assert.equal(busyLine(page).hidden, true, "a running view without a clock shows nothing");
+    assert.equal(activity(page).hidden, true, "a running view without a clock shows nothing");
+  });
+
+  it("keeps the chip ticking while the chat is hidden", async () => {
+    const page = await open();
+    mock.timers.enable({ apis: ["setInterval", "Date"], now: 10_000 });
+    page.update(view({ turn: { since: 0, lastAt: 10_000, last: "Read", target: "src/run.ts" } }));
+    const toggle = page.doc.querySelector<HTMLButtonElement>("#chat .chat-head-actions button:last-child")!;
+    toggle.click();
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(page.doc.getElementById("chat-body")!.hidden, true);
+    const chip = page.doc.querySelector(".chat-title .run-chip")!;
+    assert.equal(chip.textContent, "Implement · 0:10");
+    mock.timers.tick(1000);
+    assert.equal(chip.textContent, "Implement · 0:11");
   });
 
   it("says once that the answers were sent, and keeps showing the turn", async () => {
@@ -728,7 +761,7 @@ describe("run chat: a running turn", () => {
     page.doc.getElementById("status")!.textContent = "";
     page.update(view({ attended: true, turn: { since: 0, lastAt: Date.now() } }));
     assert.equal(page.status(), "Answers sent; Implement is working on them");
-    assert.equal(busyLine(page).hidden, false);
+    assert.equal(activity(page).hidden, false);
     page.doc.getElementById("status")!.textContent = "";
     page.update(view({ attended: true, turn: { since: 0, lastAt: Date.now() } }));
     assert.equal(page.status(), "");
@@ -786,11 +819,11 @@ describe("run chat: the line of sessions and the session headings", () => {
   const heading = (page: Awaited<ReturnType<typeof open>>, n: number) => page.doc.querySelectorAll<HTMLButtonElement>("#transcript .session-toggle")[n]!;
   const worked = { ms: 61_000, turns: 2, usage: { costUsd: 0.5, input: 1000, output: 200, cacheRead: 3000, cacheWrite: 0 } };
 
-  it("puts the title, the chip and the turn's last activity on one row, and the line under it, outside the body", async () => {
+  it("puts the title and the chip on one row, and the line under it, outside the body", async () => {
     const page = await open();
     page.reset(view({ line }));
     const title = page.doc.querySelector(".chat-title")!;
-    assert.deepEqual([...title.children].map((c) => c.className || c.tagName), ["H2", "run-chip working", "chat-busy"]);
+    assert.deepEqual([...title.children].map((c) => c.className || c.tagName), ["H2", "run-chip working"]);
     const nav = page.doc.querySelector<HTMLElement>(".chat-line")!;
     assert.equal(nav.previousElementSibling, page.doc.querySelector(".chat-head"));
     assert.equal(nav.getAttribute("aria-label"), "Sessions");
@@ -1119,6 +1152,20 @@ describe("run chat: commands in a reply", () => {
     const links = [...reply.querySelectorAll("a")];
     assert.deepEqual(links.map((a) => a.getAttribute("href")), ["https://example.com/"]);
     assert.match(reply.textContent!, /x \(javascript:alert\(1\)\)/);
+  });
+
+  it("renders an ordered list from its start, unchecked tasks, emphasis and strike, and a link whose words are its target", async () => {
+    const page = await open();
+    page.reset(view(), [{ kind: "assistant", card: "Implement", text: "3. *slanted*\n4. ~~gone~~\n\n- [ ] later\n\n[x](x)" }]);
+    const reply = page.entries()[0]!;
+    assert.equal(reply.querySelector("ol")!.getAttribute("start"), "3");
+    assert.equal(reply.querySelector("ol em")!.textContent, "slanted");
+    assert.equal(reply.querySelector("ol del")!.textContent, "gone");
+    const box = reply.querySelector<HTMLInputElement>("ul li.task input")!;
+    assert.deepEqual([box.checked, box.getAttribute("aria-label")], [false, "not done"]);
+    assert.equal(reply.querySelector("p span")!.textContent, "x", "no target shown when the words are the target");
+    page.reset(view(), [{ kind: "assistant", card: "Implement", text: "1. one" }]);
+    assert.equal(page.entries()[0]!.querySelector("ol")!.hasAttribute("start"), false, "a list from 1 sets no start");
   });
 
   it("renders markup inside a fenced block as text", async () => {

@@ -10,7 +10,7 @@ import type { Spend } from "./session.ts";
 import type { ModelOption } from "./skills.ts";
 import { Talk, type TalkSnapshot } from "./talk.ts";
 import { plain } from "./text.ts";
-import { DEFAULT_MODEL, endEntry, entriesFrom, Transcript, type Entry, type Worked } from "./transcript.ts";
+import { DEFAULT_MODEL, endEntry, entriesFrom, lastCall, Transcript, type Entry, type Worked } from "./transcript.ts";
 import { interactiveCanUseTool, sleep as realSleep, unattendedCanUseTool, type DecidedAfter, type QuestionWait } from "./unattended.ts";
 
 // One run's chat, wired to the outside: the chains editor (through `post`), the journal, and the editor's attention. Kept out of
@@ -224,8 +224,13 @@ export function createRunChat({ title, post, record, moved, needsYou, log, quest
         const entries = entriesFrom(message, snapshot.card ?? "");
         add(entries);
         if (snapshot.phase !== "running" || !turn) return;
-        const tool = entries.findLast((e) => e.kind === "tool");
-        turn = { ...turn, lastAt: now(), ...(tool?.kind === "tool" ? { last: tool.name } : {}) };
+        const call = lastCall(message);
+        if (!call) turn = { ...turn, lastAt: now() };
+        else {
+          // A new tool replaces the old one's target, so a call with no input shows no stale one.
+          const { target: _old, ...rest } = turn;
+          turn = { ...rest, lastAt: now(), ...call };
+        }
         post({ type: "chatUpdate", chat: viewOf(snapshot) });
       },
     }),

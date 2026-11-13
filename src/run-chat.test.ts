@@ -2,6 +2,7 @@ import { said as words, type ImageRef } from "./images.ts";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { CanUseTool, SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
+import { MAX_ACTIVITY_TARGET } from "./chat-logic.ts";
 import type { ChatMessage } from "./editor-protocol.ts";
 import type { JournalRecord } from "./journal.ts";
 import { AFTER_NOTE, CHAT_NOTE, INTERACTIVE_NOTE, suggestionNote, UNATTENDED_NOTE } from "./protocol.ts";
@@ -147,6 +148,25 @@ describe("createRunChat", () => {
     assert.equal(chat.view().turn?.since, 100, "another turn of the same card keeps the clock");
     chat.talk.at({ card: "Implement", index: 1, session: 0, attended: false });
     assert.deepEqual(chat.view().turn, { since: 400, lastAt: 400 });
+  });
+
+  it("stamps what the last tool acted on: its input's first line, clipped, and none for a call without one", () => {
+    let clock = 100;
+    const { chat } = setup(() => clock);
+    const call = (name: string, input: unknown) => ({ ...said(""), message: { content: [{ type: "tool_use", name, input }] } }) as unknown as SDKAssistantMessage;
+    chat.talk.at({ card: "Implement", index: 0, session: 0, attended: false });
+    clock = 200;
+    chat.forTurn("unattended").onMessage(call("Bash", { command: "  pnpm test\necho done" }));
+    assert.deepEqual(chat.view().turn, { since: 100, lastAt: 200, last: "Bash", target: "pnpm test" });
+    clock = 300;
+    chat.forTurn("unattended").onMessage(said("running the tests"));
+    assert.deepEqual(chat.view().turn, { since: 100, lastAt: 300, last: "Bash", target: "pnpm test" }, "a reply keeps the target");
+    chat.forTurn("unattended").onMessage(call("Grep", { pattern: "TODO", path: "src" }));
+    assert.equal(chat.view().turn?.target, "TODO", "a tool with several telling fields shows the first one's value, not `pattern: …`");
+    chat.forTurn("unattended").onMessage(call("Read", { file_path: "x".repeat(200) }));
+    assert.equal(chat.view().turn?.target, `${"x".repeat(MAX_ACTIVITY_TARGET)}…`);
+    chat.forTurn("unattended").onMessage(call("ExitPlanMode", {}));
+    assert.deepEqual(chat.view().turn, { since: 100, lastAt: 300, last: "ExitPlanMode" }, "a call with no input leaves no stale target");
   });
 
   it("counts the user's answers as activity, and shows no clock while the card waits", async () => {

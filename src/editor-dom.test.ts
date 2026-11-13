@@ -374,6 +374,35 @@ describe("chains webview: moving cards across sessions", () => {
     assert.ok(page.named("Late"));
   });
 
+  it("sets the move effect when the browser gives the drag a data transfer, and copes with none", async () => {
+    const page = await openSplit();
+    const transfer = { effectAllowed: "uninitialized" };
+    const start = new page.w.Event("dragstart", { bubbles: true, cancelable: true });
+    Object.defineProperty(start, "dataTransfer", { value: transfer });
+    handle(page, "p").dispatchEvent(start);
+    assert.equal(transfer.effectAllowed, "move");
+    fire(page, page.doc, "dragend");
+  });
+
+  it("renders a state held back mid-drag when the card is dropped where it was, since no save does", async () => {
+    const page = await openSplit();
+    fire(page, handle(page, "q"), "dragstart");
+    page.send({ chains: [own, other, split, { ...other, id: "late", name: "Late" }] });
+    assert.equal(page.all("#rail button").some((b) => b.textContent === "Late"), false);
+    fire(page, sessionOf(page, 0), "dragover");
+    fire(page, sessionOf(page, 0), "drop");
+    assert.deepEqual(page.saves(), [], "dropped where it was: nothing to save");
+    assert.ok(page.named("Late"));
+  });
+
+  it("ignores the end of a drag that never started here", async () => {
+    const page = await openSplit();
+    const before = page.doc.getElementById("detail")!.innerHTML;
+    fire(page, page.doc, "dragend");
+    assert.equal(page.doc.getElementById("detail")!.innerHTML, before);
+    assert.deepEqual(page.saves(), []);
+  });
+
   it("offers no drag on a template", async () => {
     const page = await open();
     page.send();

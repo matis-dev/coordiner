@@ -215,6 +215,11 @@ describe("moving cards", () => {
     assert.equal(moveTarget(three, 2, 2, 1), undefined);
   });
 
+  it("treats a session that is no longer in the chain as empty: an arrow from it moves nothing, a drop on it lands first", () => {
+    assert.equal(moveTarget(three, 7, 0, 1), undefined);
+    assert.deepEqual(dropTarget(three, { s: 0, i: 0 }, 7), { s: 7, i: 0 });
+  });
+
   it("puts a dropped card before the card it was dropped on, counting without the card itself", () => {
     assert.deepEqual(dropTarget(three, { s: 0, i: 0 }, 2, 1), { s: 2, i: 1 });
     assert.deepEqual(dropTarget(three, { s: 2, i: 0 }, 2, 2), { s: 2, i: 1 }, "later in its own session: one place less");

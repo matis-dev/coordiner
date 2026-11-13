@@ -1,5 +1,5 @@
 import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
-import { MAX_ENTRIES } from "./chat-logic.ts";
+import { MAX_ACTIVITY_TARGET, MAX_ENTRIES, type TurnClock } from "./chat-logic.ts";
 import type { Effort } from "./chains.ts";
 import type { ImageChip } from "./images.ts";
 import type { Outcome, StepStatus } from "./run.ts";
@@ -74,6 +74,20 @@ export function toolInput(name: string, input: unknown): string {
   if (telling.length === 1) return asText(fields[telling[0]!]);
   const keys = telling.length > 0 ? telling : Object.keys(fields);
   return keys.map((key) => `${key}: ${asText(fields[key])}`).join("\n");
+}
+
+// The message's last tool call as the activity line names it: the tool, and what it acted on (the first field that says what it
+// does, so a Grep shows its pattern rather than `pattern: …`; otherwise the first line of its input as read).
+export function lastCall(message: SDKAssistantMessage): Pick<TurnClock, "last" | "target"> | undefined {
+  let call: { name: string; input: unknown } | undefined;
+  for (const block of message.message.content) if (block.type === "tool_use") call = block;
+  if (!call) return undefined;
+  const { name, input } = call;
+  const fields = input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : undefined;
+  const key = fields && TELLING[name]?.find((k) => fields[k] !== undefined);
+  const text = fields && key ? asText(fields[key]) : toolInput(name, input);
+  const target = clip(plain(text).split("\n")[0]!.trim(), MAX_ACTIVITY_TARGET);
+  return { last: plain(name), ...(target ? { target } : {}) };
 }
 
 // Text and tool calls only; thinking and any other block are left out.

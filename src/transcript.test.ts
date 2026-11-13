@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { SDKAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { MAX_ENTRIES } from "./chat-logic.ts";
-import { endEntry, entriesFrom, toolInput, Transcript, type Entry } from "./transcript.ts";
+import { endEntry, entriesFrom, lastCall, toolInput, Transcript, type Entry } from "./transcript.ts";
 
 // Fixtures carry only the fields entriesFrom reads.
 const assistant = (...content: object[]) => ({ type: "assistant", parent_tool_use_id: null, message: { content } }) as unknown as SDKAssistantMessage;
@@ -40,6 +40,27 @@ describe("entriesFrom", () => {
       { kind: "assistant", card: "Plan", text: "red [31mtext" },
       { kind: "tool", card: "Plan", name: "Bash", input: "" },
     ]);
+  });
+});
+
+describe("lastCall", () => {
+  const use = (name: string, input: unknown) => ({ type: "tool_use", id: "t", name, input });
+
+  it("names the message's last tool and the value of its first telling field", () => {
+    assert.deepEqual(lastCall(assistant(use("Read", { file_path: "a.ts" }), { type: "text", text: "then" }, use("Grep", { pattern: "TODO", path: "src" }))), { last: "Grep", target: "TODO" });
+    assert.deepEqual(lastCall(assistant(use("Skill", { skill: "m-skills:x", args: "now" }))), { last: "Skill", target: "m-skills:x" });
+  });
+
+  it("falls back to the first line of the input as read, and gives no target for an empty one", () => {
+    assert.deepEqual(lastCall(assistant(use("TodoWrite", { todos: [{ content: "one", status: "completed" }, { content: "two" }] }))), { last: "TodoWrite", target: "[x] one" });
+    assert.deepEqual(lastCall(assistant(use("Bash", { command: "  pnpm test\necho done" }))), { last: "Bash", target: "pnpm test" });
+    assert.deepEqual(lastCall(assistant(use("Stop", undefined))), { last: "Stop" });
+    assert.deepEqual(lastCall(assistant(use("Ba\u0007sh", {}))), { last: "Bash" }, "escapes stripped from the name");
+    assert.deepEqual(lastCall(assistant(use("Bash", { command: "ls\u001b[0m" }))), { last: "Bash", target: "ls[0m" }, "and from the target");
+  });
+
+  it("finds none in a message without a tool call", () => {
+    assert.equal(lastCall(assistant({ type: "text", text: "done" })), undefined);
   });
 });
 
